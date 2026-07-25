@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 ProviderResult = tuple[str, str]
 
-_DEFAULT_MODEL = "anthropic/claude-opus-4.8"
+_DEFAULT_MODEL = "anthropic/claude-opus-5"
 # Market provider sections only (already line-filtered; small). Research
 # sections are NOT hard-truncated any more — see _fit_sections_to_budget.
 _MAX_PROVIDER_CHARS = 24_000

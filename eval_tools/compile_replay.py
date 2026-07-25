@@ -10,7 +10,7 @@ prints the new brief alongside the old one saved in research.md.
 Usage:
     poetry run python eval_tools/compile_replay.py 2026-06-25_09-01/<question_dir> [--save]
 
-Nothing is submitted to Metaculus. Cost is one compiler call (Opus 4.8; roughly
+Nothing is submitted to Metaculus. Cost is one compiler call (Opus 5; roughly
 $0.15 at the 44267 run's size: ~19k input / ~2k output tokens).
 
 To mirror the live pipeline, the saved artifact_check is passed through the

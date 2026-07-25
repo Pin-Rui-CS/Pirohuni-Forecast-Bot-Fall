@@ -45,7 +45,7 @@ NUM_RUNS_PER_QUESTION = 3
 # cost can be a multiple of the $5/$30 sticker. Note Gemini 3.1 Pro is
 # currently unreachable via the OpenRouter BYOK Google key (free tier, daily
 # limit 0) until that key has billing enabled or BYOK is disabled.
-DEFAULT_FORECASTER_MODEL = "anthropic/claude-opus-4.8"
+DEFAULT_FORECASTER_MODEL = "anthropic/claude-opus-5"
 FORECASTER_MODELS = _env_list(
     "FORECASTER_MODELS",
     [

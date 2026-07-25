@@ -307,7 +307,7 @@ def _user_message(prompt: str, cache_static_prefix: bool) -> dict:
 
 async def call_llm(
     prompt: str,
-    model: str = "anthropic/claude-opus-4.8",
+    model: str = "anthropic/claude-opus-5",
     temperature: float = 0.3,
     use_tools: bool = False,
     _label: str = "forecast",
