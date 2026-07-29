@@ -95,7 +95,12 @@ class QuestionArtifacts:
         lines += ["## Final", final_summary, ""]
         return self._write("runs.md", "\n".join(lines))
 
-    def save_audit(self, usage_yaml_table: str, url_events: list[Any]) -> str:
+    def save_audit(
+        self,
+        usage_yaml_table: str,
+        url_events: list[Any],
+        fetch_budget: dict[str, Any] | None = None,
+    ) -> str:
         """Write audit.md: per-question token usage and full URL/scrape ledger."""
         lines = [
             f"# Audit — {self.title}",
@@ -107,6 +112,9 @@ class QuestionArtifacts:
             usage_yaml_table or "(none)",
             "```",
             "",
+        ]
+        lines += _format_fetch_budget(fetch_budget)
+        lines += [
             "## Research Sources",
             "",
         ]
@@ -134,6 +142,32 @@ _ROLE_ORDER = {"candidate": 0, "ranked-for-scrape": 1, "scraped": 2}
 
 def _audit_cell(value: Any) -> str:
     return str(value).replace("|", "\\|").replace("\r", " ").replace("\n", " ").strip()
+
+
+def _format_fetch_budget(fetch_budget: dict[str, Any] | None) -> list[str]:
+    """Render the paid-fetch ledger.
+
+    audit.md recorded LLM tokens to six decimal places and *nothing* about
+    fetch credits, so a post-mortem could not tell whether a failed retrieval
+    was budget-starved or never attempted. Diagnosing 44875 stalled exactly
+    here: its resolution source failed five times while 24 of 25 Firecrawl
+    credits went unspent, and the logs could not say why.
+    """
+    if not fetch_budget:
+        return []
+    spent = fetch_budget.get("firecrawl_credits_spent")
+    cap = fetch_budget.get("firecrawl_credit_cap")
+    lines = ["## Fetch Budget (this question)", ""]
+    if spent is not None and cap:
+        lines.append(f"- Firecrawl credits: **{spent} / {cap}** spent ({cap - spent} unused)")
+    elif spent is not None:
+        lines.append(f"- Firecrawl credits spent: **{spent}**")
+    if fetch_budget.get("firecrawl_exhausted"):
+        lines.append("- Firecrawl was DISABLED mid-run (credit/auth error) — see logs")
+    if fetch_budget.get("general_scrape_enabled") is False:
+        lines.append("- Firecrawl general-research scraping was disabled by config")
+    lines.append("")
+    return lines
 
 
 def _format_url_events(url_events: list[Any]) -> list[str]:

@@ -217,12 +217,23 @@ async def firecrawl_scrape_markdown(
     *,
     max_age_ms: int = RESOLUTION_MAX_AGE_MS,
     priority: bool = False,
+    wait_for_ms: int = 0,
+    only_main_content: bool | None = None,
 ) -> str:
     """Scrape one page with Firecrawl's /v2/scrape endpoint; return raw markdown.
 
     Single-page only — no crawling or link-following. Returns "" if the page
     yielded no markdown. See the module docstring for the error contract and
     budget semantics; ``priority=True`` marks a resolution-path scrape.
+
+    ``wait_for_ms`` holds the render open before extracting, for pages whose
+    data arrives via client-side JS after the HTML. Measured on
+    bsky.jazco.dev/stats (44875's resolution source, which returned 250 chars
+    of boilerplate on every ordinary fetch): with ``wait_for_ms=8000`` the
+    aggregate counters and the page's "last updated" timestamp appear, neither
+    of which is in the DOM without the wait. ``only_main_content=False`` keeps
+    page chrome, where such widgets often live. Both cost extra latency, so the
+    ladder only spends them after an ordinary fetch came back inadequate.
     """
     if _exhausted:
         raise FirecrawlCreditError("Firecrawl disabled for this run (credits/auth exhausted).")
@@ -243,10 +254,14 @@ async def firecrawl_scrape_markdown(
     payload = {
         "url": url,
         "formats": ["markdown"],
-        "onlyMainContent": ONLY_MAIN_CONTENT,
+        "onlyMainContent": (
+            ONLY_MAIN_CONTENT if only_main_content is None else bool(only_main_content)
+        ),
         "maxAge": max_age_ms,
         "timeout": max(1, int(timeout)) * 1000,
     }
+    if wait_for_ms > 0:
+        payload["waitFor"] = int(wait_for_ms)
 
     try:
         response = await _post_scrape(payload, timeout)

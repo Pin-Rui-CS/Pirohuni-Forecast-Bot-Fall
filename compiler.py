@@ -33,6 +33,19 @@ _MAX_PROVIDER_CHARS = 24_000
 # sat deep in the search-snippet dump, and the compiler built a one-sided
 # brief from what was left.
 _COMPILER_INPUT_BUDGET_CHARS = 120_000
+# Output cap for the brief. Was a hard-coded 6000, which 44875 hit exactly —
+# the brief died mid-token and the failure was invisible because the only
+# check was `if not content.strip()`. Output is the minority of this call's
+# cost (41% on the 44875 run), so headroom here is cheap next to shipping a
+# brief whose Market Signals section an evidence item references but which
+# does not exist.
+_COMPILER_MAX_OUTPUT_TOKENS = 10_000
+_TRUNCATION_NOTICE = (
+    "\n\n---\n**[COMPILER TRUNCATION WARNING]** This brief hit the compiler's output "
+    "limit and stops mid-sentence above. Sections that would have followed are MISSING, "
+    "not empty — if an evidence item references a section you cannot find, that is why. "
+    "Treat the absence of a section as unknown, never as evidence of nothing.\n"
+)
 _PRECOMPRESS_MODEL = "anthropic/claude-sonnet-5"
 _MAX_PRECOMPRESS_CALLS = 3
 _PRECOMPRESS_CHUNK_CHARS = 90_000
@@ -643,21 +656,44 @@ async def _try_llm_compile(
             usage_handle = MonetaryCostManager.start_openrouter_call(
                 "compiler/research-brief",
                 model,
-                {"messages": messages, "max_tokens": 6000},
+                {"messages": messages, "max_tokens": _COMPILER_MAX_OUTPUT_TOKENS},
             )
             response = await client.chat.completions.create(
                 model=model,
                 messages=messages,
                 temperature=0.1,
-                max_tokens=6000,
+                max_tokens=_COMPILER_MAX_OUTPUT_TOKENS,
                 stream=False,
                 extra_body=OPENROUTER_USAGE_ACCOUNTING,
             )
         usage_handle.record_response(response)
         logger.info("research-compiler | model=%s | OpenRouter usage recorded", model)
-        content = response.choices[0].message.content
+        choice = response.choices[0]
+        content = choice.message.content
         if not content or not content.strip():
             return None
+        # A brief cut off at the output cap is non-empty, so the old
+        # `if not content.strip()` guard passed it through silently: 44875
+        # shipped a brief ending mid-token at "- [I2] From [E", losing the rest
+        # of Derived Implications and the whole Market Signals section that an
+        # evidence item pointed at. finish_reason is the only signal that
+        # distinguishes that from a brief the model chose to end.
+        if str(getattr(choice, "finish_reason", "") or "").lower() == "length":
+            logger.warning(
+                "research-compiler | brief hit the %d-token output cap and is TRUNCATED "
+                "(%d chars). Raise _COMPILER_MAX_OUTPUT_TOKENS or shrink the input.",
+                _COMPILER_MAX_OUTPUT_TOKENS,
+                len(content),
+            )
+            research_trace.emit(
+                "brief",
+                "compiler output TRUNCATED at output cap",
+                content,
+                status="truncated",
+                error=f"finish_reason=length at max_tokens={_COMPILER_MAX_OUTPUT_TOKENS}",
+                meta={"chain": "brief", "max_tokens": _COMPILER_MAX_OUTPUT_TOKENS},
+            )
+            content = content.rstrip() + _TRUNCATION_NOTICE
         return _normalise_compiled_report(content)
     except HardLimitExceededError:
         raise

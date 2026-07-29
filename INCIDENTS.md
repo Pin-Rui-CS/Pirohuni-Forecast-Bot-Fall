@@ -7,6 +7,335 @@ re-deriving the same diagnosis twice — read this before touching the forecasti
 
 ---
 
+## 2026-07-29 — Fix for the 44875 retrieval failure: free series-discovery ladder + deterministic reducer. Three of five test sources solved; the two "failures" turned out to be a rate limit and a dead website
+
+| | |
+|---|---|
+| **Severity** | N/A — this is the remediation entry for the 2026-07-28 incident below, recorded because the measurements overturned two design conclusions that were being acted on |
+| **Built** | 2026-07-29 — **not yet committed, not yet run in a live pipeline** |
+| **New files** | `series_gate.py`, `series_discovery.py`, `series_reduce.py`; tests `tests/test_series_gate.py` (38 offline checks), `tests/test_series_live.py`, `tests/test_series_wiring.py` |
+| **Touched** | `resolution_criteria_scraper.py` (`_build_measured_series_section`, `_truncation_notice`), `research/pipeline.py` + `orchestrator.py` (thread `question_type`), `forecasters/numeric.py` (MEASURED SERIES OVERRIDE rule) |
+| **Cost** | Zero OpenRouter tokens, zero Firecrawl credits, no browser. Plain HTTP and regex |
+
+### What was built
+A retrieval ladder that runs on **the primary resolution URL only**, and only
+for `numeric`/`discrete` questions — the sole case where a historical trend is
+what is being asked for. Rungs: page as served (following meta-refresh/JS
+redirects) → JSON in inline `<script>` → iframes one level deep → endpoints
+regexed out of the page and its JS bundles, ranked deterministically.
+
+Whatever it retrieves is reduced **at the point of retrieval, while its
+structure is still known**, into a ~2–3 KB table: current level, N-period means,
+monthly means with MoM, day-of-week factors, outage/partial-row exclusions, and
+empirical h-ahead ratio quantiles at two lookback windows.
+
+### Three design conclusions the measurements overturned
+1. **The escalation trigger cannot be a "looks like an empty JS shell"
+   heuristic.** That was the first implementation. FRED, Our World in Data and
+   FiveThirtyEight all serve bulky HTML, never tripped it, and yielded nothing.
+   The trigger is the gate itself: *did we end up holding ≥100 (period, number)
+   rows?* Non-emptiness is equally useless — the 250-byte shell that caused
+   44875 is a valid HTTP 200.
+2. **Browser network capture is not the answer.** The prior session measured it
+   at 1-for-4 and had already reversed its own recommendation. The browserless
+   bundle-regex path beat it at lower cost. Not built.
+3. **The always-on 5-credit Firecrawl crawl was dropped.** Measured: 5 credits,
+   site graph, no data — while the free rung returned the full series. It also
+   cannot be expressed by the current budget code (`_try_charge` increments by
+   1, `research/firecrawl_scrape.py:153`), and an under-funded crawl 402s, which
+   trips `_looks_like_exhaustion` and disables Firecrawl for the entire run.
+
+### The gate was the failure point, not the discovery — three times
+Every near-miss during development was correct data being **rejected by a
+too-narrow parser**, which from the outside is indistinguishable from a
+retrieval failure:
+
+| Source | Discovery | Why it was rejected |
+|---|---|---|
+| Our World in Data | correct CSV, first attempt | periods are bare years (`1950`), not ISO dates |
+| Silver Bulletin | correct CSV | dates are `1/21/2025`, not `01/21/2025` |
+| Silver Bulletin | same payload | CSV was not parsed at all |
+
+Hence one parser serving both the gate and the reducer (they can never disagree
+about what counts as data), deliberately permissive period recognition, and
+`SeriesTable.rejection_reason`. Two further bugs were caught by the offline
+tests: column order came from a **set**, making the chosen metric
+non-deterministic between runs; and a metric hint of "approve" tied `approve`
+with `approve_lo`, which would have reported a confidence bound as the level.
+
+### Results
+
+| Source | Outcome |
+|---|---|
+| `bsky.jazco.dev/stats` (44875) | **1,248 rows** via `bsky-search.jazco.io/stats`. 232,860 ch → 3,011 ch |
+| `natesilver.net` Trump approval | **554 rows** via a Datawrapper iframe + a **28-hop meta-refresh chain** → `static.dwcdn.net/data/kSCt4.csv` |
+| Our World in Data grapher | **21,565 rows**; correctly refused as panel data (265 entities) rather than reporting Zimbabwe's 2023 value as "the latest" |
+| FRED | Rate-limits plain clients (first GET 200, later ReadTimeout). Firecrawl at rung 1 likely covers it |
+| FiveThirtyEight | **The site is gone** — see below |
+
+On 44875 the reducer reproduces the hand-analysis exactly (monthly means
+1,101,573 / 1,226,853 / 1,168,502 / …) and yields a 30-day implied sigma of
+**0.027** (recent window) or 0.066 (long window, which includes the January Grok
+spike). The ensemble used **0.175–0.34**. Per the score decomposition in the
+entry below, width is worth 3.08× and centre only 1.02× — so this table, not the
+retrieval, is where the recoverable score lives.
+
+### FiveThirtyEight: the ladder was right and the premise was wrong
+Initially recorded as "the data URL is built at runtime, no literal exists to
+find." **That was an inference from absence** — the probe had a `MAX_BUNDLES = 5`
+cap and the page advertises 31 scripts. Re-run with the cap removed: all 31
+bundles, 8.1 MB, **zero** approval-related data URLs; the only `.json` strings
+are ABC News election files from 2020/2024 and a web manifest.
+
+The bundles explain themselves — `Bootstrap.js`, `abcnews-*.js`,
+`distroSection`, `floodlight_global` — that is ABC News site chrome, not a
+polling application. Following the request confirms it:
+
+```
+https://projects.fivethirtyeight.com/polls/approval/donald-trump/
+  -> 200, final URL: https://abcnews.com/politics
+```
+
+Every FiveThirtyEight URL now redirects to a generic ABC politics landing page
+(ABC shut FiveThirtyEight down in March 2025). The identical `310,436 ch`
+responses the first probe saw across unrelated candidate URLs were all this same
+page. **The gate returning "no series" was correct behaviour on a source that no
+longer exists**, and no amount of extra retrieval machinery could have changed
+it.
+
+Generalisable lesson, not yet implemented: *a resolution source whose final URL
+lands on a different host with the path collapsed to a site root or section is a
+dead source*, and a question resolving off one cannot resolve as written. That is
+cheaply detectable and deserves a loud flag rather than a quiet "no data" —
+otherwise the bot forecasts against a premise that has already failed.
+
+### Also fixed here
+Truncation now states its damage in-band, in both `_clean_content` and
+`_truncate_scrape_content`:
+`[TRUNCATED: kept the first 8,000 of 232,492 chars (96.6% discarded, from the
+END of the document). Absence of a fact below is NOT evidence the source lacks
+it.]` A silent head-cut is indistinguishable downstream from a page that never
+carried the data — the shared symptom of the 44382, 44512, 44619 and 44875
+misses.
+
+### Known gaps
+- `feedback_loop/research_pipeline.py` is a separate copy of the pipeline and
+  does not pass `question_type`; the feature is inert on that path.
+- No compiler bypass. The block carries a "reproduce verbatim" instruction and
+  `compiler.py:808` already says to reproduce time-series rows verbatim, but
+  the compiler is measured to keep ~1 fact in 5 from every section. If it shreds
+  the table in a live run, that is the next fix.
+- No live pipeline run has happened yet.
+
+---
+
+## 2026-07-28 — JS-rendered resolution source scraped to 250 chars and recorded `ok`; the question's own scaled range never reached the forecaster → 44875 submitted 12.7% of its mass inside the answer space
+
+| | |
+|---|---|
+| **Severity** | High — 44875 (Bluesky daily likers on 2026-08-31, `numeric`, range 1,000,000–1,100,000) submitted a CDF with **54.1% below the lower bound, 12.7% in range, 33.2% above**. The reasoning was sound; the distribution was shaped by two mechanical defects |
+| **Introduced** | Both long-standing. The scrape ladder has always gated each rung on `content.strip()`; `build_numeric_prompt` has emitted an empty bound message for open bounds since the numeric path was written |
+| **Detected** | 2026-07-28 — post-mortem of run `2026-07-27_12-02`, question 44875 |
+| **Diagnosed & fixed** | 2026-07-28 — **not yet committed** (see The fix) |
+| **Affected window** | Defect A: every question whose decisive source is client-side rendered, paywalled, or bot-walled. Defect B: **every open-bounded numeric/discrete question ever forecast** |
+
+### Symptom
+`bsky.jazco.dev/stats` — the exact resolution source — was fetched five times
+across three URL variants and returned **246–250 chars of navigation
+boilerplate every time**, with zero numbers. All five were recorded `status:
+ok`. The artifact check correctly returned `missing` / `forecast_swing:
+decisive` twice, the retry failed, and three forecasters then extrapolated from
+a secondary chart-read (James Ball, ~1.1m daily likers, April 2026), widened
+for the missing artifact as instructed, and produced medians of 900K–970K with
+90% intervals ~5× wider than the entire question range.
+
+### Root cause
+Two independent defects that compounded.
+
+**A. The scrape ladder could not tell "fetched" from "fetched what we came
+for."** Every rung gated on `if content.strip():` (`serp_research.py`), which
+asks whether bytes came back, not whether the page's data came back. 250 chars
+of chrome is truthy, so the ladder **short-circuited at rung 1** and Crawl4AI
+and Wayback never ran for that URL. This is the 2026-07-09 PDF lesson
+recurring one layer over: that fix made non-HTML *visibly* fail, but a page
+that renders fine and loads its data by XHR afterwards still passed as success.
+
+**B. The question's own answer space never reached the forecaster.**
+`build_numeric_prompt` emitted `upper_bound_message = ""` when
+`open_upper_bound` was set, and likewise for the lower bound; the
+`distribution_guidance` branch returns `("", "")` for anything that is not
+`discrete`. With both bounds open — the common case — **the strings
+`1000000` and `1100000` appeared nowhere in the prompt.** Verified against the
+run: every occurrence of "1,100,000" in `runs.md` traces to evidence item
+[E2], never to the bounds. The forecasters were reasoning about an unanchored
+quantity, and the CDF machinery then projected their answer onto a grid they
+were never told existed.
+
+The range is not merely output plumbing. It is chosen by someone who could
+observe the quantity's current level, it never fails to retrieve, and it is the
+only anchor that survives a failed scrape — i.e. it is most valuable exactly
+when the bot currently ignores it.
+
+### Contributing defects in the same run (all fixed here)
+- **Compiler brief truncated silently.** `max_tokens=6000` hard-coded; the run
+  reported `native out = 6000` exactly. The brief died mid-token at `- [I2]
+  From [E`, losing the rest of Derived Implications and the entire **Market
+  Signals** section that evidence item [E15] forward-references. The only guard
+  was `if not content.strip()`, which a truncated brief passes. Two of three
+  forecasters *detected* the truncation in their Phase 0 audit and forecast
+  anyway — Phase 0 has no power to halt.
+- **Artifact-check head-truncation (the 44512 defect, still live).**
+  `verify_required_artifact` head-cut each provider section at 8,000 chars
+  under a 40K total. In 44512 the retry had *successfully retrieved* the
+  by-sport gold table, but it sat 8,717 chars into a 13,163-char section and
+  the cut missed it by 717 chars, so the post-retry refresh re-declared the
+  artifact missing and the banner froze that verdict as authoritative.
+- **Retry re-fetched what it already had.** Two of the focused retry's four
+  scrapes were **cache hits** on URLs the main pass had fetched minutes
+  earlier; a third was `docs.bsky.app/blog/create-post`, which the ranker
+  itself had labelled "low relevance". The retry cost $0.198 (11.3% of the
+  run), produced zero new evidence, and then occupied 25.2% of the compiler's
+  input as duplicates. 24 of the 24 ranked-but-unscraped URLs from the main
+  pass were never offered to it.
+- **Tracking params split one page into three.** `?ref=…` survived
+  `_canonical_link`, so `bsky.jazco.dev/stats` and
+  `bsky.jazco.dev/stats?ref=little-flying-robots.ghost.io` were ranked and
+  fetched separately; the novelty detector flagged the second as "0 new bytes"
+  *after* paying.
+- **Query plan regenerated per provider.** The chain (SerpAPI → Tavily →
+  Firecrawl) has each provider build its own plan from byte-identical inputs.
+  44875 paid for two and used one; the fallen-through provider left an orphan
+  cost row and **no trace entry at all**, because a successful fallback is by
+  design not "degraded".
+- **No fetch-credit accounting anywhere.** `audit.md` records LLM tokens to six
+  decimal places and zero fetch credits. The run spent **1 of its 25** Firecrawl
+  credits while its resolution source failed five times, and the logs could not
+  say why. This blocked the diagnosis directly.
+
+### The fix
+Defect B first — it is the one that would have moved 44875's number.
+
+- **`forecasters/numeric.py` — `answer_space_blocks()`.** The scaled range is
+  now stated unconditionally. Closed bounds keep the hard-constraint wording;
+  open bounds are declared open *and* framed as evidence: an informative prior,
+  explicitly **not** a hard limit, weighted **up** when the Required Artifact
+  Status reports a missing artifact and **down** against dated on-metric data
+  that disagrees. A Phase-4 **answer-space check** requires the model to state
+  P(below), P(in range), P(above) and, below 40% in-range, to argue for
+  contradicting the question's own band rather than arrive there silently.
+  `_format_bound` renders `1,000,000`, not `1e+06`.
+- **`research/serp_research.py` — `scrape_adequacy()` + `thin_content_banner()`.**
+  Each rung now gates on adequacy (500-char floor; wall/placeholder markers
+  consulted only on short pages so a long article mentioning "access denied"
+  still passes). The design point that makes the threshold safe: **adequacy
+  governs effort, not truth.** Inadequate content is never discarded — the
+  ladder keeps the best attempt, keeps escalating, and if every rung comes back
+  thin returns the longest one behind a banner stating that absence of a value
+  here is *not* evidence the value does not exist. Cache-served copies are
+  marked too (44875's retry got its thin copy from cache, unmarked). Trace
+  status `thin` is now distinct from `ok` and `failed`.
+- **Render-wait ladder rung** (`firecrawl_scrape_markdown(wait_for_ms=,
+  only_main_content=)`), reached only after an ordinary fetch came back thin.
+  Verified live against the real page: `waitFor=8000` surfaces the aggregate
+  counters **and the page's "last updated" timestamp**, neither of which is in
+  the DOM without it — the run had recorded that timestamp as unobtainable.
+  **It does not recover the daily-likers series**, which lives in a chart and
+  has no text representation at any wait; measured, not assumed.
+- **`research/pipeline.py` — `fit_artifact_check_sections()`** replaces the
+  fixed 8K head-cut. Budget raised to 60K; sections ordered retry → resolution
+  → plan → other; allocation is **priority-weighted water-filling** (retry ×3),
+  and any unavoidable cut keeps head *and* tail with a visible elision marker.
+  Proportional allocation alone was tested and **still lost the 44512 needle by
+  267 chars** — the weighting is what makes it survive.
+- **`compiler.py`** — `finish_reason == "length"` is now checked, logged,
+  traced as `truncated`, and appended to the brief as a visible
+  `[COMPILER TRUNCATION WARNING]`; cap raised 6,000 → 10,000.
+- **Retry hardening** — `scrape_already_attempted()` (a read-only registry
+  accessor that does not claim) lets `_dedupe_ranked_url_groups(...,
+  exclude_already_scraped=True)` drop cache-hit URLs from the retry pool only.
+  `run_scrape_cycles` already returns `[]` on an empty group list, so a retry
+  with no fresh candidates now costs nothing instead of an extract call.
+- **`_canonical_link`** strips `ref`/`utm_*`/`fbclid`/etc. while preserving
+  meaningful query params (`?id=7` still distinguishes).
+- **`query_maker`** memoizes the plan per (prompt, model, temperature) with an
+  in-flight task, so the chain generates it once; failures are evicted so the
+  next provider retries.
+- **Observability** — `audit.md` gained a **Fetch Budget** block (credits spent
+  / cap / unused, mid-run disable, config-disabled); fallen-through search
+  providers now emit a `search_chain` trace entry.
+
+**Deliberately NOT done:** the retry was *not* skipped on "fetched but
+unreadable", and was *not* removed. It works — in 44512 it retrieved the
+artifact the check had called missing, and the loss happened downstream. The
+waste was slot allocation, not the instrument.
+
+### Verification
+- `tests/test_answer_space.py` — 30/30 (44875 geometry, closed/mixed bounds,
+  discrete path, missing units, no unfilled placeholders)
+- `tests/test_scrape_adequacy.py` — 31/31, fed the **actual byte payloads** from
+  `44875/trace/` rather than invented fixtures
+- `tests/test_pipeline_hardening.py` — 40/40, including the 44512 needle at
+  offset 8,717 in a 13,163-char retry section
+- Full suite: **24 files, 0 failures**
+
+### Stale tests found and repaired (they had been failing since before this run)
+- `test_curve_quality.py` — every test targeted `percentiles_to_cdf` /
+  `scenarios_to_cdf`, removed in `d0ce4fc`. Failing at import ever since, which
+  means the no-blocky-PMF / no-edge-spike properties were **unguarded through
+  the whole period that produced the 44798 comb incident**. Rewritten against
+  the mixture path, plus a new comb-detection test.
+- `test_numeric_elicitation.py` — same rot (the `forecast: {scenarios|
+  percentiles}` response forms are rejected by the current parser) plus
+  `aggregate_run_cdfs(x, "numeric")` against a signature that takes a bool.
+  Rewritten against `components`.
+- `test_resolution_firecrawl_fallback.py` — patched `rcs._firecrawl_scrape_markdown`,
+  a name that **never existed** (the module imports `firecrawl_scrape_markdown`),
+  so every test silently hit the live Firecrawl API and the exhaustion-flag
+  reset was a no-op on a stray attribute.
+- `test_wayback_fallback.py` — left Firecrawl live against `news.example`, and
+  asserted an exact error string that the engine-labelled `combined_error`
+  format had long since changed.
+
+### Lessons
+- **A truthiness check is not a success check.** `content.strip()`,
+  `if not content`, and friends answer "did bytes arrive", which diverges from
+  "did the thing we came for arrive" precisely on the pages that matter most.
+  Three separate defects in this run were the same shape.
+- **Make the gate govern effort, not truth.** Because inadequate content is
+  preserved rather than discarded, the adequacy threshold can be set
+  generously: a false negative costs one extra fetch on a free rung, a false
+  positive costs the question.
+- **`[:N]` keeps coming back, and head-only is the worst variant.** Provider
+  sections are not front-loaded — extract reports put retrieved tables *below*
+  the source description — so a head cut preferentially discards exactly what
+  the reader is looking for. Prefer weighted allocation + head/tail + a visible
+  marker. Test the fix against the real byte offset; the obvious version of
+  this fix failed by 267 chars.
+- **Verdict authority must not exceed input visibility.** A stage that declares
+  an artifact "missing" from a truncated view, and whose verdict is then frozen
+  as authoritative, will overrule evidence the pipeline actually retrieved.
+- **Detectors need actuators.** Five components diagnosed 44875 correctly
+  (page-summary, all three extract cycles, both artifact checks, two of three
+  Phase 0 audits) and not one could act; artifact-check v1 even wrote the
+  correct remedy — `"jazco.dev stats API endpoint daily likers json"` — into a
+  channel that could only run a web search. Every detector should have an
+  actuator or be deleted.
+- **The question's own geometry is evidence, and it is free.** Range, bounds,
+  and units come from the question itself, never fail to retrieve, and are most
+  informative exactly when research has failed. Withholding them because a
+  bound is "open" is throwing away the last anchor.
+- **Meter what you want the system to escalate.** Thinking was metered and
+  expensive; fetching was unmetered and nearly free. Faced with a failed
+  retrieval the bot spent $0.198 reasoning about the failure and 1 of 25
+  credits re-attempting it. Cost ledgers shape behaviour — record the cheap
+  resource too, or you cannot even diagnose its underuse.
+- **Check the tests before trusting the coverage.** Four suites had been red
+  long enough to cover a shipped incident, and two of them silently guarded the
+  numeric path. A test that fails at import is indistinguishable from a test
+  that does not exist.
+
+---
+
 ## 2026-07-20 — Coarse (step-2) PMF support taken as literal point masses + PMF-space averaging → even/odd "comb" submitted on 44798; odd scores at ~half weight
 
 | | |

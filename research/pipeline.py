@@ -25,7 +25,23 @@ import source_ledger
 logger = logging.getLogger(__name__)
 
 ARTIFACT_CHECK_MODEL = "anthropic/claude-sonnet-5"
-_MAX_ARTIFACT_CHECK_INPUT_CHARS = 40_000
+# Total budget for the research excerpt handed to the artifact check. Raised
+# from 40K when the fixed 8K-per-section head-cut below was removed: on Sonnet
+# the extra 20K chars costs ~$0.01 per check, which is negligible next to the
+# cost of the check declaring a retrieved artifact "missing" (44512).
+_MAX_ARTIFACT_CHECK_INPUT_CHARS = 60_000
+# Floor so a small section is never squeezed to nothing by a large sibling.
+_MIN_ARTIFACT_CHECK_SECTION_CHARS = 4_000
+# When a section must be cut, keep this share as head and the rest as tail.
+# Purely head-keeping is what lost 44512: the retrieved by-sport table sat
+# 8,717 chars into a 13,163-char retry section and the 8K head-cut missed it
+# by 717 chars, so the post-retry refresh re-declared the artifact missing.
+_ARTIFACT_CHECK_HEAD_SHARE = 0.6
+# Budget multipliers by section priority (retry, resolution, plan, other).
+# The retry section is weighted heaviest: it is the only section produced
+# specifically to close the gap this check flagged, so squeezing it is
+# self-defeating.
+_ARTIFACT_CHECK_PRIORITY_WEIGHTS = (3.0, 2.0, 1.5, 1.0)
 _MAX_RETRY_QUERIES = 4
 # Soft-stop gates against the question's reserved compile/forecast token tail
 # (see monetary_cost_manager.research_reserve_input_tokens). Sized from the
@@ -67,6 +83,7 @@ async def run_research(
     resolution_criteria: str = "",
     background: str = "",
     fine_print: str = "",
+    question_type: str = "",
 ) -> ResearchBundle:
     if ENABLE_ASKNEWS_RESEARCH:
         from research.asknews_research import run_asknews_research
@@ -138,6 +155,7 @@ async def run_research(
             resolution_criteria=resolution_criteria,
             question_text=question_context,
             use_llm_cleaning=True,
+            question_type=question_type,
         )
 
     async def serpapi_call(asknews_research: str = "") -> str:
@@ -610,6 +628,20 @@ async def _run_search_chain(
         result = await run_provider(name, lambda call=call: call(asknews_research))
         _, content = result
         if should_include(name, content):
+            if errored:
+                # A successful fallback is not a degraded run, so these labels
+                # are dropped from the brief's warning banner — but until now
+                # they were dropped from the trace as well, leaving a provider
+                # that ran, generated a query plan and failed with no record at
+                # all (44875: two query-generation calls, one query plan, no
+                # trace entry explaining the second).
+                research_trace.emit(
+                    "search_chain",
+                    "search providers tried before the one that worked",
+                    "\n".join(f"- {label}: no usable results" for label in errored),
+                    status="fell-through",
+                    meta={"fell_through": list(errored), "chosen": name},
+                )
             return result, errored
         errored.append(name)
         if _is_quota_or_auth_error(content):
@@ -891,6 +923,119 @@ def _flag_future_dated_claims(
     return check
 
 
+def _artifact_check_section_priority(name: str) -> int:
+    """Sort key: the sections most likely to carry the artifact go first.
+
+    Ordering matters because the total budget is the last cut applied. The
+    focused retry exists solely to close the gap the check just flagged, so its
+    output must never be the part that falls off the end — in 44512 the retry
+    section was serialized last and lost.
+    """
+    lowered = name.lower()
+    if "retry" in lowered:
+        return 0
+    if "resolution" in lowered:
+        return 1
+    if "evidence plan" in lowered:
+        return 2
+    return 3
+
+
+def _head_tail_truncate(text: str, max_chars: int) -> str:
+    """Keep the head AND the tail, eliding the middle with a visible marker.
+
+    A provider section is not front-loaded: extract reports lead with the
+    resolution source and put the retrieved tables and rows further down, so a
+    head-only cut preferentially discards exactly the values the check is
+    looking for.
+    """
+    text = str(text or "").strip()
+    if len(text) <= max_chars:
+        return text
+    marker = "\n\n[... middle of this section elided to fit the artifact-check budget ...]\n\n"
+    if max_chars <= len(marker) + 200:
+        return _truncate_text(text, max_chars)
+    body = max_chars - len(marker)
+    head = int(body * _ARTIFACT_CHECK_HEAD_SHARE)
+    tail = body - head
+    return f"{text[:head].rstrip()}{marker}{text[-tail:].lstrip()}"
+
+
+def fit_artifact_check_sections(
+    provider_results: list[tuple[str, str]],
+    budget: int = _MAX_ARTIFACT_CHECK_INPUT_CHARS,
+) -> str:
+    """Render provider sections into the check's input budget.
+
+    Replaces a fixed ``_truncate_text(content, 8_000)`` per section followed by
+    a blind cut of the joined text. That combination had three failure modes,
+    all seen in 44512: a section was cut at 8K even when the total budget had
+    room to spare; the cut was head-only; and whichever section serialized last
+    lost whatever the total cap took. Here the budget is shared proportionally,
+    cuts keep both ends, and the retry section is ordered first.
+    """
+    sections = [(str(name), str(content or "").strip()) for name, content in provider_results]
+    sections = [(name, content) for name, content in sections if content]
+    if not sections:
+        return ""
+    sections.sort(key=lambda item: _artifact_check_section_priority(item[0]))
+
+    overhead = sum(len(f"## {name}\n") + 2 for name, _ in sections)
+    available = max(0, budget - overhead)
+    total = sum(len(content) for _, content in sections)
+    count = len(sections)
+
+    if total <= available:
+        allowances = [len(content) for _, content in sections]
+    else:
+        # Weighted water-filling. A purely proportional share is not enough:
+        # on the 44512 shape (13,163-char retry section among 75K of research)
+        # proportional gives the retry ~10.5K, and head+tail around that still
+        # elides the middle where the retrieved table sat. Weighting demand by
+        # section priority lets the retry — the section that exists *because*
+        # the check already failed once — be kept whole.
+        weights = [
+            _ARTIFACT_CHECK_PRIORITY_WEIGHTS[_artifact_check_section_priority(name)]
+            for name, _ in sections
+        ]
+        allowances = [0] * count
+        unsettled = set(range(count))
+        remaining = available
+        while unsettled:
+            pool = sum(weights[i] * len(sections[i][1]) for i in unsettled)
+            if pool <= 0:
+                break
+            shares = {
+                i: max(
+                    int(remaining * (weights[i] * len(sections[i][1]) / pool)),
+                    _MIN_ARTIFACT_CHECK_SECTION_CHARS,
+                )
+                for i in unsettled
+            }
+            # Sections that fit inside their share are settled whole; their
+            # unused remainder is redistributed to the ones still over.
+            fits = [i for i in unsettled if len(sections[i][1]) <= shares[i]]
+            if not fits:
+                for i in unsettled:
+                    allowances[i] = shares[i]
+                break
+            for i in fits:
+                allowances[i] = len(sections[i][1])
+                remaining -= allowances[i]
+                unsettled.discard(i)
+
+    rendered = [
+        f"## {name}\n{_head_tail_truncate(content, allowances[index])}"
+        for index, (name, content) in enumerate(sections)
+    ]
+    excerpt = "\n\n".join(rendered)
+    # Safety net only: proportional allocation plus the floor can overshoot by
+    # a little, never by a lot.
+    if len(excerpt) > budget:
+        excerpt = _head_tail_truncate(excerpt, budget)
+    return excerpt
+
+
 async def verify_required_artifact(
     title: str,
     evidence_plan: str,
@@ -899,9 +1044,7 @@ async def verify_required_artifact(
     prior_check: dict | None = None,
     question_dates: frozenset[str] | None = None,
 ) -> dict | None:
-    research_excerpt = "\n\n".join(
-        f"## {name}\n{_truncate_text(content, 8_000)}" for name, content in provider_results
-    )
+    research_excerpt = fit_artifact_check_sections(provider_results)
     prior_check_section = (
         _PRIOR_CHECK_SECTION.format(prior_check_json=json.dumps(prior_check, indent=2))
         if prior_check
@@ -911,7 +1054,7 @@ async def verify_required_artifact(
         title=title,
         today=datetime.date.today().isoformat(),
         evidence_plan_excerpt=_truncate_text(evidence_plan, 4_000),
-        research_excerpt=_truncate_text(research_excerpt, _MAX_ARTIFACT_CHECK_INPUT_CHARS),
+        research_excerpt=research_excerpt,
         prior_check_section=prior_check_section,
         max_retry_queries=_MAX_RETRY_QUERIES,
     )

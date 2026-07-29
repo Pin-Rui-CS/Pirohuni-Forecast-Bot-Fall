@@ -33,6 +33,12 @@ Discipline rules that apply to every phase:
 - Avoid double-counting correlated evidence. Items tracing to the same source, event, or announcement are largely one signal — corroboration of reliability, not additive weight — so update for them roughly once, and do not re-apply a fact in both the base rate and an inside-view update. Evidence items may end with a source-document tag like [D2]: items sharing a tag come from ONE underlying document and count as a single signal however many items carry it. Genuinely independent lines of evidence that happen to agree DO each add weight; the caution is against inflating one signal into many, not against real confirmation.
 - Apply each named discount or drag factor (source-update lag, veto risk, seasonal slowdown, reporting delay, etc.) in EXACTLY ONE phase. Keep a running ledger of the discounts you have applied and where; a later phase may cite a discount as already applied but must not shift your estimate or interval for it again. If you notice the same consideration moving your numbers a second time, undo the second application and say so.
 - Timing or pace evidence about a process must show its comparison before it moves your numbers: elapsed time vs the comparator's duration (while elapsed < comparator the case is ON SCHEDULE — no "running slower" penalty until elapsed actually exceeds it), and statutory minimum intervals vs typical practice (a legal minimum is a floor, not the central case).
+- MEASURED SERIES OVERRIDE. If the research contains a "Measured historical series" section, it was computed arithmetically from the resolution source itself — it is not a summary, an estimate, or someone's reading of a chart, and it outranks every prose claim about the same quantity. When one is present:
+  (a) anchor your central estimate on its stated recent level, not on any narrative figure, and adjust from there using its own monthly and day-of-week factors;
+  (b) size your 90% interval from the "how much this series actually moves" table at the horizon closest to this question's, NOT from your general sense of uncertainty. That table reports what the quantity has empirically done over that many periods. State which row you used and the implied sigma. If you widen beyond it, name the specific regime change that justifies the widening — "unknown unknowns" alone does not, because the table already contains every shock the series has actually experienced;
+  (c) the two lookback windows will often disagree. Choose one, say why, and note what the other implies;
+  (d) treat the excluded outage/partial rows as excluded — never read one as the current level.
+  Widening under acknowledged ignorance is correct ONLY when no measured series is present. With one in hand, an interval several times the measured spread is not caution, it is a discarded measurement.
 
 ---
 
@@ -55,8 +61,8 @@ expressed in the units above. Research sources very often quote this quantity in
 a different unit (for example millions where the answer unit is thousands, or a
 fraction where the answer unit is a percent). If so, convert to the answer unit
 BEFORE you write any number. Do not reason in one unit and report in another.
-{lower_bound_message}
-{upper_bound_message}
+
+{answer_space_block}
 {distribution_guidance}
 
 Today is {today}.
@@ -186,7 +192,7 @@ Output format:
 - Failure narrative (far higher)
 - Failure narrative (far lower)
 - Any final adjustment
-- **Final estimate: [central value] (90% CI: [low] – [high])**
+{answer_space_check}- **Final estimate: [central value] (90% CI: [low] – [high])**
 
 ## Note:
 The range should represent uncertainty about the final resolved value, not just uncertainty about the current estimate.
@@ -928,6 +934,107 @@ def _format_outcome_value(value: float, step: float) -> str:
         return str(int(round(value)))
     decimals = max(0, min(6, -int(np.floor(np.log10(step))) + 1))
     return f"{value:.{decimals}f}"
+
+
+def _format_bound(value: float) -> str:
+    """Human-readable bound for the prompt: '1,000,000', never '1e+06'."""
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if numeric.is_integer() and abs(numeric) < 1e15:
+        return f"{int(numeric):,}"
+    text = f"{numeric:,.6f}".rstrip("0").rstrip(".")
+    if text in ("", "0", "-0") and numeric != 0:
+        return f"{numeric:g}"
+    return text
+
+
+# A distribution that puts less than this share of its mass inside the
+# question's own scaled range is contradicting the question author, which is
+# allowed but must be argued for rather than arrived at by accident.
+MIN_UNARGUED_IN_RANGE_MASS = 0.40
+
+
+def answer_space_blocks(
+    lower_bound: float,
+    upper_bound: float,
+    units: str,
+    open_lower_bound: bool,
+    open_upper_bound: bool,
+) -> tuple[str, str]:
+    """Return (prompt_block, phase_4_check) describing the question's scaled range.
+
+    The range is now stated unconditionally. Previously it reached the model
+    only when a bound was CLOSED — as a hard "cannot exceed" constraint — and
+    was suppressed entirely when both bounds were open, so on an open-bounded
+    question the forecaster never learned the answer space existed. It could
+    then hand back a distribution sitting almost entirely outside it and never
+    notice: 44875 (Bluesky daily likers, range 1,000,000-1,100,000) submitted
+    54.1% of its mass below the lower bound and 33.2% above the upper, leaving
+    12.7% in range, with the bounds appearing nowhere in the prompt.
+
+    An open bound is not an absent bound. The endpoints were chosen by someone
+    who could observe the quantity's current level, so the band carries real
+    information about where the outcome is expected to land — and it is the one
+    anchor that survives a failed scrape of the resolution source, which is
+    exactly when the forecaster needs it most.
+    """
+    lower_text = _format_bound(lower_bound)
+    upper_text = _format_bound(upper_bound)
+    unit_label = ""
+    if units and not str(units).lower().startswith("not stated"):
+        unit_label = f" {units}"
+
+    lines = [
+        "Answer space — this question is scaled over the range "
+        f"{lower_text} to {upper_text}{unit_label}.",
+    ]
+    if open_lower_bound:
+        lines.append(
+            f"- The lower bound is OPEN: an outcome below {lower_text} is possible "
+            "and is representable in your answer."
+        )
+    else:
+        lines.append(f"- The outcome can not be lower than {lower_text}.")
+    if open_upper_bound:
+        lines.append(
+            f"- The upper bound is OPEN: an outcome above {upper_text} is possible "
+            "and is representable in your answer."
+        )
+    else:
+        lines.append(f"- The outcome can not be higher than {upper_text}.")
+
+    if not (open_lower_bound or open_upper_bound):
+        # Both bounds closed: the range is a hard constraint, already stated
+        # above, and the in-range share is 100% by construction.
+        return "\n".join(lines), ""
+
+    lines += [
+        "",
+        "Treat this range as EVIDENCE, not merely as output formatting. Whoever wrote "
+        "the question chose these endpoints while able to observe the quantity's "
+        "current level, so the band is informative about where the outcome is expected "
+        "to land. Weigh it as you would any other evidence item: it is an informative "
+        "prior, NOT a hard limit and NOT a substitute for your own analysis — questions "
+        "do resolve outside their range, which is why the bound is open. Give it MORE "
+        "weight when the research failed to retrieve the current level of the quantity "
+        "(see the Required Artifact Status), because it is then the only anchor you have "
+        "that did not depend on that retrieval succeeding. Give it LESS weight when you "
+        "hold dated, on-metric measurements that disagree with it — but say so.",
+    ]
+
+    check = (
+        f"- **Answer-space check.** State three probabilities that sum to 1: "
+        f"P(outcome below {lower_text}), P(outcome between {lower_text} and "
+        f"{upper_text}), P(outcome above {upper_text}). If the in-range share is under "
+        f"{int(MIN_UNARGUED_IN_RANGE_MASS * 100)}%, you are asserting that the "
+        f"question's own scaling band is wrong. That is sometimes correct — but state "
+        f"it as a claim and justify it from dated, on-metric evidence, or else revisit "
+        f"whether your interval is too wide or your centre is misplaced. Do not arrive "
+        f"there silently.\n"
+    )
+    return "\n".join(lines), check
 
 
 def distribution_guidance_for_question(
@@ -1888,14 +1995,13 @@ def build_numeric_prompt(question_details: dict, summary_report: str) -> tuple[s
         step = (upper_bound - lower_bound) / outcome_count
         use_pmf = False
 
-    if open_upper_bound:
-        upper_bound_message = ""
-    else:
-        upper_bound_message = f"The outcome can not be higher than {upper_bound}."
-    if open_lower_bound:
-        lower_bound_message = ""
-    else:
-        lower_bound_message = f"The outcome can not be lower than {lower_bound}."
+    answer_space_block, answer_space_check = answer_space_blocks(
+        lower_bound=lower_bound,
+        upper_bound=upper_bound,
+        units=unit_of_measure,
+        open_lower_bound=open_lower_bound,
+        open_upper_bound=open_upper_bound,
+    )
 
     guidance_header, pmf_note = distribution_guidance_for_question(
         question_type=question_type,
@@ -1914,8 +2020,8 @@ def build_numeric_prompt(question_details: dict, summary_report: str) -> tuple[s
         resolution_criteria=question_details["resolution_criteria"],
         fine_print=question_details["fine_print"],
         summary_report=summary_report,
-        lower_bound_message=lower_bound_message,
-        upper_bound_message=upper_bound_message,
+        answer_space_block=answer_space_block,
+        answer_space_check=answer_space_check,
         distribution_guidance=guidance_header,
         discrete_pmf_note=pmf_note,
         units=unit_of_measure,

@@ -102,6 +102,28 @@ def _question_snapshot(question_details: dict) -> dict:
     }
 
 
+def _fetch_budget_snapshot(scope: str) -> dict[str, object]:
+    """Paid-fetch counters for audit.md. Best-effort; never fails a run."""
+    try:
+        from config import (
+            ENABLE_FIRECRAWL_GENERAL_SCRAPE,
+            FIRECRAWL_QUESTION_CREDIT_CAP,
+        )
+        from research.firecrawl_scrape import firecrawl_credits_spent, firecrawl_exhausted
+
+        return {
+            "firecrawl_credits_spent": firecrawl_credits_spent(scope),
+            "firecrawl_credit_cap": FIRECRAWL_QUESTION_CREDIT_CAP,
+            "firecrawl_exhausted": firecrawl_exhausted(),
+            "general_scrape_enabled": ENABLE_FIRECRAWL_GENERAL_SCRAPE,
+        }
+    except Exception as exc:  # noqa: BLE001 - reporting must never break a run
+        logger.warning(
+            "could not snapshot the fetch budget: %s: %s", type(exc).__name__, exc
+        )
+        return {}
+
+
 async def forecast_individual_question(
     question_id: int,
     post_id: int,
@@ -162,6 +184,7 @@ async def forecast_individual_question(
             resolution_criteria=question_details["resolution_criteria"],
             background=question_details["description"],
             fine_print=question_details["fine_print"],
+            question_type=question_type or "",
         )
         research_seconds = time.monotonic() - question_started
         artifacts.save_research(
@@ -261,6 +284,7 @@ async def forecast_individual_question(
     artifacts.save_audit(
         usage_yaml_table=usage_yaml_table,
         url_events=source_ledger.drain_events(scope),
+        fetch_budget=_fetch_budget_snapshot(scope),
     )
     research_trace.finalize()
     artifacts.save_forecast_json(

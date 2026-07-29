@@ -175,9 +175,27 @@ def _clean_content(content: str, max_chars: int = _MAX_CONTENT_CHARS, keep_urls:
     content = re.sub(r'\n{3,}', '\n\n', "\n".join(lines)).strip()
 
     if len(content) > max_chars:
-        content = content[:max_chars] + f"\n\n[Content truncated at {max_chars} chars]"
+        content = content[:max_chars] + _truncation_notice(len(content), max_chars)
 
     return content
+
+
+def _truncation_notice(original: int, kept: int) -> str:
+    """State what a cut discarded, not merely that one happened.
+
+    A silent head-cut is indistinguishable downstream from a page that never
+    had the data -- artifact-check then reports "missing" and the forecasters
+    widen for the wrong reason. This is the shared symptom behind the 44382,
+    44512, 44619 and 44875 misses; on 44875 the retrievable payload was 232 KB
+    of date-ascending JSON, so an 8,000-char head-cut would have kept 2023 and
+    dropped every row the question was about.
+    """
+    dropped = max(0, original - kept)
+    return (
+        f"\n\n[TRUNCATED: kept the first {kept:,} of {original:,} chars "
+        f"({dropped / original:.1%} discarded, from the END of the document). "
+        f"Absence of a fact below is NOT evidence the source lacks it.]"
+    )
 
 
 # ===========================================================================
@@ -605,7 +623,8 @@ def _truncate_scrape_content(content: str, max_chars: int = _CRAWL4AI_CONTENT_BU
         return content
     if max_chars <= 100:
         return content[:max_chars].rstrip()
-    return content[: max_chars - 80].rstrip() + "\n\n[Truncated for resolution-source scraping.]"
+    kept = max_chars - 200
+    return content[:kept].rstrip() + _truncation_notice(len(content), kept)
 
 
 def _format_combined_resolution_content(sources: list[tuple[str, str]]) -> str:
@@ -1128,6 +1147,7 @@ async def scrape_resolution_sources(
     max_concurrent: int = 5,
     timeout: int = 30,
     max_urls: int = 10,
+    question_type: str = "",
 ) -> str:
     """Scrape the URLs embedded in the question and summarize them once.
 
@@ -1173,6 +1193,20 @@ async def scrape_resolution_sources(
         # the cap to the general research path.
         release_resolution_reserve()
 
+    # Deep series retrieval, primary resolution URL only. Free (plain HTTP,
+    # no LLM, no Firecrawl), so it is not budgeted -- but it IS restricted to
+    # one URL and to questions whose answer is a number, because that is the
+    # only case where a historical trend is the thing being asked for.
+    series_section = ""
+    if criteria_urls or urls:
+        series_section = await _build_measured_series_section(
+            (criteria_urls or urls)[0],
+            question_text=question_text,
+            resolution_criteria=resolution_criteria,
+            question_type=question_type,
+            timeout=timeout,
+        )
+
     criteria_url_set = set(criteria_urls)
     sections: list[str] = []
     cleaned_sources: list[tuple[str, str]] = []
@@ -1205,7 +1239,7 @@ async def scrape_resolution_sources(
             f"{cleaned}"
         )
 
-    if not sections:
+    if not sections and not series_section:
         return ""
 
     # Historical captures of the primary resolution URL (the page the value
@@ -1259,6 +1293,7 @@ async def scrape_resolution_sources(
             source_lines = "\n".join(f"- {url}" for url, _ in cleaned_sources)
             return (
                 "# Resolution Criteria Sources\n\n"
+                f"{series_section}"
                 "## Summary\n\n"
                 f"{summary_text}\n\n"
                 "## Scraped Sources\n\n"
@@ -1272,6 +1307,93 @@ async def scrape_resolution_sources(
 
     return (
         "# Resolution Criteria Sources\n\n"
+        + series_section
         + "\n\n---\n\n".join(sections)
         + history_section
+    )
+
+
+# ===========================================================================
+# Measured-series retrieval (free: plain HTTP, no LLM, no Firecrawl)
+# ===========================================================================
+
+# Question types whose answer is a number with a history behind it. Binary and
+# multiple-choice questions resolve on an event, not a level, so the deep
+# retrieval would only ever be wasted requests.
+_SERIES_QUESTION_TYPES = {"numeric", "discrete"}
+
+
+async def _build_measured_series_section(
+    primary_url: str,
+    *,
+    question_text: str,
+    resolution_criteria: str,
+    question_type: str,
+    timeout: int,
+) -> str:
+    """Retrieve and reduce the historical series behind the resolution source.
+
+    Returns "" whenever this does not apply or nothing was found, so the caller
+    is unaffected. The reduced block is ~2-3 KB by construction and therefore
+    survives every downstream character budget intact -- the raw payload (232 KB
+    on 44875) never enters the prose pipeline at all.
+    """
+    if question_type and question_type.lower() not in _SERIES_QUESTION_TYPES:
+        return ""
+    if not primary_url:
+        return ""
+
+    try:
+        from series_discovery import discover_series
+        from series_reduce import reduce_series
+    except ImportError as exc:
+        logger.warning("Series discovery unavailable: %s", exc)
+        return ""
+
+    try:
+        artifact = await discover_series(primary_url, timeout=timeout)
+    except Exception as exc:
+        logger.warning("Series discovery failed for %s: %s", primary_url, exc)
+        return ""
+
+    if artifact is None:
+        logger.info("No historical series found behind %s; no rung satisfied the gate.",
+                    primary_url)
+        return ""
+
+    logger.info(
+        "Measured series for %s: %d rows via %s from %s",
+        primary_url, artifact.rows, artifact.rung, artifact.endpoint,
+    )
+    try:
+        reduced = reduce_series(
+            artifact.table,
+            endpoint=artifact.endpoint,
+            metric_hint=f"{question_text}\n{resolution_criteria}",
+        )
+    except Exception as exc:
+        logger.warning("Series reduction failed for %s: %s", artifact.endpoint, exc)
+        return ""
+
+    try:
+        import source_ledger
+
+        source_ledger.record_url_event(
+            artifact.endpoint,
+            source_ledger.ROLE_SCRAPED,
+            engine="series-discovery",
+            ok=True,
+            chars=len(artifact.payload),
+            round_label="single pass",
+        )
+    except Exception:  # pragma: no cover - ledger is best-effort
+        pass
+
+    return (
+        "## Measured historical series\n\n"
+        f"_Retrieved deterministically from the resolution source "
+        f"({artifact.rung} rung); statistics below are computed, not summarised, "
+        f"and must be reproduced verbatim rather than paraphrased._\n\n"
+        f"{reduced.text}\n"
+        "---\n\n"
     )

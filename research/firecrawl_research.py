@@ -184,6 +184,9 @@ async def build_firecrawl_research_result(
         results=search_results,
         max_ranked_urls=max_ranked_urls,
         model=ranking_model,
+        # preset_queries means this is the focused artifact retry: URLs the
+        # main pass already fetched cannot close the gap it was launched for.
+        exclude_already_scraped=bool(preset_queries),
     )
     _record_ranked_url_groups(ranked_url_groups)
     cycles = await run_scrape_cycles(
@@ -261,6 +264,7 @@ async def rank_firecrawl_urls(
     results: list[FirecrawlSearchResult],
     max_ranked_urls: int = DEFAULT_MAX_RANKED_URLS,
     model: str = DEFAULT_SERP_RANKING_MODEL,
+    exclude_already_scraped: bool = False,
 ) -> list[RankedSerpUrlGroup]:
     """Ask an LLM to group and rank Firecrawl result URLs worth scraping."""
     results = exclude_social_results(results)
@@ -284,7 +288,9 @@ async def rank_firecrawl_urls(
     )
     parsed = _extract_json_value(response)
     ranked_groups = _parse_ranked_url_groups(parsed)
-    return _dedupe_ranked_url_groups(ranked_groups, max_ranked_urls)
+    return _dedupe_ranked_url_groups(
+        ranked_groups, max_ranked_urls, exclude_already_scraped=exclude_already_scraped
+    )
 
 
 def format_firecrawl_research(result: FirecrawlResearchResult) -> str:

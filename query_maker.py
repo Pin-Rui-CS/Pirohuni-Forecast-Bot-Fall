@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import datetime
+import hashlib
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 from llm_client import call_llm
 from utils import _truncate_text
 
+logger = logging.getLogger(__name__)
 
 DEFAULT_QUERY_COUNT = 8
 DEFAULT_QUERY_GENERATION_MODEL = "anthropic/claude-sonnet-5"
@@ -105,6 +109,22 @@ def build_query_generation_prompt(
     )
 
 
+# One in-flight plan per identical prompt. The search chain tries SerpAPI ->
+# Tavily -> Firecrawl in order, and each provider generated its OWN plan from
+# byte-identical inputs — a provider-independent artifact recomputed per
+# provider. 44875 paid for two ($0.035) and used one; a chain that falls
+# through twice pays for three. Keyed on the rendered prompt, so it is
+# naturally per-question and never returns another question's queries.
+_QUERY_PLAN_CACHE: dict[str, asyncio.Task] = {}
+_QUERY_PLAN_CACHE_LOCK = asyncio.Lock()
+_MAX_QUERY_PLAN_CACHE_ENTRIES = 64
+
+
+def reset_query_plan_cache() -> None:
+    """Drop memoized query plans (tests, and between long batch runs)."""
+    _QUERY_PLAN_CACHE.clear()
+
+
 async def generate_google_search_query_plan(
     title: str,
     resolution_criteria: str = "",
@@ -116,7 +136,11 @@ async def generate_google_search_query_plan(
     model: str = DEFAULT_QUERY_GENERATION_MODEL,
     temperature: float = 0.2,
 ) -> list[GoogleSearchQuery]:
-    """Return deduplicated Google queries with purpose and priority metadata."""
+    """Return deduplicated Google queries with purpose and priority metadata.
+
+    Memoized per (prompt, model, temperature) so the provider chain generates
+    the plan once and every later provider reuses it.
+    """
     prompt = build_query_generation_prompt(
         title=title,
         resolution_criteria=resolution_criteria,
@@ -126,6 +150,39 @@ async def generate_google_search_query_plan(
         options=options,
         max_queries=max_queries,
     )
+    cache_key = hashlib.sha256(
+        "\x00".join([prompt, str(model), str(temperature), str(max_queries)]).encode("utf-8")
+    ).hexdigest()
+
+    async with _QUERY_PLAN_CACHE_LOCK:
+        task = _QUERY_PLAN_CACHE.get(cache_key)
+        if task is None:
+            if len(_QUERY_PLAN_CACHE) >= _MAX_QUERY_PLAN_CACHE_ENTRIES:
+                _QUERY_PLAN_CACHE.clear()
+            task = asyncio.ensure_future(
+                _generate_query_plan_uncached(prompt, model, temperature, max_queries)
+            )
+            _QUERY_PLAN_CACHE[cache_key] = task
+        else:
+            logger.info("[query-maker] reusing the query plan already generated this run")
+
+    try:
+        # Every awaiter gets its own copy: callers mutate the returned list.
+        return list(await asyncio.shield(task))
+    except Exception:
+        # A failed plan must not be cached — the next provider should retry.
+        async with _QUERY_PLAN_CACHE_LOCK:
+            if _QUERY_PLAN_CACHE.get(cache_key) is task:
+                _QUERY_PLAN_CACHE.pop(cache_key, None)
+        raise
+
+
+async def _generate_query_plan_uncached(
+    prompt: str,
+    model: str,
+    temperature: float,
+    max_queries: int,
+) -> list[GoogleSearchQuery]:
     response = await call_llm(
         prompt,
         model=model,

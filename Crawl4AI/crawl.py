@@ -100,6 +100,22 @@ def claim_scrape_url(url: str) -> str | None:
     return None
 
 
+def scrape_already_attempted(url: str) -> bool:
+    """Has this canonical URL already been fetched (or tried) in this run?
+
+    Read-only: unlike ``claim_scrape_url`` this does NOT reserve the URL, so a
+    caller can filter candidates without consuming them. Added for the focused
+    artifact retry, which in 44875 re-ranked and re-"scraped" two URLs the main
+    pass had already fetched — both came back as cache hits that burned retry
+    slots and then occupied 25% of the compiler's input as duplicates.
+    """
+
+    scope = _SCRAPE_DEDUPE_SCOPE.get()
+    key = _scoped_scrape_key(url, scope)
+    with _SCRAPED_URL_LOCK:
+        return key in _SCRAPED_URL_KEYS
+
+
 def record_scrape_content(url: str, content: str) -> None:
     """Store a successful scrape's content so duplicate requests can reuse it.
 
