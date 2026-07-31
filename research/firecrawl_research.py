@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import logging
 import math
+import re
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -37,6 +38,7 @@ from research.serp_research import (
     run_scrape_cycles,
     scraped_ok_urls,
 )
+import research_trace
 import source_ledger
 from utils import display_source_date
 
@@ -73,6 +75,12 @@ class FirecrawlResearchResult:
     cycles: list[Cycle]
     report: str
     tbs: str = ""
+    # Digest of the search-result descriptions, written by the ranking call
+    # (which reads them all in full). Rendered INSTEAD of the per-result block
+    # when present: on 44879 that block was 42,648 chars on the main pass and
+    # 66,626 on the retry — 68% and 80% of their sections — and it rides into
+    # the compiler, the artifact check and the raw-research forecaster whole.
+    search_results_summary: str = ""
 
 
 async def run_firecrawl_research(
@@ -176,7 +184,18 @@ async def build_firecrawl_research_result(
             round_label="search",
             detail=f"query: {result.query} | source: {result.source}",
         )
-    ranked_url_groups = await rank_firecrawl_urls(
+    # Byte-exact record of the raw search results. The rendered section now
+    # carries the ranking call's digest instead of the full descriptions, so
+    # without this the descriptions the ranker actually read would survive in
+    # no artifact at all — the instrumentation hole that made the 44879
+    # ranking-input analysis reconstructible only by inference.
+    research_trace.emit(
+        "search_results",
+        "Firecrawl search results (raw, pre-digest)",
+        research_trace.format_search_results(search_results),
+        meta={"queries": queries, "result_count": len(search_results)},
+    )
+    ranked_url_groups, search_results_summary = await rank_firecrawl_urls(
         title=title,
         resolution_criteria=resolution_criteria,
         background=background,
@@ -205,8 +224,9 @@ async def build_firecrawl_research_result(
         search_results=search_results,
         ranked_url_groups=ranked_url_groups,
         cycles=cycles,
-        report=_normalise_report_heading(cycles[-1].report if cycles else ""),
+        report=_normalise_report_heading(cycles[-1].cumulative_report if cycles else ""),
         tbs=firecrawl_tbs,
+        search_results_summary=search_results_summary,
     )
 
 
@@ -265,11 +285,17 @@ async def rank_firecrawl_urls(
     max_ranked_urls: int = DEFAULT_MAX_RANKED_URLS,
     model: str = DEFAULT_SERP_RANKING_MODEL,
     exclude_already_scraped: bool = False,
-) -> list[RankedSerpUrlGroup]:
-    """Ask an LLM to group and rank Firecrawl result URLs worth scraping."""
+) -> tuple[list[RankedSerpUrlGroup], str]:
+    """Group and rank Firecrawl result URLs, and digest their descriptions.
+
+    Returns ``(ranked_groups, search_results_summary)``. The ranking call reads
+    every description in full — that is unchanged — and additionally writes a
+    digest of them, because the same descriptions are what the section then
+    ships whole to three downstream readers.
+    """
     results = exclude_social_results(results)
     if not results:
-        return []
+        return [], ""
 
     prompt = _build_ranking_prompt(
         title=title,
@@ -286,11 +312,41 @@ async def rank_firecrawl_urls(
         use_tools=False,
         _label="firecrawl-url-ranking",
     )
-    parsed = _extract_json_value(response)
+    json_text, summary = _split_ranking_response(response)
+    parsed = _extract_json_value(json_text)
     ranked_groups = _parse_ranked_url_groups(parsed)
-    return _dedupe_ranked_url_groups(
-        ranked_groups, max_ranked_urls, exclude_already_scraped=exclude_already_scraped
+    return (
+        _dedupe_ranked_url_groups(
+            ranked_groups, max_ranked_urls, exclude_already_scraped=exclude_already_scraped
+        ),
+        summary,
     )
+
+
+_RANKING_FENCE_PATTERN = re.compile(r"```[a-zA-Z]*\s*\n?(.*?)```", re.DOTALL)
+
+
+def _split_ranking_response(response: str) -> tuple[str, str]:
+    """Split the ranking reply into (JSON text, search-results digest).
+
+    The ranking JSON decides everything that gets scraped, so the digest is
+    carried OUTSIDE it rather than as a field inside it: the extract step was
+    rewritten to this same prose-outside-JSON shape after one unescaped newline
+    in a report-inside-JSON payload discarded a whole research branch (44773).
+    A reply with no fence still parses — the digest is simply empty and the
+    section falls back to rendering the raw results.
+    """
+    text = str(response or "")
+    for match in _RANKING_FENCE_PATTERN.finditer(text):
+        body = match.group(1)
+        if '"ranked_url_groups"' not in body:
+            continue
+        digest = text[match.end():].strip()
+        # Drop a leading label line ("PART 2: ...") if the model emitted one.
+        if digest.lower().startswith("part 2"):
+            digest = digest.split("\n", 1)[1].strip() if "\n" in digest else ""
+        return body, digest
+    return text, ""
 
 
 def format_firecrawl_research(result: FirecrawlResearchResult) -> str:
@@ -313,7 +369,9 @@ def format_firecrawl_research(result: FirecrawlResearchResult) -> str:
 
     scraped_urls = scraped_ok_urls(result.cycles)
     raw_lines = []
-    for index, item in enumerate(result.search_results, start=1):
+    for index, item in enumerate(
+        [] if result.search_results_summary else result.search_results, start=1
+    ):
         description = (
             SNIPPET_OMITTED_NOTE
             if _norm_url(item.url) in scraped_urls
@@ -345,6 +403,18 @@ def format_firecrawl_research(result: FirecrawlResearchResult) -> str:
         cycle_lines.append("")
 
     query_lines = "\n".join(f"- {query}" for query in result.queries)
+    if result.search_results_summary:
+        results_heading = (
+            "Firecrawl search results considered (digest written by the ranking "
+            "step, which read every result's full description; results judged "
+            "irrelevant were dropped rather than summarised):"
+        )
+        results_block = result.search_results_summary
+    else:
+        results_heading = "Raw Firecrawl search results considered:"
+        results_block = (
+            chr(10).join(raw_lines).strip() if raw_lines else "No search results found."
+        )
     return f"""
 ======================================================================
 FIRECRAWL SEARCH RESEARCH
@@ -365,8 +435,8 @@ Scrape cycles:
 Compiled scraped research:
 {result.report or "No scraped research report generated."}
 
-Raw Firecrawl search results considered:
-{chr(10).join(raw_lines).strip() if raw_lines else "No search results found."}
+{results_heading}
+{results_block}
 ======================================================================
 """.strip()
 
@@ -376,6 +446,7 @@ def firecrawl_research_to_dict(result: FirecrawlResearchResult) -> dict[str, Any
         "queries": result.queries,
         "sources": result.sources,
         "tbs": result.tbs,
+        "search_results_summary": result.search_results_summary,
         "search_results": [asdict(item) for item in result.search_results],
         "ranked_url_groups": [asdict(item) for item in result.ranked_url_groups],
         "cycles": [asdict(item) for item in result.cycles],
@@ -537,7 +608,11 @@ Rank higher:
 Rank lower or omit:
 - Duplicates, thin SEO pages, social posts without evidence, broad homepages, and pages unlikely to have stable scrapeable text.
 
-Return only valid JSON in this exact shape:
+Output format — exactly two parts, in this order.
+
+PART 1: one fenced JSON block, in this exact shape:
+
+```json
 {{
   "ranked_url_groups": [
     {{
@@ -552,6 +627,31 @@ Return only valid JSON in this exact shape:
     }}
   ]
 }}
+```
+
+PART 2: after that block, a digest of the candidate results above, as plain
+markdown. Write it directly — NOT inside JSON, quotes, or a code fence.
+
+This digest REPLACES the result descriptions downstream: the forecaster, the
+evidence compiler and the artifact check will see your digest and nothing else
+from this list. Most of these pages will never be scraped, so for them your
+digest is the only record that will ever exist.
+
+- Carry every concrete fact VERBATIM: figures, counts, dates, identifiers,
+  named entities, and quoted claims, each next to the URL it came from. A dated
+  numeric fact in a description is the highest-value thing on this list — one
+  such snippet was the only historical precedent an entire past run found.
+- Drop results that carry no fact bearing on the question: pure marketing,
+  navigation text, generic explainers, and descriptions that only restate the
+  page title. Dropping them entirely is correct; do not pad.
+- Never invent, complete, or date anything the description does not state. Keep
+  "(year not stated in source)" where the year is absent, and never assume a
+  year-less date falls in the current year.
+- Keep both sides: a description cutting against the apparent majority reading
+  of this list must survive, not be smoothed away.
+- Group results that report the same underlying fact into one entry listing all
+  their URLs, rather than repeating the fact.
+- Order the entries by how much they bear on the question.
 """.strip()
 
 

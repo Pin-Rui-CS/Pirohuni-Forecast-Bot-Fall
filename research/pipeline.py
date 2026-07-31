@@ -42,6 +42,11 @@ _ARTIFACT_CHECK_HEAD_SHARE = 0.6
 # specifically to close the gap this check flagged, so squeezing it is
 # self-defeating.
 _ARTIFACT_CHECK_PRIORITY_WEIGHTS = (3.0, 2.0, 1.5, 1.0)
+# Priority band for the Evidence Plan section. It is filtered out of the
+# artifact check's research excerpt (it has its own prompt slot there) but the
+# band is kept so the sort order and the weight table stay aligned, and so any
+# other caller of fit_artifact_check_sections still ranks it above bulk research.
+_PRIORITY_EVIDENCE_PLAN = 2
 _MAX_RETRY_QUERIES = 4
 # Soft-stop gates against the question's reserved compile/forecast token tail
 # (see monetary_cost_manager.research_reserve_input_tokens). Sized from the
@@ -228,6 +233,25 @@ async def run_research(
         else ""
     )
 
+    # Stage 1.5: filter AskNews before anything reads it. It is the second
+    # largest section of the compiler input in both audited runs and the only
+    # input the evidence plan and the query generator had, both of which used
+    # to see it through a positional head cut. Filtering here means every
+    # consumer — plan, query generation, compiler, artifact check, raw view —
+    # reads the same relevance-selected block instead of the first N chars.
+    # Soft-fails to the unfiltered block.
+    if usable_asknews_research:
+        from research.asknews_filter import filter_asknews_research
+
+        usable_asknews_research = await filter_asknews_research(
+            title=title,
+            resolution_criteria=resolution_criteria,
+            background=background,
+            fine_print=fine_print,
+            asknews_research=usable_asknews_research,
+        )
+        asknews_result = (asknews_name, usable_asknews_research)
+
     # Stage 2: evidence plan decides what the rest of research should chase.
     from research.evidence_plan import build_evidence_plan
 
@@ -239,9 +263,16 @@ async def run_research(
         asknews_research=usable_asknews_research,
     )
     logger.info("[research] Evidence Plan: completed")
+    # Evidence plan FIRST. Concatenated after AskNews it was truncated out of
+    # query generation entirely in both audited runs — AskNews alone overran
+    # both this join's cap and the query generator's own, so the plan
+    # contributed exactly zero bytes to the one consumer that decides what gets
+    # scraped. 44879's plan had written "CISA KEV catalog CSV JSON feed
+    # download"; not one of the 9 queries actually issued mentioned csv, json,
+    # feed or download.
     search_asknews_research = _join_research_context(
-        ("AskNews research", usable_asknews_research),
         ("Evidence plan", evidence_plan),
+        ("AskNews research", usable_asknews_research),
     )
     market_question = _join_research_context(
         ("Forecasting question", title),
@@ -533,6 +564,14 @@ async def run_research(
         meta={"chain": "brief"},
     )
 
+    # Deliberately the UNFITTED sections. Feeding the raw member the compiler's
+    # post-fit copy was tried and reverted: the fit step is not lossless in
+    # practice — on 44879 the precompress pass hit its max_tokens cap and
+    # emitted 5 of 25 search-result entries under a banner claiming "all
+    # distinct claims retained", and the raw member was the only forecaster
+    # that still saw entries [6]-[25]. It reads far fewer tokens than it used
+    # to anyway, because the search-result descriptions are now digested at the
+    # ranking call, upstream of everything.
     raw_research_view = _apply_artifact_status_banner(
         _build_raw_research_view(included_results), artifact_check
     )
@@ -937,7 +976,7 @@ def _artifact_check_section_priority(name: str) -> int:
     if "resolution" in lowered:
         return 1
     if "evidence plan" in lowered:
-        return 2
+        return _PRIORITY_EVIDENCE_PLAN
     return 3
 
 
@@ -1044,7 +1083,19 @@ async def verify_required_artifact(
     prior_check: dict | None = None,
     question_dates: frozenset[str] | None = None,
 ) -> dict | None:
-    research_excerpt = fit_artifact_check_sections(provider_results)
+    # The evidence plan used to reach this prompt TWICE — as
+    # ``evidence_plan_excerpt`` and again as a "## Evidence Plan" section
+    # inside ``research_excerpt`` (4,000 + 4,772 chars for a 5,481-char
+    # document, the second copy taken out of the same budget Firecrawl Search
+    # was being cut to fit). It is short enough to send whole, once, in its own
+    # slot; the research excerpt is for what research retrieved.
+    research_excerpt = fit_artifact_check_sections(
+        [
+            (name, content)
+            for name, content in provider_results
+            if _artifact_check_section_priority(name) != _PRIORITY_EVIDENCE_PLAN
+        ]
+    )
     prior_check_section = (
         _PRIOR_CHECK_SECTION.format(prior_check_json=json.dumps(prior_check, indent=2))
         if prior_check
@@ -1053,7 +1104,11 @@ async def verify_required_artifact(
     prompt = _ARTIFACT_CHECK_PROMPT.format(
         title=title,
         today=datetime.date.today().isoformat(),
-        evidence_plan_excerpt=_truncate_text(evidence_plan, 4_000),
+        # Sent whole: the 4,000-char cut here was a HEAD cut, so it dropped the
+        # plan's own "Search Queries To Prefer" and "Contradictions And Gaps"
+        # sections — the tail — from the step whose job includes writing the
+        # retry queries.
+        evidence_plan_excerpt=evidence_plan,
         research_excerpt=research_excerpt,
         prior_check_section=prior_check_section,
         max_retry_queries=_MAX_RETRY_QUERIES,
@@ -1112,7 +1167,12 @@ def _extract_json_object(text: str) -> dict:
     raise ValueError(f"Could not extract JSON object from response: {text[:500]}")
 
 
-def _join_research_context(*parts: tuple[str, str | None], max_chars: int = 18_000) -> str:
+# Ceiling for the joined research context handed to query generation. Raised
+# from 18,000 once AskNews is filtered upstream: at 18K the AskNews block alone
+# (21,302 / 23,820 raw) overran the cap and discarded the evidence plan that
+# follows it. Sized so a filtered block plus the plan fits whole, with the cut
+# reserved for a filter that failed open.
+def _join_research_context(*parts: tuple[str, str | None], max_chars: int = 40_000) -> str:
     chunks = []
     for label, content in parts:
         text = str(content or "").strip()

@@ -152,6 +152,16 @@ async def gather_forecast_runs(
         )
 
     async def _call(call_prompt: str, model: str, sublabel: str) -> tuple[str, str]:
+        # No cache_static_prefix here. Anthropic bills a cache WRITE at 1.25x
+        # input, and this cache can never be read: no two calls in a question
+        # share (model, prefix) -- runs 1 and 2 share a prompt but differ in
+        # model, and the heterogeneous run differs in both. Measured on 44879:
+        # the flag added $0.042 to a single Sonnet run (83,842 tok x $0.50/M)
+        # against `total_cached_input_tokens: 0` for the whole run.
+        # Re-enable only together with a real shared prefix: the ~11.9K chars of
+        # scaffold that ARE identical across questions currently sit AFTER the
+        # variable research in the template, where no prefix cache can reach
+        # them. Moving them first would be worth only ~$0.005/call.
         return await call_llm(
             call_prompt,
             model=model,
@@ -159,7 +169,6 @@ async def gather_forecast_runs(
             use_tools=False,
             _label=sublabel,
             return_transcript=True,
-            cache_static_prefix=True,
         )
 
     def _short_error(exc: Exception) -> str:

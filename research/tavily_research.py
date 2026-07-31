@@ -191,7 +191,7 @@ async def build_tavily_research_result(
         search_results=search_results,
         ranked_url_groups=ranked_url_groups,
         cycles=cycles,
-        report=_normalise_report_heading(cycles[-1].report if cycles else ""),
+        report=_normalise_report_heading(cycles[-1].cumulative_report if cycles else ""),
         search_depth=tavily_search_depth,
     )
 

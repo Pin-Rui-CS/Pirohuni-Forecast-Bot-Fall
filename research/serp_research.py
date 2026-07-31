@@ -76,6 +76,14 @@ _ENGINE_FIRECRAWL_RENDER = "firecrawl-render-wait"
 # that cannot afford this much would eat into the input tokens reserved for
 # compile/forecast — stop cycling and report with the cycles already done.
 _EXPECTED_CYCLE_INPUT_TOKENS = 31_250
+# Minimum pages an extract call should cover. Below this, _cycle_targets
+# backfills from the groups that still need evidence, so one extract call
+# covers more ground instead of the loop paying a fresh call per page.
+# Deliberately backfill-only: an earlier version also STOPPED the loop when a
+# late cycle held one page, which would have discarded the last ranked URL for
+# a group the extractor had just reported as lacking -- the 44512/44619 shape,
+# where the decisive evidence is exactly the thing that never got fetched.
+_MIN_CYCLE_TARGETS = 3
 
 
 @dataclass(frozen=True)
@@ -187,8 +195,16 @@ def _cache_payload(cached: str) -> tuple[str, str]:
 class Cycle:
     cycle: int
     scrapes: list[Scrape]
+    # ``report`` is this cycle's NEW findings only. Cycles used to re-emit the
+    # whole accumulated report every time, which cost a full rewrite in output
+    # tokens per cycle (44879 cycles 2 and 3 spent $0.057 and $0.063 to absorb
+    # one ~4.5K page each) and let a rewrite silently drop an earlier claim
+    # (the 44267 shape). ``cumulative_report`` is every cycle's findings joined
+    # in order and is what the provider section, the salvage floor, and the next
+    # cycle's prompt all read.
     report: str
     lacking_groups: list[str]
+    cumulative_report: str = ""
 
 
 @dataclass(frozen=True)
@@ -384,7 +400,7 @@ async def build_serp_research_result(
         organic_results=organic_results,
         ranked_url_groups=ranked_url_groups,
         cycles=cycles,
-        report=cycles[-1].report if cycles else "",
+        report=cycles[-1].cumulative_report if cycles else "",
     )
 
 
@@ -490,6 +506,7 @@ async def run_scrape_cycles(
     cycles: list[Cycle] = []
     next_index = {group.group: 0 for group in groups}
     needed = {group.group for group in groups}
+    report_parts: list[str] = []
     report = ""
 
     for cycle_no in range(1, max_cycles + 1):
@@ -515,7 +532,7 @@ async def run_scrape_cycles(
             cycle_no=cycle_no,
         )
         try:
-            report, lack = await _extract_with_one_retry(
+            delta, lack = await _extract_with_one_retry(
                 cycle_no=cycle_no,
                 title=title,
                 resolution_criteria=resolution_criteria,
@@ -524,6 +541,10 @@ async def run_scrape_cycles(
                 groups=groups,
                 cycles=[*cycles, Cycle(cycle_no, scrapes, "", [])],
                 previous_report=report,
+                # After cycle 1 the extractor is asked to fill only the
+                # categories the previous cycle reported lacking; those are the
+                # only ones this cycle fetched pages for.
+                focus_groups=set(needed) if cycles else None,
                 model=model,
                 url_dates=url_dates,
             )
@@ -552,20 +573,31 @@ async def run_scrape_cycles(
 
         valid_names = {group.group for group in groups}
         lack = [name for name in lack if name in valid_names]
-        cycles.append(Cycle(cycle=cycle_no, scrapes=scrapes, report=report, lacking_groups=lack))
-        # Trace each cycle's report BEFORE the next cycle rewrites it — only the
-        # final version survives into research.md, so cycle-over-cycle drops are
-        # otherwise invisible (the 44267 "correction discarded" class).
+        report = _append_cycle_report(report_parts, delta, cycle_no)
+        cycles.append(
+            Cycle(
+                cycle=cycle_no,
+                scrapes=scrapes,
+                report=delta,
+                lacking_groups=lack,
+                cumulative_report=report,
+            )
+        )
+        # Trace each cycle's own findings. Deltas make cycle-over-cycle drops
+        # impossible by construction (nothing rewrites an earlier cycle), but
+        # the per-cycle payload is still what makes each cycle's yield
+        # auditable against its cost.
         trace_tool, trace_phase = source_ledger.current_context()
         research_trace.emit(
             "extract_report",
             f"{trace_tool} extract report — cycle {cycle_no}",
-            report,
+            delta,
             meta={
                 "chain": f"extract:{trace_tool}:{trace_phase}",
                 "cycle": cycle_no,
                 "lacking_groups": lack,
                 "scraped_urls": [scrape.url for scrape in scrapes],
+                "cumulative_chars": len(report),
             },
         )
         needed = set(lack)
@@ -573,6 +605,23 @@ async def run_scrape_cycles(
             break
 
     return cycles
+
+
+def _append_cycle_report(parts: list[str], delta: str, cycle_no: int) -> str:
+    """Append one cycle's new findings and return the cumulative report.
+
+    Cycle 1's report is kept as-is (it carries the "# ... Scraped Research"
+    heading the section renderer expects). Later cycles are appended under a
+    cycle-labelled heading so provenance survives the join and nothing an
+    earlier cycle established can be overwritten.
+    """
+    delta = str(delta or "").strip()
+    if delta:
+        if parts:
+            parts.append(f"## Additional findings from scrape cycle {cycle_no}\n\n{delta}")
+        else:
+            parts.append(delta)
+    return "\n\n".join(parts).strip()
 
 
 async def _extract_with_one_retry(cycle_no: int, **extract_kwargs) -> tuple[str, list[str]]:
@@ -609,7 +658,10 @@ def _has_salvageable_report(
     if not cycles:
         return False
     last = cycles[-1]
-    if not last.report.strip():
+    # Judged on the CUMULATIVE report: with additive cycles the last cycle's
+    # own delta may legitimately be small, and salvaging must weigh everything
+    # the provider actually established, not just its most recent increment.
+    if not (last.cumulative_report or last.report).strip():
         return False
     return len(set(last.lacking_groups)) < len({group.group for group in groups})
 
@@ -624,6 +676,7 @@ async def extract_serp_research(
     previous_report: str,
     model: str = DEFAULT_EXTRACT_MODEL,
     url_dates: dict[str, str] | None = None,
+    focus_groups: set[str] | None = None,
 ) -> tuple[str, list[str]]:
     prompt = _build_extract_prompt(
         title=title,
@@ -634,6 +687,7 @@ async def extract_serp_research(
         cycles=cycles,
         previous_report=previous_report,
         url_dates=url_dates,
+        focus_groups=focus_groups,
     )
     response = await call_llm(
         prompt,
@@ -642,7 +696,7 @@ async def extract_serp_research(
         use_tools=False,
         _label="serp-scrape-extract",
     )
-    report, raw_lack = _parse_extract_response(response)
+    delta, raw_lack = _parse_extract_response(response)
     lack: list[str] = []
     if isinstance(raw_lack, list):
         for item in raw_lack:
@@ -654,7 +708,10 @@ async def extract_serp_research(
                 name = ""
             if name and name not in lack:
                 lack.append(name)
-    return report or previous_report, lack
+    # The caller appends this to the cumulative report, so an empty reply must
+    # come back empty — returning ``previous_report`` here would duplicate the
+    # whole accumulated report into the next cycle's slice.
+    return delta, lack
 
 
 _FENCED_BLOCK_PATTERN = re.compile(r"```[a-zA-Z]*\s*\n?(.*?)```", re.DOTALL)
@@ -977,6 +1034,27 @@ def _cycle_targets(
             continue
         targets.append((group, group.urls[index]))
         next_index[group.group] = index + 1
+
+    # Backfill thin cycles. An extract call carries ~15-16K chars of fixed
+    # overhead (the accumulated prior report is re-sent every cycle), so a cycle
+    # holding one page pays full price for it: on 44879 cycles 2 and 3 each
+    # scraped a single ~4.5K-char CISA alert and cost $0.057 / $0.063. Pulling
+    # deeper URLs from the groups that still need evidence amortises that one
+    # overhead across more pages instead of paying it per page — strictly more
+    # coverage for the same LLM spend (it costs Firecrawl credits, which are
+    # capped separately by FIRECRAWL_QUESTION_CREDIT_CAP).
+    if len(targets) < _MIN_CYCLE_TARGETS:
+        for group in groups:
+            if group.group not in needed:
+                continue
+            while len(targets) < _MIN_CYCLE_TARGETS:
+                index = next_index.get(group.group, 0)
+                if index >= len(group.urls):
+                    break
+                targets.append((group, group.urls[index]))
+                next_index[group.group] = index + 1
+            if len(targets) >= _MIN_CYCLE_TARGETS:
+                break
     return targets
 
 
@@ -1402,15 +1480,52 @@ def _build_extract_prompt(
     cycles: list[Cycle],
     previous_report: str,
     url_dates: dict[str, str] | None = None,
+    focus_groups: set[str] | None = None,
 ) -> str:
+    # After cycle 1 only the categories the previous cycle reported lacking were
+    # fetched for, so those are the only ones worth listing: a settled category
+    # cannot be improved by pages that were never scraped for it.
+    listed_groups = [
+        group for group in groups
+        if focus_groups is None or group.group in focus_groups
+    ] or groups
     group_lines = "\n".join(
         f"- {group.group}: {group.group_purpose}"
-        for group in groups
+        for group in listed_groups
     )
     prompt_cycles = cycles[-1:] if previous_report else cycles
     scrape_text = _format_scrapes_for_prompt(prompt_cycles, url_dates)
     scrape_text = _truncate_text(scrape_text, _MAX_EXTRACT_INPUT_CHARS)
     today = datetime.datetime.now().strftime("%Y-%m-%d")
+    if previous_report:
+        report_task = (
+            "Report ONLY what the NEW scrape packets below add. The previous "
+            "compiled report is shown for context so you do not repeat it — it "
+            "is already kept in full and will be joined with your output "
+            "automatically.\n"
+            "- Do NOT restate, rewrite, reorganise, or re-quote anything already "
+            "in the previous report. Do not reproduce its heading.\n"
+            "- Write only \"## \" category sections for categories that the new "
+            "packets actually add something to.\n"
+            "- If a new packet CONTRADICTS or CORRECTS something in the previous "
+            "report, say so explicitly and name the superseded claim — that is "
+            "new information and must be reported.\n"
+            "- If the new packets add nothing usable, write exactly: "
+            "\"No new usable findings from this cycle.\""
+        )
+        part_one_shape = (
+            'ONLY the new findings, as "## " category sections. No "# " '
+            "heading — this text is appended to the previous report."
+        )
+    else:
+        report_task = (
+            "Compile the useful facts from all scrape packets into a clean "
+            "research report by category."
+        )
+        part_one_shape = (
+            'The research report as plain markdown. Start it with a "# " '
+            'heading and organise it with "## " category sections.'
+        )
 
     return f"""
 You are a research assistant compiling scraped web evidence for a forecasting question.
@@ -1434,7 +1549,7 @@ Research categories you may use when requesting more scraping:
 {group_lines or "- None"}
 
 Task:
-- Compile the useful facts from all scrape packets into a clean research report by category.
+- {report_task}
 - State the actual extracted contents: facts, numbers, dates, names, rules, and quoted/near-quoted source claims.
 
 Ground every statement in the scraped content — never fabricate or add information:
@@ -1454,8 +1569,7 @@ Ground every statement in the scraped content — never fabricate or add informa
 
 Output format — exactly two parts, in this order:
 
-PART 1: The research report as plain markdown. Start it with a "# " heading and
-organise it with "## " category sections. Write it directly — do NOT wrap it in
+PART 1: {part_one_shape} Write it directly — do NOT wrap it in
 JSON, quotes, or a code fence.
 
 PART 2: After the report, one fenced JSON block containing ONLY the lacking

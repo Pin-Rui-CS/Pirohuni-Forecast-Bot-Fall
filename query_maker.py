@@ -15,7 +15,13 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_QUERY_COUNT = 8
 DEFAULT_QUERY_GENERATION_MODEL = "anthropic/claude-sonnet-5"
-DEFAULT_ASKNEWS_CHAR_LIMIT = 14_000
+# Cap on the joined "AskNews research + evidence plan" context. Raised from
+# 14,000 once AskNews is filtered upstream and the plan is joined FIRST: at 14K
+# the raw AskNews block consumed the entire budget on its own, so the evidence
+# plan — the one input that names the artifact these queries are supposed to
+# find — reached this prompt as zero bytes in both audited runs. Now a safety
+# net for a filter that failed open, not a routine cut.
+DEFAULT_ASKNEWS_CHAR_LIMIT = 40_000
 
 
 @dataclass(frozen=True)

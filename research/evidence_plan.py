@@ -9,7 +9,11 @@ import research_trace
 
 
 DEFAULT_EVIDENCE_PLAN_MODEL = "anthropic/claude-sonnet-5"
-_MAX_ASKNEWS_CHARS = 12_000
+# Safety net, not a routine cut. At 12,000 this discarded 44% of the AskNews
+# block by position — the plan named the required artifact from the surviving
+# head, but which 56% it saw was decided by article order. AskNews is now
+# filtered for relevance before this call, so the whole filtered block fits.
+_MAX_ASKNEWS_CHARS = 40_000
 
 
 async def build_evidence_plan(
