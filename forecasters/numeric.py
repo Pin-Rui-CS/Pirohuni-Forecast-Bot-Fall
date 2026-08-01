@@ -310,6 +310,9 @@ class ScaledBeta:
         z = (np.asarray(x) - self.lower) / (self.upper - self.lower)
         return self.beta.pdf(z) / (self.upper - self.lower)
 
+    def ppf(self, q):
+        return self.lower + self.beta.ppf(q) * (self.upper - self.lower)
+
 
 def build_distribution(spec: dict):
     """Return a scipy-like object with a .cdf() method from a JSON spec."""
@@ -390,44 +393,98 @@ def build_distribution(spec: dict):
         raise ValueError(f"Unknown distribution type: {t}")
 
 
-def _distribution_location_values(spec: dict) -> list[float]:
-    """Return distribution parameters that live on the outcome-value axis."""
+def _approx_component_center(t: str, p: dict) -> float | None:
+    """Parameter-only estimate of a component's centre, for the cases where the
+    distribution cannot be constructed (unit detection runs on RAW components,
+    before validation, so the params may be unbuildable).
+
+    Support bounds appear here ONLY where they genuinely determine the centre
+    (``beta``, ``uniform``) or where they clamp it (``truncated_normal``). They
+    are never treated as locations in their own right — see
+    ``component_center`` for why that distinction is load-bearing."""
+    def num(key):
+        v = p.get(key)
+        return float(v) if isinstance(v, (int, float)) and np.isfinite(float(v)) else None
+
+    if t == "normal":
+        return num("mean")
+    if t in ("skew_normal", "student_t"):
+        return num("location")
+    if t == "gamma":
+        return num("mean")
+    if t in ("log_normal", "lognormal"):
+        median = num("median")
+        if median is not None:
+            return median
+        mu = num("mu")
+        return float(np.exp(mu)) if mu is not None else None
+    if t == "truncated_normal":
+        mean, lo, hi = num("mean"), num("lo"), num("hi")
+        if mean is None:
+            return None
+        if lo is not None and hi is not None and hi > lo:
+            return float(min(max(mean, lo), hi))
+        return mean
+    if t in ("beta", "uniform"):
+        lo, hi = num("lower"), num("upper")
+        if lo is None or hi is None:
+            return None
+        return 0.5 * (lo + hi)
+    if t == "mixture_normal":
+        means = [
+            float(m) for m in (p.get("means") or [])
+            if isinstance(m, (int, float)) and np.isfinite(float(m))
+        ]
+        return float(np.mean(means)) if means else None
+    return None
+
+
+def component_center(family: str, params: dict) -> float | None:
+    """The value-axis centre of ONE component: the median of the distribution
+    it actually describes.
+
+    This is the only correct answer to "where does this component sit", and it
+    replaces an earlier implementation that returned a *bag* of parameters. For
+    ``truncated_normal`` that bag was ``[mean, lo, hi]``, so a percentage
+    forecast of 4.31 carrying the physically-correct support bounds 0/100 read
+    as a location of ~52 — a number that describes nothing. On Q44943 that
+    bogus location (a) convinced the unit-slip detector the run was off by a
+    factor of ten and (b) then vetoed the off-grid gate that would have caught
+    the damage. One list, two disarmed safety checks; see INCIDENTS.md.
+
+    Support bounds influence the answer only where they genuinely determine it
+    (``uniform``, ``beta``) or clamp it (``truncated_normal``). That falls out
+    for free from taking the median of the assembled distribution, which is why
+    this is a semantic fix rather than a blacklist of parameter names — a
+    blacklist would strip ``lower``/``upper`` from ``beta`` and ``uniform``,
+    which have no other location signal at all."""
+    try:
+        center = float(build_distribution({"type": family, "params": params}).ppf(0.5))
+        if np.isfinite(center):
+            return center
+    except Exception:  # noqa: BLE001 - raw pre-validation params may not build
+        pass
+    return _approx_component_center(family, params)
+
+
+def spec_center_values(spec: dict) -> list[float]:
+    """One centre per component of a built spec (the whole distribution for a
+    single family, every component for a mixture, every support value for a
+    pmf). Callers reason about where a run's mass sits; they must never see raw
+    parameters, only centres."""
     t = spec["type"]
     p = spec.get("params") or {k: v for k, v in spec.items() if k != "type"}
 
     if t == "pmf":
         values, _ = _parse_pmf_params(p)
-    elif t == "normal":
-        values = [p.get("mean")]
-    elif t == "mixture_normal":
-        values = p.get("means") or []
-    elif t == "skew_normal":
-        values = [p.get("location")]
-    elif t == "student_t":
-        values = [p.get("location")]
-    elif t == "beta":
-        values = [p.get("lower"), p.get("upper")]
-    elif t == "uniform":
-        values = [p.get("lower"), p.get("upper")]
-    elif t in ("log_normal", "lognormal"):
-        if isinstance(p.get("median"), (int, float)):
-            values = [p["median"]]
-        elif isinstance(p.get("mu"), (int, float)):
-            values = [np.exp(p["mu"])]
-        else:
-            values = []
-    elif t == "gamma":
-        values = [p.get("mean")]
-    elif t == "truncated_normal":
-        values = [p.get("mean"), p.get("lo"), p.get("hi")]
     elif t == "mixture":
         values = [
             value
             for component in (p.get("components") or [])
-            for value in _distribution_location_values(component)
+            for value in spec_center_values(component)
         ]
     else:
-        values = []
+        values = [component_center(t, p)]
 
     return [
         float(value)
@@ -453,58 +510,89 @@ def _generous_grid_window(raw_grid: np.ndarray) -> tuple[float, float]:
     it are 'close enough' to the grid to be treated as already in the right
     units. A finite window is essential: for open bounds the true compatibility
     window is infinite, so it cannot distinguish a unit slip from a correct
-    forecast — this one always can."""
+    forecast — this one always can.
+
+    The width is purely RELATIVE to the question's own range. An earlier
+    version floored it at an absolute ``1.0``, which on Q44943's 0.6-wide
+    percentage grid inflated the window to 3.3x the answer space and let a
+    bogus rescale land inside it. An absolute constant cannot be right for a
+    quantity whose units the question chooses."""
     raw_min = float(np.nanmin(raw_grid))
     raw_max = float(np.nanmax(raw_grid))
     lo, hi = min(raw_min, raw_max), max(raw_min, raw_max)
-    rng = max(hi - lo, 1.0)
+    rng = hi - lo
+    if rng <= 0:
+        # Degenerate grid: fall back to the grid's own magnitude.
+        rng = max(abs(hi), abs(lo), 1e-9)
     return lo - rng, hi + rng
 
 
 def _detect_power_of_ten_scale(
-    value_axis_params: list[float],
+    center_values: list[float],
     raw_grid: np.ndarray,
 ) -> float:
-    """Return the power-of-ten factor that maps the model's location parameters
+    """Return the power-of-ten factor that maps the model's component centres
     back onto the grid, or 1.0 when no unambiguous unit slip is detected.
 
-    Three gates, all of which must pass:
-      (a) the raw params sit clearly OFF the grid (outside a generous finite
-          window around it) — params already on the grid are never touched;
-      (b) the grid/param magnitude ratio is within ``UNIT_SCALE_SNAP_TOL`` of an
-          exact power of ten (so we know the factor, and that it is a unit slip
-          rather than an arbitrary offset);
-      (c) applying that factor lands the params back inside the window.
+    ``center_values`` must be component CENTRES (see ``component_center``),
+    never raw parameters: a support bound is not a location, and mixing the two
+    produces meaningless magnitudes that pass every magnitude test.
+
+    A genuine unit slip is *unanimous and total* — the model wrote its whole
+    answer in one wrong unit, so every centre is off by the same factor and
+    none of them is already correct. Five gates, all of which must pass:
+
+      (a) UNANIMITY. Every centre sits clearly OFF the grid (outside a generous
+          finite window around it). If even one centre is already on-grid there
+          is no unit slip, whatever the others look like — a real slip cannot
+          leave part of the answer in the right units. This alone blocks the
+          Q44943 failure, where the true centre 4.31 was on-grid all along.
+      (b) SAME SIDE. All centres are off in the same direction. A set straddling
+          the grid is a spread, not a unit error.
+      (c) CLEAN FACTOR. The grid/centre magnitude ratio is within
+          ``UNIT_SCALE_SNAP_TOL`` of an exact power of ten, so we know both the
+          factor and that this is a unit slip rather than an arbitrary offset.
+      (d) COMPLETENESS. Applying the factor lands EVERY centre back inside the
+          window — not merely a representative one. A correction that fixes
+          some components and strands others is not a unit conversion.
+    Together (a) and (d) give the invariant that makes the transform provably
+    non-destructive: NO CENTRE IS EVER MOVED FROM ON-GRID TO OFF-GRID. (a)
+    guarantees none started on-grid; (d) guarantees all end there.
     """
     finite = [
         float(v)
-        for v in value_axis_params
+        for v in center_values
         if isinstance(v, (int, float)) and np.isfinite(float(v)) and float(v) != 0.0
     ]
     if not finite:
         return 1.0
 
     window_lo, window_hi = _generous_grid_window(raw_grid)
-    representative = float(np.median(finite))
 
-    # Gate (a): already on (or near) the grid -> no unit problem.
-    if window_lo <= representative <= window_hi:
+    def in_window(value: float) -> bool:
+        return window_lo <= value <= window_hi
+
+    # Gate (a): any centre already on the grid -> not a unit slip.
+    if any(in_window(v) for v in finite):
+        return 1.0
+    # Gate (b): all off the same edge.
+    if not (all(v < window_lo for v in finite) or all(v > window_hi for v in finite)):
         return 1.0
 
     grid_scale = float(np.median(np.abs(raw_grid)))
-    param_scale = float(np.median([abs(v) for v in finite]))
-    if grid_scale <= 0 or param_scale <= 0:
+    center_scale = float(np.median([abs(v) for v in finite]))
+    if grid_scale <= 0 or center_scale <= 0:
         return 1.0
 
-    log_ratio = float(np.log10(grid_scale / param_scale))
+    log_ratio = float(np.log10(grid_scale / center_scale))
     exponent = round(log_ratio)
-    # Gate (b): an actual gap, and a clean power of ten.
+    # Gate (c): an actual gap, and a clean power of ten.
     if exponent == 0 or abs(log_ratio - exponent) > UNIT_SCALE_SNAP_TOL:
         return 1.0
 
     factor = 10.0**exponent
-    # Gate (c): the rescale must actually bring the params back onto the grid.
-    if not (window_lo <= representative * factor <= window_hi):
+    # Gate (d): EVERY centre must end up on-grid, not merely a representative.
+    if not all(in_window(v * factor) for v in finite):
         return 1.0
     return factor
 
@@ -569,10 +657,15 @@ def _rescale_raw_component(raw: dict, scale: float) -> dict:
     out = dict(raw)
     out["family"] = family
     out["params"] = _rescale_component_params(family, params, scale)
-    # Keep the model's stated p50 / 90% CI in the same (raw) units so the
-    # self-consistency check compares like with like.
+    out["unit_scale_applied"] = scale
+    # Convert the model's stated p50 / 90% CI too, so the width check in
+    # build_mixture_spec_from_components compares like with like. The originals
+    # are preserved verbatim alongside: a transform must never be able to erase
+    # the record of what the model actually said, or the artifact becomes
+    # unauditable after the fact (Q44943).
     p50 = raw.get("implied_p50")
     if isinstance(p50, (int, float)):
+        out["declared_implied_p50"] = float(p50)
         out["implied_p50"] = float(p50) * scale
     ci = raw.get("implied_90ci")
     if (
@@ -580,6 +673,7 @@ def _rescale_raw_component(raw: dict, scale: float) -> dict:
         and len(ci) == 2
         and all(isinstance(v, (int, float)) for v in ci)
     ):
+        out["declared_implied_90ci"] = [float(ci[0]), float(ci[1])]
         out["implied_90ci"] = [float(ci[0]) * scale, float(ci[1]) * scale]
     return out
 
@@ -602,15 +696,15 @@ def detect_component_unit_scale(
     raw question units). ``open_upper_bound``/``open_lower_bound`` are accepted
     for caller symmetry; the detector uses a finite window that works for both
     open and closed bounds."""
-    value_axis_params: list[float] = []
+    centers: list[float] = []
     for raw in components:
         if not isinstance(raw, dict):
             continue
         family, params = _component_family_and_params(raw)
-        value_axis_params.extend(
-            _distribution_location_values({"type": family, "params": params})
-        )
-    return _detect_power_of_ten_scale(value_axis_params, raw_grid)
+        center = component_center(family, params)
+        if center is not None:
+            centers.append(center)
+    return _detect_power_of_ten_scale(centers, raw_grid)
 
 
 def spec_to_cdf(spec: dict, grid: np.ndarray) -> list[float]:
@@ -955,6 +1049,113 @@ def _format_bound(value: float) -> str:
 # allowed but must be argued for rather than arrived at by accident.
 MIN_UNARGUED_IN_RANGE_MASS = 0.40
 
+# --- The declared answer-space witness ------------------------------------
+# Every run states, in prose and before any pipeline transform touches it, how
+# much of its mass falls below / inside / above the question's band. Those three
+# numbers are the only description of a run's forecast that no later stage can
+# rewrite, and they are UNIT-FREE relative to the band: a legitimate unit
+# conversion preserves them exactly, a wrong one destroys them. That makes them
+# the right witness against which to verify every transform we apply.
+#
+# Until Q44943 the pipeline never read them back. Run 2 declared
+# P(< 3.9) = 0.022 roughly 140 lines above a JSON block that rendered to
+# P(< 3.9) = 1.000, and the contradiction shipped.
+ANSWER_SPACE_MARKER = "ANSWER_SPACE:"
+
+# Largest per-bucket disagreement between what a run declared and what its own
+# JSON renders to before we stop trusting the rendered curve. Measured on the
+# Q44943 artifacts: the two healthy runs missed by 0.004 and 0.060, the
+# corrupted run by 0.978. Anything in 0.15-0.25 separates them by more than an
+# order of magnitude; 0.20 leaves the honest runs three times their observed
+# error in headroom. Models state these to one or two decimals from memory, so
+# the tolerance must absorb genuine sloppiness — it is a corruption detector,
+# not a calibration check.
+ANSWER_SPACE_TOLERANCE = 0.20
+
+
+def parse_declared_answer_space(text: str) -> tuple[float, float, float] | None:
+    """Pull a run's declared (below, in, above) answer-space split out of its
+    response, or ``None`` when it never stated one.
+
+    Reads the machine-readable ``ANSWER_SPACE:`` line first, then falls back to
+    the free prose the prompt has always asked for. The fallback matters: the
+    marker is new, older transcripts predate it, and a model that ignores the
+    format must still be checkable. Returns probabilities normalised to sum to
+    1 (models routinely state 0.02/0.80/0.18 style roundings)."""
+    if not text:
+        return None
+
+    marker = re.search(
+        r"ANSWER_SPACE\s*:\s*below\s*=\s*([0-9.]+)\s+in\s*=\s*([0-9.]+)\s+above\s*=\s*([0-9.]+)",
+        text,
+        re.IGNORECASE,
+    )
+    if marker:
+        triple = tuple(float(g) for g in marker.groups())
+    else:
+        # Prose fallback. Q44943's three runs wrote this three different ways
+        # ("P(below 3.9) ≈ **0.01**", "`P(outcome < 3.9%) = 0.022`",
+        # "P(below 3.9) ≈ 0.03"), so match on the relation and take the last
+        # number on the line rather than on any fixed layout.
+        below = _last_probability_on_line(text, r"P\s*\(\s*(?:outcome\s*)?(?:below|<)")
+        above = _last_probability_on_line(text, r"P\s*\(\s*(?:outcome\s*)?(?:above|>)")
+        inside = _last_probability_on_line(
+            text, r"P\s*\(\s*(?:outcome\s*)?(?:between|\d[\d.,]*\s*%?\s*(?:≤|<=))"
+        )
+        if below is None or above is None:
+            return None
+        if inside is None:
+            inside = max(0.0, 1.0 - below - above)
+        triple = (below, inside, above)
+
+    if any(not np.isfinite(v) or v < 0 for v in triple):
+        return None
+    total = sum(triple)
+    if total <= 0:
+        return None
+    return (triple[0] / total, triple[1] / total, triple[2] / total)
+
+
+def _last_probability_on_line(text: str, lead_pattern: str) -> float | None:
+    """The last probability-looking number on the first line matching
+    ``lead_pattern``. Percentages ('13%') are converted to fractions."""
+    for line in text.splitlines():
+        if not re.search(lead_pattern, line, re.IGNORECASE):
+            continue
+        numbers = re.findall(r"([0-9]*\.?[0-9]+)\s*(%?)", line)
+        if not numbers:
+            continue
+        raw, percent = numbers[-1]
+        try:
+            value = float(raw)
+        except ValueError:
+            continue
+        if percent:
+            value /= 100.0
+        if 0.0 <= value <= 1.0:
+            return value
+    return None
+
+
+def rendered_answer_space(cdf: np.ndarray | list[float]) -> tuple[float, float, float]:
+    """The (below, in, above) split a rendered CDF actually implies. The grid
+    spans exactly the question's band, so this is read straight off the ends."""
+    values = np.asarray(cdf, dtype=float)
+    below = float(values[0])
+    above = float(1.0 - values[-1])
+    return below, max(0.0, 1.0 - below - above), above
+
+
+def answer_space_disagreement(
+    cdf: np.ndarray | list[float], declared: tuple[float, float, float] | None
+) -> float | None:
+    """Largest per-bucket gap between a run's declaration and its rendered CDF,
+    or ``None`` when the run declared nothing to check against."""
+    if declared is None:
+        return None
+    rendered = rendered_answer_space(cdf)
+    return max(abs(r - d) for r, d in zip(rendered, declared))
+
 
 def answer_space_blocks(
     lower_bound: float,
@@ -1033,6 +1234,13 @@ def answer_space_blocks(
         f"it as a claim and justify it from dated, on-metric evidence, or else revisit "
         f"whether your interval is too wide or your centre is misplaced. Do not arrive "
         f"there silently.\n"
+        f"  Then restate exactly those three numbers on a line of their own, in this "
+        f"exact format, on one line, with no bold and no other text:\n"
+        f"  {ANSWER_SPACE_MARKER} below=<p> in=<p> above=<p>\n"
+        f"  This line is read mechanically and checked against the distribution your "
+        f"final JSON actually produces. It is your own statement of where your mass "
+        f"sits, so it is the reference the pipeline trusts if the two ever disagree — "
+        f"emit it even when the three numbers are already written out above.\n"
     )
     return "\n".join(lines), check
 
@@ -1604,8 +1812,10 @@ def _validate_component(family: str, params: dict) -> tuple[bool, str]:
 
 
 def _component_center(family: str, params: dict) -> float | None:
-    values = _distribution_location_values({"type": family, "params": params})
-    return float(np.mean(values)) if values else None
+    # Kept as a thin alias: the merge tolerance below compares component
+    # centres, and it inherited the same parameter-bag bug (two truncated
+    # normals were compared on the average of their means and bounds).
+    return component_center(family, params)
 
 
 def _check_component_ci(
@@ -1870,19 +2080,25 @@ def quantile_average_cdfs(cdfs: list[np.ndarray]) -> np.ndarray:
     conditionals: list[np.ndarray] = []
     for cdf in cdfs:
         clean = np.maximum.accumulate(np.clip(np.asarray(cdf, dtype=float), 0.0, 1.0))
-        lower_mass = float(clean[0])
-        upper_mass = float(1.0 - clean[-1])
+        lower_masses.append(float(clean[0]))
+        upper_masses.append(float(1.0 - clean[-1]))
         span = float(clean[-1] - clean[0])
-        if span <= 1e-9:
-            conditional = np.linspace(0.0, 1.0, size)
-        else:
-            conditional = (clean - clean[0]) / span
-        lower_masses.append(lower_mass)
-        upper_masses.append(upper_mass)
-        conditionals.append(conditional)
+        # A run with (near) no mass on the grid has no shape to contribute. Its
+        # OPINION still counts — that opinion is precisely "the answer is off the
+        # grid", which is carried by the lower/upper masses above and is a
+        # legitimate claim against an open bound. But its conditional shape is
+        # undefined, and substituting a uniform ramp (as this did previously)
+        # injects a flat smear into the shape average, degrading every other
+        # run's spread. Contribute the mass, abstain from the shape.
+        if span > 1e-9:
+            conditionals.append((clean - clean[0]) / span)
 
     average_lower = float(np.mean(lower_masses))
     average_upper = float(np.mean(upper_masses))
+    if not conditionals:
+        # Every run is off-grid. There is no shape information anywhere, so the
+        # only honest in-grid curve is the uniform one.
+        conditionals = [np.linspace(0.0, 1.0, size)]
 
     average_positions = np.zeros_like(levels)
     for conditional in conditionals:
@@ -2045,6 +2261,8 @@ def numeric_response_to_raw_cdf(
     response: str,
     geometry: dict,
     grid: np.ndarray,
+    *,
+    force_unit_scale: float | None = None,
 ) -> tuple[np.ndarray, dict, str, str, bool]:
     """Convert one run's response into a raw CDF on the grid.
 
@@ -2052,6 +2270,10 @@ def numeric_response_to_raw_cdf(
     ``used_fallback`` is True when none of the run's components survived
     validation and a broad-normal was substituted — the caller logs that loudly
     against the run's model rather than letting it pass silently.
+
+    ``force_unit_scale`` pins the unit conversion instead of detecting it. The
+    caller uses ``force_unit_scale=1.0`` to re-render a run untransformed when
+    the answer-space witness says the detected conversion broke it.
     """
     parsed, reasoning = parse_numeric_response(response)
     question_type = geometry["question_type"]
@@ -2077,6 +2299,7 @@ def numeric_response_to_raw_cdf(
                 "corroborated gaps before aggregation.",
                 len(set(values)), outcome_count,
             )
+        parsed["unit_scale"] = 1.0
         return raw_cdf, parsed, reasoning, "PMF over outcome values; no unit conversion applied.", False
 
     # Mixture of smooth families (a single family is a 1-component mixture).
@@ -2088,29 +2311,46 @@ def numeric_response_to_raw_cdf(
     # range) and the component parameters in the SAME units, so the floor can
     # never be applied across a unit mismatch. The CDF is then evaluated on the
     # raw grid directly — no later x/1e6 step.
-    unit_scale = detect_component_unit_scale(
-        parsed["components"],
-        grid,
-        open_upper_bound=open_upper_bound,
-        open_lower_bound=open_lower_bound,
-    )
+    if force_unit_scale is not None:
+        unit_scale = float(force_unit_scale)
+    else:
+        unit_scale = detect_component_unit_scale(
+            parsed["components"],
+            grid,
+            open_upper_bound=open_upper_bound,
+            open_lower_bound=open_lower_bound,
+        )
     if unit_scale != 1.0:
         components = [_rescale_raw_component(c, unit_scale) for c in parsed["components"]]
         unit_note = (
-            f"Detected a unit mismatch: component parameters sat off the Metaculus "
+            f"Detected a unit mismatch: component centres sat off the Metaculus "
             f"grid by a clean factor of {unit_scale:g}. Rescaled every component "
             f"parameter x{unit_scale:g} into the grid's units before applying guardrails."
         )
     else:
         components = parsed["components"]
-        unit_note = "Metaculus grid and distribution parameters appear to use the same units."
+        unit_note = (
+            "Unit conversion forced to 1.0 by the caller."
+            if force_unit_scale is not None
+            else "Metaculus grid and distribution parameters appear to use the same units."
+        )
 
     spec, notes = build_mixture_spec_from_components(components, geometry)
     used_fallback = spec is None
     if spec is None:
         spec = _fallback_mixture_spec(geometry)
         notes = notes + ["all components invalid; fell back to a broad normal"]
+    # ONE rescaled truth. The rescaled components are what produced the spec, so
+    # they are what the record must carry. Writing the spec while leaving
+    # ``parsed["components"]`` at its pre-rescale values is what let Q44943's
+    # forecast.json ship `components.mean = 4.31` next to `spec.mean = 0.431` —
+    # a record that contradicts itself cannot be audited, and every reviewer of
+    # that incident had to reconstruct which half was real.
+    parsed["components"] = components
     parsed["spec"] = spec
+    parsed["unit_scale"] = unit_scale
+    if not used_fallback:
+        _assert_spec_matches_components(spec, components, geometry)
     if question_type == "discrete" and geometry.get("use_pmf", True):
         # Only a concern for genuine count questions; fine-resolution discrete
         # questions are expected to use a continuous mixture by design.
@@ -2121,6 +2361,43 @@ def numeric_response_to_raw_cdf(
     if notes:
         unit_note = unit_note + " | guardrails: " + "; ".join(notes)
     return raw_cdf, parsed, reasoning, unit_note, used_fallback
+
+
+def _assert_spec_matches_components(
+    spec: dict, components: list, geometry: dict
+) -> None:
+    """Hard-fail when the spec that will be rendered does not describe the same
+    components the record carries.
+
+    Scope, stated plainly: this does NOT catch a wrong unit conversion — after
+    the fix above, a bad rescale corrupts both halves identically and they still
+    agree. What it catches is a *split-brain record*, the Q44943 symptom where
+    ``spec`` and ``components`` were written from different sources and the
+    artifact could no longer be audited. The guardrails in
+    ``build_mixture_spec_from_components`` may drop, merge, cap and widen
+    components, all of which keep every surviving centre inside the hull of the
+    input centres, so the tolerance below only has to absorb the one guardrail
+    that can move a centre at all (the gamma width floor). A record that
+    disagrees with itself is a bug in this file, not a bad forecast: raising
+    drops the single run rather than shipping something unreadable."""
+    input_centers = [
+        c for c in (
+            component_center(*_component_family_and_params(raw))
+            for raw in components if isinstance(raw, dict)
+        ) if c is not None
+    ]
+    spec_centers = spec_center_values(spec)
+    if not input_centers or not spec_centers:
+        return
+    tol = abs(geometry["upper_bound"] - geometry["lower_bound"]) or 1.0
+    lo, hi = min(input_centers) - tol, max(input_centers) + tol
+    stray = [c for c in spec_centers if not (lo <= c <= hi)]
+    if stray:
+        raise ValueError(
+            f"spec/components disagree: rendered centres {stray} fall outside the "
+            f"component centres {input_centers} widened by one question range "
+            f"([{lo:g}, {hi:g}]); refusing to build a self-contradicting record"
+        )
 
 
 _NUMERIC_REPAIR_INSTRUCTION = (
@@ -2151,34 +2428,53 @@ def _make_numeric_validator(geometry: dict):
     return _validate
 
 
-def _cdf_is_degenerate_off_grid(
-    raw_cdf: np.ndarray, location_values: list[float], grid: np.ndarray
-) -> bool:
-    """True when a run's whole distribution sits off the grid: the CDF is flat
-    across the entire grid because all the mass is below the lower bound (CDF
-    ~1 everywhere) or above the upper bound (CDF ~0 everywhere).
+MIN_IN_GRID_MASS = 0.02
 
-    Such a run carries no shape information on the grid; after standardisation it
-    becomes a near-uniform ramp, and averaging that into the ensemble only smears
-    the consensus (the 44218 SPR failure). It is dropped rather than blended in.
-    This fires only on a truly flat curve, so a run that genuinely varies across
-    the grid — even one skewed hard against an open bound — is kept."""
+
+def _cdf_is_degenerate_off_grid(
+    raw_cdf: np.ndarray, declared: tuple[float, float, float] | None
+) -> bool:
+    """True when a run's rendered curve is flat across the entire grid AND the
+    run's own words do not back that up.
+
+    A flat curve — all mass below the lower bound (CDF ~1 everywhere) or above
+    the upper bound (CDF ~0 everywhere) — carries no shape information about the
+    grid. Averaged into the ensemble it becomes a uniform ramp that smears the
+    consensus (the 44218 SPR failure), so it must not be blended in blind.
+
+    But flat is not automatically wrong. Both bounds are frequently OPEN, and a
+    model that confidently forecasts far above an open upper bound is making a
+    legitimate, possibly correct claim. Dropping it would delete a good run.
+    So the curve alone cannot decide: we corroborate against ``declared``, the
+    run's own pre-transform statement of where its mass sits.
+
+      - declared agrees the mass is off that edge -> the model means it -> KEEP.
+      - declared says otherwise -> something between the model's reasoning and
+        this curve corrupted it -> off-grid, hand back to the caller.
+      - nothing declared -> no corroboration available -> off-grid. Conservative
+        by design: an uncorroborated flat curve is indistinguishable from a
+        broken one, and on a closed-bound question it cannot be legitimate at
+        all because the grid covers every possible outcome.
+
+    The witness is the right corroborator precisely because no pipeline stage
+    can rewrite it. The previous version asked the run's own location
+    *parameters* — which the unit rescaler had just overwritten. On Q44943 that
+    let the corrupted value ``hi = 10.0`` veto this very check and keep a run
+    with 100% of its mass below the floor."""
     if len(raw_cdf) < 2:
         return False
     first, last = float(raw_cdf[0]), float(raw_cdf[-1])
-    if last - first >= 0.02:
+    if last - first >= MIN_IN_GRID_MASS:
         return False  # the distribution varies across the grid -> informative
-    all_below = first > 0.98   # mass piled at/under the lower bound
-    all_above = last < 0.02    # mass entirely above the upper bound
+    all_below = first > 1.0 - MIN_IN_GRID_MASS  # mass piled at/under the lower bound
+    all_above = last < MIN_IN_GRID_MASS         # mass entirely above the upper bound
     if not (all_below or all_above):
         return False
-    # Corroborate with the model's own location params when we have them: only
-    # call it off-grid if those params agree the mass lies off the relevant edge.
-    if location_values:
-        lo, hi = float(grid[0]), float(grid[-1])
-        if all_below and max(location_values) >= lo:
-            return False
-        if all_above and min(location_values) <= hi:
+    if declared is not None:
+        declared_below, _declared_in, declared_above = declared
+        if all_below and declared_below > 0.9:
+            return False  # the model says so too
+        if all_above and declared_above > 0.9:
             return False
     return True
 
@@ -2223,10 +2519,20 @@ async def get_numeric_gpt_prediction(
     transcripts: list[str] = []
     run_values: list[dict] = []
     ensemble: list[dict] = []
+    stage_events: list[str] = []
+
+    def note_event(message: str, *args) -> None:
+        """Log AND persist. Q44943 emitted exactly the right warning from
+        log_numeric_cdf_sanity_checks and shipped anyway, because a log line in
+        an overnight batch is a line nobody reads. Anything worth warning about
+        belongs in the artifact."""
+        logger.warning(message, *args)
+        stage_events.append(message % args if args else message)
+
     for run in runs:
         record = {"model": run.model, "valid": run.valid, "repaired": run.repaired}
         if not run.valid:
-            logger.warning(
+            note_event(
                 "[ensemble] numeric run (%s) dropped — unparseable forecast: %s",
                 run.model, run.error,
             )
@@ -2240,20 +2546,84 @@ async def get_numeric_gpt_prediction(
         except Exception as exc:
             # One malformed run must not sink the question; drop it and lean on
             # the others. If every run fails, a fallback is built below.
-            logger.warning("dropping unparseable numeric run (%s): %s", run.model, exc)
+            note_event("dropping unparseable numeric run (%s): %s", run.model, exc)
             record["dropped"] = True
             record["error"] = str(exc)
             ensemble.append(record)
             continue
         record["used_fallback"] = used_fallback
-        location_values = _run_location_values(parsed)
-        # A run whose entire distribution lies off the grid (e.g. an uncorrected
-        # unit slip) is uninformative — standardisation would turn it into a
-        # near-uniform ramp that smears the ensemble. Drop it instead of blending.
-        if _cdf_is_degenerate_off_grid(raw_cdf, location_values, grid):
-            logger.warning(
-                "[ensemble] numeric run (%s) is entirely off-grid (flat CDF across "
-                "the whole grid; unit conversion: %s); dropping it as uninformative.",
+
+        # --- The witness ------------------------------------------------
+        # Compare the curve we are about to submit against the run's own
+        # pre-transform statement of where its mass sits. Costs no model call,
+        # and is the only check in this loop whose input no pipeline stage can
+        # have rewritten.
+        declared = parse_declared_answer_space(run.response)
+        record["declared_answer_space"] = list(declared) if declared else None
+        if declared is None:
+            logger.info(
+                "[ensemble] numeric run (%s) declared no answer-space split; "
+                "reconciliation unavailable for this run.", run.model,
+            )
+        disagreement = answer_space_disagreement(raw_cdf, declared)
+        if disagreement is not None and disagreement > ANSWER_SPACE_TOLERANCE:
+            record["answer_space_disagreement"] = round(disagreement, 4)
+            applied_scale = float(parsed.get("unit_scale", 1.0))
+            recovered = False
+            if applied_scale != 1.0:
+                # A transform ran and the run no longer matches itself. Undo it
+                # and re-render: the model's own numbers are far likelier to be
+                # right than our inference about them.
+                try:
+                    alt = numeric_response_to_raw_cdf(
+                        run.response, geometry, grid, force_unit_scale=1.0
+                    )
+                except Exception as exc:
+                    note_event(
+                        "[ensemble] numeric run (%s) failed to re-render untransformed: %s",
+                        run.model, exc,
+                    )
+                else:
+                    alt_disagreement = answer_space_disagreement(alt[0], declared)
+                    if (
+                        alt_disagreement is not None
+                        and alt_disagreement <= ANSWER_SPACE_TOLERANCE
+                    ):
+                        note_event(
+                            "[ensemble] numeric run (%s): the x%g unit conversion "
+                            "contradicted the run's own answer-space check (max gap "
+                            "%.3f vs tolerance %.2f); reverted it and re-rendered "
+                            "(gap now %.3f). Keeping the untransformed run.",
+                            run.model, applied_scale, disagreement,
+                            ANSWER_SPACE_TOLERANCE, alt_disagreement,
+                        )
+                        raw_cdf, parsed, reasoning, unit_note, used_fallback = alt
+                        record["unit_rescale_reverted"] = applied_scale
+                        record["used_fallback"] = used_fallback
+                        record["answer_space_disagreement"] = round(alt_disagreement, 4)
+                        recovered = True
+            if not recovered:
+                note_event(
+                    "[ensemble] numeric run (%s) dropped — its rendered distribution "
+                    "contradicts its own answer-space check by %.3f (tolerance %.2f): "
+                    "declared %s, rendered %s.",
+                    run.model, disagreement, ANSWER_SPACE_TOLERANCE,
+                    tuple(round(v, 3) for v in declared),
+                    tuple(round(v, 3) for v in rendered_answer_space(raw_cdf)),
+                )
+                record["dropped"] = True
+                record["self_contradictory"] = True
+                ensemble.append(record)
+                continue
+
+        # A run whose entire distribution lies off the grid, and whose own words
+        # do not claim it should be, is uninformative — standardisation would
+        # turn it into a near-uniform ramp that smears the ensemble.
+        if _cdf_is_degenerate_off_grid(raw_cdf, declared):
+            note_event(
+                "[ensemble] numeric run (%s) is entirely off-grid and uncorroborated "
+                "by its own answer-space check (flat CDF across the whole grid; unit "
+                "conversion: %s); dropping it as uninformative.",
                 run.model, unit_note,
             )
             record["dropped"] = True
@@ -2263,7 +2633,7 @@ async def get_numeric_gpt_prediction(
         if used_fallback:
             # Parseable JSON but no usable components — make the broad-normal
             # substitution visible and attributable instead of silent (con 1).
-            logger.warning(
+            note_event(
                 "[ensemble] numeric run (%s) had no valid components; used a broad-normal fallback.",
                 run.model,
             )
@@ -2273,7 +2643,7 @@ async def get_numeric_gpt_prediction(
         logger.info("unit conversion: %s", unit_note)
         logger.info("run forecast: %s", json.dumps(parsed, default=str)[:600])
         log_cdf_summary("raw run distribution summary:", raw_cdf.tolist())
-        log_numeric_cdf_sanity_checks(location_values, grid, raw_cdf.tolist())
+        log_numeric_cdf_sanity_checks(_run_location_values(parsed), grid, raw_cdf.tolist())
 
         raw_cdfs.append(raw_cdf)
         kept_records.append(record)
@@ -2287,21 +2657,29 @@ async def get_numeric_gpt_prediction(
             f"{reasoning}"
         )
 
+    if len(raw_cdfs) < len(runs):
+        note_event(
+            "[ensemble] numeric ensemble reduced to N-%d: %d of %d run(s) survived "
+            "validation.", len(runs) - len(raw_cdfs), len(raw_cdfs), len(runs),
+        )
+
     if not raw_cdfs:
-        # Every run was unusable — unparseable, or its whole distribution lay off
-        # the grid (a unit slip that auto-correction could not resolve). Abstain
-        # rather than submit a meaningless broad-normal: a flat guess scores worse
-        # than no forecast, and an all-off-grid ensemble means we have no signal.
-        logger.warning(
-            "all %d numeric run(s) for %r were unusable (unparseable or entirely "
-            "off-grid); abstaining — no forecast will be submitted.",
+        # Every run was unusable — unparseable, entirely off-grid, or in
+        # contradiction with its own stated answer-space split. Abstain rather
+        # than submit a meaningless broad-normal: a flat guess scores worse than
+        # no forecast, and an all-unusable ensemble means we have no signal.
+        note_event(
+            "all %d numeric run(s) for %r were unusable (unparseable, entirely "
+            "off-grid, or self-contradictory); abstaining — no forecast will be "
+            "submitted.",
             len(runs), title,
         )
         comment = (
-            "No usable forecast: every run was either unparseable or placed its "
-            "entire distribution off the question grid (a unit mismatch that could "
-            "not be auto-corrected). Abstaining rather than submitting a "
-            "meaningless distribution."
+            "No usable forecast: every run was unparseable, placed its entire "
+            "distribution off the question grid, or rendered a distribution that "
+            "contradicted its own answer-space check. Abstaining rather than "
+            "submitting a meaningless distribution.\n\n"
+            + "\n".join(f"- {event}" for event in stage_events)
         )
         return ForecastResult(
             forecast=None,
@@ -2309,7 +2687,12 @@ async def get_numeric_gpt_prediction(
             prompt=prompt,
             run_transcripts=transcripts,
             run_values=run_values,
-            extra={"geometry": geometry, "ensemble": ensemble, "abstained": True},
+            extra={
+                "geometry": geometry,
+                "ensemble": ensemble,
+                "abstained": True,
+                "stage_events": stage_events,
+            },
         )
 
     # Coarse-support repair (44798): a pmf run that skipped grid values gets
@@ -2320,9 +2703,7 @@ async def get_numeric_gpt_prediction(
     for i, note in enumerate(repair_notes):
         if note is None:
             continue
-        logger.warning(
-            "[ensemble] numeric run (%s): %s", kept_records[i]["model"], note
-        )
+        note_event("[ensemble] numeric run (%s): %s", kept_records[i]["model"], note)
         kept_records[i]["coarse_support_repaired"] = True
         comments[i] += f"\n\n_Post-parse repair: {note}._"
 
@@ -2367,7 +2748,7 @@ async def get_numeric_gpt_prediction(
     # to forecast.json — a log line alone goes unread in an overnight batch.
     comb = comb_check(final_cdf) if geometry["use_pmf"] else None
     if comb and comb["flagged"]:
-        logger.warning(
+        note_event(
             "sanity check warning: submitted distribution looks comb-shaped "
             "(%d material alternations over %d central bins); check the runs' "
             "pmf supports and the repair notes.",
@@ -2378,12 +2759,23 @@ async def get_numeric_gpt_prediction(
     final_comment_sections = [
         f"## Rationale {i+1}\n{comment}" for i, comment in enumerate(comments)
     ]
+    # Stage events lead the comment. Q44943 shipped because the one warning that
+    # mattered existed only in a log nobody reads overnight; anything that
+    # changed which runs were used belongs where the forecast is read.
+    events_section = (
+        "**Pipeline events:**\n"
+        + "\n".join(f"- {event}" for event in stage_events)
+        + "\n\n"
+        if stage_events else ""
+    )
     final_comment = (
         f"Aggregated CDF ({aggregation_label} across {len(raw_cdfs)} runs): "
-        f"`{str(final_cdf)[:100]}...`\n\n" + "\n\n".join(final_comment_sections)
+        f"`{str(final_cdf)[:100]}...`\n\n"
+        + events_section
+        + "\n\n".join(final_comment_sections)
     )
 
-    extra = {"geometry": geometry, "ensemble": ensemble}
+    extra = {"geometry": geometry, "ensemble": ensemble, "stage_events": stage_events}
     if comb is not None:
         extra["comb_check"] = comb
     return ForecastResult(
@@ -2400,4 +2792,4 @@ def _run_location_values(parsed: dict) -> list[float]:
     if parsed["kind"] == "pmf":
         values, _ = _parse_pmf_params(parsed["pmf"])
         return values
-    return _distribution_location_values(parsed["spec"])
+    return spec_center_values(parsed["spec"])

@@ -7,6 +7,181 @@ re-deriving the same diagnosis twice — read this before touching the forecasti
 
 ---
 
+## 2026-08-01 — 44943: the unit-repair guardrail divided a correct forecast by ten, and the gate that should have caught it was disarmed by the same line of code
+
+| | |
+|---|---|
+| **Severity** | **Critical** — 44943 (US U-3 unemployment rate, Aug 2026, `numeric`) submitted median **4.156** with **33.2%** of its mass below the 3.9% grid floor, against an intended **4.298** with 0.95%. A third of the distribution asserted a level U-3 has not touched since 2023. Submitted 2026-08-01, resolves 2026-09-04 |
+| **Built** | 2026-08-01 — **not yet committed, offline-tested only, no live run** |
+| **New files** | `tests/test_44943_unit_repair.py` (14 checks, incl. two golden replays of the real artifacts and an injected-fault test of the run loop) |
+| **Touched** | `forecasters/numeric.py` only |
+| **Cost** | Zero OpenRouter tokens. Every check added is a pure function of data the pipeline already holds |
+
+### What happened
+
+All three forecasters reasoned well and converged more tightly than on any
+question in this log — medians 4.24, 4.31, 4.29. **The bug is entirely in the
+serialisation layer.** Run 2 (gpt-5.6-sol) emitted, correctly and in the answer
+unit, with the physically correct support bounds for a percentage:
+
+```json
+{"family": "truncated_normal", "params": {"mean": 4.31, "sd": 0.204, "lo": 0.0, "hi": 100.0}}
+```
+
+`_distribution_location_values` answered the question "where does this component
+sit?" with the *bag* `[mean, lo, hi]` = `[4.31, 0.0, 100.0]`. The zero is
+filtered, leaving a median of **52.155** — the average of a forecast and a
+physical ceiling, a number that describes nothing. That sat one clean decade
+above the 4.2-magnitude grid, so all three unit-slip gates passed and every
+parameter was multiplied by 0.1. The pipeline logged the result as a successful
+unit conversion:
+
+```
+mean 4.31 -> 0.431   (a 0.431% unemployment rate)
+```
+
+**The same list then disarmed the catch.** `_cdf_is_degenerate_off_grid` exists
+precisely to drop a run whose mass has left the grid, and run 2's rendered CDF
+was flat at 1.0. But before dropping, it corroborated against the run's own
+location values — now `[0.431, 0.0, 10.0]` — saw `hi = 10.0 >= 3.9`, concluded
+"part of me is still on-grid", and vetoed itself. One line, two safety systems.
+
+Two further layers then did what they were built to do, which made it worse:
+
+- `quantile_average_cdfs` averages out-of-grid mass **linearly** by design.
+  Run 2 contributed `cdf[0] = 1.0` to that channel: `agg[0] = 0.335467` is
+  exactly `mean([0.0063, 1.0, 0.0001])`. A prior analysis read this as proof the
+  aggregation label was wrong and recommended switching methods — it is not, and
+  that change would have broken the 44148/44218 fixes for nothing.
+- Because run 2's in-grid span was 0, line 1877 replaced its shape with
+  `np.linspace(0, 1, size)` — a uniform ramp injected into the shape average.
+  The run poisoned the ensemble twice.
+
+`log_numeric_cdf_sanity_checks` **did** emit
+`"CDF is almost flat near 1.0 across the grid; check numeric units and bounds"`.
+Warn-only, absent from `runs.md` and `forecast.json`, and read by nobody.
+
+### Blast radius — this was armed far beyond one question
+
+The trigger is a sentinel upper bound roughly **20x the grid magnitude**, which
+is the natural and prompt-endorsed choice (`truncated_normal` for hard-bounded
+quantities) for any percentage question answering in the low single digits.
+Measured before the fix — every one of these corrupted, and only because the
+model did the right thing:
+
+```
+U-3 rate 3.9-4.5, bounds 0/100     -> x0.1     pct-share 45-55, hi=1000  -> x0.1
+any pct in the 4-6 band, 0/100     -> x0.1     count 100-200, hi=3000    -> x0.1
+rate 1.5-2.5, hi=50                -> x0.1
+```
+
+A model that lazily omitted its bounds would have been fine.
+
+### The fix — four layers, each independently sufficient
+
+1. **`component_center()` returns a distribution's median, not a parameter bag.**
+   `build_distribution(...).ppf(0.5)`, with a param-only fallback for raw
+   pre-validation input, plus `ScaledBeta.ppf`. Support bounds influence the
+   answer only where they genuinely determine it (`beta`, `uniform`) or clamp it
+   (`truncated_normal`) — which falls out for free. This is why the fix is
+   semantic and **not** a blacklist of parameter names: a blacklist would strip
+   `lower`/`upper` from `beta` and `uniform`, which have no other location
+   signal. Also fixes the component-merge tolerance, which inherited the bug.
+2. **The rescaler must prove it is non-destructive.** A real unit slip is
+   *unanimous and total*: (a) every centre off-grid, (b) all on the same side,
+   (c) clean power of ten, (d) every centre back on-grid afterwards. (a)+(d)
+   give the invariant **no centre is ever moved from on-grid to off-grid**. (a)
+   alone blocks 44943, where the true centre 4.31 was on-grid all along. The
+   generous window is now purely relative — its old absolute `max(range, 1.0)`
+   floor inflated a 0.6-wide percentage grid's window to 3.3x the answer space
+   and is what let the bogus rescale land inside it.
+3. **One rescaled truth.** `parsed["components"]` was never reassigned after a
+   rescale, so `forecast.json` shipped `components.mean = 4.31` beside
+   `spec.mean = 0.431` and every reviewer had to reconstruct which half was
+   real. Both halves are now written from the same source, guarded by
+   `_assert_spec_matches_components` (a hull check — it catches a split-brain
+   record, *not* a wrong unit, which by then corrupts both halves identically).
+4. **Read the witness back.** Every run already states, in prose and before any
+   transform, `P(below) / P(in) / P(above)` for the question's band. Those three
+   numbers are the only description of a run's forecast no later stage can
+   rewrite, and they are **unit-free relative to the band** — a legitimate unit
+   conversion preserves them, a wrong one destroys them. The pipeline never read
+   them. Now: parse (machine-readable `ANSWER_SPACE:` line, added to the prompt,
+   with a tolerant prose fallback for models that ignore it), compare against
+   the rendered CDF, and escalate. Measured on the real artifacts:
+
+   | run | declared | rendered | gap |
+   |---|---|---|---|
+   | 1 | 0.01 / 0.86 / 0.13 | 0.006 / 0.860 / 0.134 | 0.004 |
+   | 3 | 0.03 / 0.86 / 0.11 | 0.000 / 0.920 / 0.080 | 0.060 |
+   | **2** | 0.022 / 0.802 / 0.176 | **1.000 / 0.000 / 0.000** | **0.978** |
+
+   Tolerance **0.20**: three times the honest runs' worst observed error, and a
+   16x margin below the corrupted one.
+
+**Escalation policy** (a policy, not a log line): witness rejects a run that had
+a transform → **revert the transform and re-render**; if it now agrees, keep it
+at full weight. Rejects a run with no transform → the model's JSON contradicts
+its own prose → drop, ensemble N−1. Zero runs left → abstain.
+
+**Degeneracy gate rewired.** It now corroborates against the declared witness
+rather than the parameter bag. Crucially this is *not* "drop everything
+off-grid": both bounds are usually OPEN, so a model confidently forecasting far
+above the upper bound is making a legitimate claim and must be kept. Declared
+agrees the mass is off that edge → keep. Declared says otherwise, or declared
+nothing → off-grid. And in `quantile_average_cdfs`, a run with no in-grid span
+now contributes its **tail mass** (that is its real opinion) but **not** a
+uniform ramp to the shape channel.
+
+**Observability.** A `note_event` helper logs *and* appends to `stage_events`,
+which lands in `forecast.json` (via `orchestrator.py:298`) and at the top of the
+`runs.md` comment. Drops, reverts, N−1 reductions, fallbacks and comb flags are
+all now visible where the forecast is read.
+
+### Verification
+
+`tests/test_44943_unit_repair.py` — 14 checks, all passing:
+
+- **Golden replay, twice.** From the constants and again driven from the stored
+  `44943/runs.md` transcripts: `p50 4.2980, P(<3.9) 0.0095, P(>4.5) 0.1298`,
+  bit-identical to the untransformed reference and against the shipped
+  `4.156 / 0.332 / 0.071`.
+- **Blast-radius sweep** — all seven sentinel-bound shapes above stay at 1.0.
+- **No regression** — 44148 (x1e6) and 44218 (x1000) still detected; the
+  existing false-positive guards still pass.
+- **Injected fault** — the run loop is driven with the detector faulted back to
+  its 44943 behaviour. The witness catches the x0.1, reverts it, and recovers
+  `p50 4.297` keeping 3/3 runs. The fixed detector no longer produces that
+  input, which is exactly why the layer above it has to be tested against an
+  injected one.
+
+Full suite: 33/34 files pass. The one failure, `test_pdf_adapter.py`, is a
+missing `pymupdf` install and is unrelated.
+
+### The lesson, stated generally
+
+The pipeline applies silent auto-corrections to model output and **not one of
+them had to prove it did not make things worse.** Meanwhile every run writes
+down what it thinks the answer is, in a form no stage can rewrite, and nothing
+read it. Run 2 stated `P(< 3.9%) = 0.022` about 140 lines above a JSON block
+that rendered to `P(< 3.9%) = 1.000`.
+
+A corollary worth keeping: **a safety check must never be vetoable by the thing
+it is checking.** The degeneracy gate asked the run's own parameters for
+permission to drop the run — parameters the failing transform had just rewritten.
+
+### Still open
+
+- The prompt change (the `ANSWER_SPACE:` line) touches every numeric/discrete
+  run and has been verified offline only. One paid live run should confirm
+  models emit it before the prose fallback is relied on less.
+- Reasoning-layer findings from the same question are **not** addressed here:
+  the measured-series rule has no carve-out for first-print vs revised precision;
+  DOL weekly claims were never retrieved; the temporal gate false-fired on the
+  BLS release calendar again. All are separate from this bug.
+
+---
+
 ## 2026-07-29 — Fix for the 44875 retrieval failure: free series-discovery ladder + deterministic reducer. Three of five test sources solved; the two "failures" turned out to be a rate limit and a dead website
 
 | | |
