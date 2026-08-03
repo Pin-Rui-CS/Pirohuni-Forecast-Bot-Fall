@@ -12,14 +12,15 @@ from typing import Any, Final
 
 import httpx
 
+import llm_provider
 from utils import _get_field, _json_default
 
 logger = logging.getLogger(__name__)
 
 OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
-# Pass as extra_body on chat.completions.create so OpenRouter returns the
-# detailed usage breakdown (completion_tokens_details.reasoning_tokens, cost).
-OPENROUTER_USAGE_ACCOUNTING: Final[dict[str, Any]] = {"usage": {"include": True}}
+# Re-exported for the call sites that still import it from here. The request
+# adaptation (including whether this is sent at all) lives in llm_provider.
+OPENROUTER_USAGE_ACCOUNTING: Final[dict[str, Any]] = llm_provider.OPENROUTER_USAGE_ACCOUNTING
 # 3.2 chars/token (was 4 until 2026-07-19): the Sonnet-5/Opus-4.7+ tokenizer
 # is denser than the old models', and the pipeline's text is URL/table-heavy
 # markdown, which tokenizes worse than prose — chars/4 consistently
@@ -104,8 +105,13 @@ class OpenRouterUsageRecord:
     native_input_tokens: int = 0
     native_output_tokens: int = 0
     cached_input_tokens: int = 0
-    # usage.cost (OpenRouter credits) + cost_details.upstream_inference_cost
+    # Input tokens WRITTEN to the prompt cache. GPT-5.6+ bills these at 1.25x
+    # the uncached rate, so a run with writes but no reads is paying a premium
+    # for nothing -- worth seeing as its own column rather than buried in cost.
+    cache_write_tokens: int = 0
+    # OpenRouter: usage.cost (credits) + cost_details.upstream_inference_cost
     # (the provider bill when the key is BYOK, as this project's is).
+    # OpenAI: computed from llm_provider.PRICES (no per-request cost is served).
     cost_usd: float = 0.0
 
 
@@ -134,23 +140,25 @@ class OpenRouterUsageHandle:
 
     def record_response(self, response: Any) -> None:
         reasoning_tokens = count_openrouter_reasoning_tokens(response)
-        native = extract_openrouter_native_usage(response)
+        native = extract_openrouter_native_usage(response, self._model)
         if not self._finished:
             for record in self._records:
                 record.reasoning_tokens = reasoning_tokens
                 record.native_input_tokens = native["prompt_tokens"]
                 record.native_output_tokens = native["completion_tokens"]
                 record.cached_input_tokens = native["cached_tokens"]
+                record.cache_write_tokens = native["cache_write_tokens"]
                 record.cost_usd = native["cost_usd"]
             logger.info(
                 "[usage] %s | model=%s | native in/out=%d/%d | reasoning=%d | "
-                "cached=%d | cost=$%.6f",
+                "cached=%d | cache-write=%d | cost=$%.6f",
                 self._name_of_task,
                 self._model,
                 native["prompt_tokens"],
                 native["completion_tokens"],
                 reasoning_tokens,
                 native["cached_tokens"],
+                native["cache_write_tokens"],
                 native["cost_usd"],
             )
         self.record_output_characters(count_openrouter_output_characters(response))
@@ -274,6 +282,11 @@ class MonetaryCostManager:
             return sum(record.cached_input_tokens for record in self._records)
 
     @property
+    def total_cache_write_tokens(self) -> int:
+        with self._lock:
+            return sum(record.cache_write_tokens for record in self._records)
+
+    @property
     def total_cost_usd(self) -> float:
         with self._lock:
             return sum(record.cost_usd for record in self._records)
@@ -309,6 +322,7 @@ class MonetaryCostManager:
                     native_input_tokens=record.native_input_tokens,
                     native_output_tokens=record.native_output_tokens,
                     cached_input_tokens=record.cached_input_tokens,
+                    cache_write_tokens=record.cache_write_tokens,
                     cost_usd=record.cost_usd,
                 )
                 for record in self._records
@@ -325,10 +339,12 @@ class MonetaryCostManager:
             f"  total_output_characters: {self.total_output_characters}",
             f"  total_output_tokens: {self.total_output_tokens}",
             f"  total_reasoning_tokens: {self.total_reasoning_tokens}  # provider-reported; included in output billing, not in the char-based estimates above",
-            f"  total_native_input_tokens: {self.total_native_input_tokens}  # OpenRouter-reported; ground truth vs the char-based estimates",
+            f"  total_native_input_tokens: {self.total_native_input_tokens}  # {llm_provider.provider_name()}-reported; ground truth vs the char-based estimates",
             f"  total_native_output_tokens: {self.total_native_output_tokens}",
             f"  total_cached_input_tokens: {self.total_cached_input_tokens}  # served from prompt cache (billed at the cache-read rate)",
-            f"  total_cost_usd: {self.total_cost_usd:.6f}  # OpenRouter-reported actual cost (credits + BYOK upstream)",
+            f"  total_cache_write_tokens: {self.total_cache_write_tokens}  # written to prompt cache (GPT-5.6+ bills these at 1.25x input)",
+            f"  llm_provider: {llm_provider.LLM_PROVIDER}",
+            f"  total_cost_usd: {self.total_cost_usd:.6f}  # {_cost_provenance()}",
             f"  output_token_hard_limit: {self.output_token_hard_limit}",
             f"  total_tokens: {self.total_tokens}",
             f"  total_token_hard_limit: {self.hard_limit}",
@@ -497,24 +513,52 @@ def _coerce_float(value: Any) -> float:
         return 0.0
 
 
-def extract_openrouter_native_usage(response: Any) -> dict[str, Any]:
-    """OpenRouter-reported usage: native token counts and actual USD cost.
+def extract_openrouter_native_usage(response: Any, model: str = "") -> dict[str, Any]:
+    """Provider-reported usage: native token counts and USD cost.
 
-    Requires the request to carry OPENROUTER_USAGE_ACCOUNTING (llm_client does).
-    ``cost_usd`` sums OpenRouter credits (``usage.cost``, non-BYOK) and the
-    upstream provider bill (``usage.cost_details.upstream_inference_cost``,
-    BYOK) so it is correct under either billing mode. Missing fields read as 0,
-    so a provider that omits the breakdown degrades gracefully.
+    On OpenRouter ``cost_usd`` sums OpenRouter credits (``usage.cost``,
+    non-BYOK) and the upstream provider bill
+    (``usage.cost_details.upstream_inference_cost``, BYOK) so it is correct
+    under either billing mode; it requires the request to carry
+    OPENROUTER_USAGE_ACCOUNTING (llm_provider.chat_kwargs sends it).
+
+    The OpenAI API reports no per-request cost at any endpoint -- the Costs API
+    is daily-bucketed and needs an admin key, and the Usage API returns tokens
+    without dollars -- so there ``cost_usd`` is computed from the local price
+    table against the token counts OpenAI does return. ``model`` is used for
+    that lookup and falls back to the model echoed in the response.
+
+    Missing fields read as 0, so a provider that omits the breakdown degrades
+    gracefully.
     """
     usage = _get_field(response, "usage")
     prompt_details = _get_field(usage, "prompt_tokens_details")
     cost_details = _get_field(usage, "cost_details")
+
+    prompt_tokens = _coerce_int(_get_field(usage, "prompt_tokens"))
+    completion_tokens = _coerce_int(_get_field(usage, "completion_tokens"))
+    cached_tokens = _coerce_int(_get_field(prompt_details, "cached_tokens"))
+    cache_write_tokens = _coerce_int(_get_field(prompt_details, "cache_write_tokens"))
+
+    if llm_provider.is_openai():
+        cost_usd = llm_provider.compute_cost_usd(
+            model or str(_get_field(response, "model") or ""),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cached_tokens=cached_tokens,
+            cache_write_tokens=cache_write_tokens,
+        )
+    else:
+        cost_usd = _coerce_float(_get_field(usage, "cost")) + _coerce_float(
+            _get_field(cost_details, "upstream_inference_cost")
+        )
+
     return {
-        "prompt_tokens": _coerce_int(_get_field(usage, "prompt_tokens")),
-        "completion_tokens": _coerce_int(_get_field(usage, "completion_tokens")),
-        "cached_tokens": _coerce_int(_get_field(prompt_details, "cached_tokens")),
-        "cost_usd": _coerce_float(_get_field(usage, "cost"))
-        + _coerce_float(_get_field(cost_details, "upstream_inference_cost")),
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "cached_tokens": cached_tokens,
+        "cache_write_tokens": cache_write_tokens,
+        "cost_usd": cost_usd,
     }
 
 
@@ -553,10 +597,19 @@ def count_openrouter_output_characters(response: Any) -> int:
     return count_serialized_characters(response)
 
 
+def _cost_provenance() -> str:
+    if llm_provider.is_openai():
+        return (
+            "computed from llm_provider.PRICES (the OpenAI API serves no "
+            "per-request cost)"
+        )
+    return "OpenRouter-reported actual cost (credits + BYOK upstream)"
+
+
 def _format_usage_markdown_table(records: list[OpenRouterUsageRecord]) -> str:
     lines = [
-        "| no. | name of task | input characters | input tokens | output characters | output tokens | reasoning tokens | native in | native out | cached in | cost usd | seconds | model used |",
-        "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| no. | name of task | input characters | input tokens | output characters | output tokens | reasoning tokens | native in | native out | cached in | cache write | cost usd | seconds | model used |",
+        "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for record in records:
         lines.append(
@@ -571,6 +624,7 @@ def _format_usage_markdown_table(records: list[OpenRouterUsageRecord]) -> str:
             f"{record.native_input_tokens} | "
             f"{record.native_output_tokens} | "
             f"{record.cached_input_tokens} | "
+            f"{record.cache_write_tokens} | "
             f"{record.cost_usd:.6f} | "
             f"{record.duration_seconds:.1f} | "
             f"{_table_cell(record.model_used)} |"

@@ -12,11 +12,11 @@ from config import (
     EXAMPLE_QUESTIONS,
     METACULUS_TOKEN,
     NUM_RUNS_PER_QUESTION,
-    OPENROUTER_API_KEY,
     OPENROUTER_COST_HARD_LIMIT_USD,
     SKIP_PREVIOUSLY_FORECASTED_QUESTIONS,
     TOURNAMENT_MAPPING,
 )
+import llm_provider
 from artifacts import run_log_file_path
 from metaculus_client import get_open_question_ids_from_tournament
 from orchestrator import forecast_questions
@@ -92,8 +92,10 @@ def validate_runtime_configuration() -> None:
     missing_env_vars = []
     if not METACULUS_TOKEN:
         missing_env_vars.append("METACULUS_TOKEN")
-    if not OPENROUTER_API_KEY:
-        missing_env_vars.append("OPENROUTER_API_KEY")
+    # Whichever provider LLM_PROVIDER selects is the one whose key must be set;
+    # the other may legitimately be absent.
+    if not llm_provider.api_key():
+        missing_env_vars.append(llm_provider.api_key_env_var())
 
     has_asknews_oauth = bool(ASKNEWS_CLIENT_ID and ASKNEWS_SECRET)
     has_asknews_api_key = bool(ASKNEWS_API_KEY)

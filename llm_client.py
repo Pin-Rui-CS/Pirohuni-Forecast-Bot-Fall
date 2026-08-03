@@ -12,8 +12,9 @@ from typing import Any
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI, RateLimitError
 
-from config import OPENROUTER_API_KEY, llm_rate_limiter
-from monetary_cost_manager import OPENROUTER_USAGE_ACCOUNTING, MonetaryCostManager
+import llm_provider
+from config import llm_rate_limiter
+from monetary_cost_manager import MonetaryCostManager, count_openrouter_reasoning_tokens
 from utils import _get_field, _json_default, _truncate_text
 
 logger = logging.getLogger(__name__)
@@ -21,9 +22,15 @@ logger = logging.getLogger(__name__)
 OPENROUTER_MAX_ATTEMPTS = max(1, int(os.getenv("OPENROUTER_MAX_ATTEMPTS", "3")))
 OPENROUTER_RETRY_BASE_SECONDS = float(os.getenv("OPENROUTER_RETRY_BASE_SECONDS", "2.0"))
 
+# A validator may prefix its problem string with this to mean "do not retry":
+# the failure is deterministic and a retry would only burn the same tokens
+# again. Used for the reasoning-ate-the-output-cap case, where three attempts
+# at a 34k-token cap is an expensive way to fail identically.
+FATAL_PROBLEM_PREFIX = "FATAL: "
+
 
 class RetryableLLMResponseError(RuntimeError):
-    """Raised when OpenRouter returns an empty or malformed completion."""
+    """Raised when the provider returns an empty or malformed completion."""
 
 
 RUN_PYTHON_CODE_TOOL = {
@@ -90,7 +97,8 @@ async def _create_chat_completion_with_retries(
     request_payload: dict[str, Any],
     validate_response: Callable[[Any], str | None],
 ) -> Any:
-    last_problem = "OpenRouter request did not run"
+    provider = llm_provider.provider_name()
+    last_problem = f"{provider} request did not run"
     for attempt in range(1, OPENROUTER_MAX_ATTEMPTS + 1):
         retry_after_exception = False
         async with llm_rate_limiter:
@@ -101,16 +109,15 @@ async def _create_chat_completion_with_retries(
             )
             try:
                 response = await client.chat.completions.create(
-                    model=model,
-                    extra_body=OPENROUTER_USAGE_ACCOUNTING,
-                    **request_payload,
+                    **llm_provider.chat_kwargs(model, request_payload)
                 )
             except (APIConnectionError, APIStatusError, APITimeoutError, RateLimitError) as exc:
                 problem = _format_openrouter_exception(exc)
                 usage_handle.record_output(problem)
                 last_problem = problem
                 logger.warning(
-                    "[OpenRouter] %s attempt %d/%d failed: %s",
+                    "[%s] %s attempt %d/%d failed: %s",
+                    provider,
                     label,
                     attempt,
                     OPENROUTER_MAX_ATTEMPTS,
@@ -118,7 +125,7 @@ async def _create_chat_completion_with_retries(
                 )
                 if attempt >= OPENROUTER_MAX_ATTEMPTS or not _is_retryable_openrouter_exception(exc):
                     raise RuntimeError(
-                        f"OpenRouter request failed for {label}: {problem}"
+                        f"{provider} request failed for {label}: {problem}"
                     ) from exc
                 retry_after_exception = True
 
@@ -130,23 +137,26 @@ async def _create_chat_completion_with_retries(
         problem = validate_response(response)
         if problem is None:
             if attempt > 1:
-                logger.info("[OpenRouter] %s recovered on attempt %d.", label, attempt)
+                logger.info("[%s] %s recovered on attempt %d.", provider, label, attempt)
             return response
 
         last_problem = problem
         logger.warning(
-            "[OpenRouter] %s attempt %d/%d returned unusable response: %s\n%s",
+            "[%s] %s attempt %d/%d returned unusable response: %s\n%s",
+            provider,
             label,
             attempt,
             OPENROUTER_MAX_ATTEMPTS,
             problem,
             _describe_openrouter_response(response),
         )
+        if problem.startswith(FATAL_PROBLEM_PREFIX):
+            break
         if attempt < OPENROUTER_MAX_ATTEMPTS:
             await asyncio.sleep(_retry_delay_seconds(attempt))
 
     raise RetryableLLMResponseError(
-        f"OpenRouter returned unusable response for {label} after "
+        f"{provider} returned unusable response for {label} after "
         f"{OPENROUTER_MAX_ATTEMPTS} attempt(s): {last_problem}"
     )
 
@@ -183,8 +193,29 @@ def _validate_text_completion_response(response: Any) -> str | None:
     message = _get_field(choice, "message")
     content = _get_field(message, "content")
     if content is None or not str(content).strip():
-        return "assistant message content is empty"
+        return _empty_content_problem(choice, response)
     return None
+
+
+def _empty_content_problem(choice: Any, response: Any) -> str:
+    """Describe an empty assistant message, flagging the reasoning-cap case.
+
+    On a reasoning model the completion cap covers internal reasoning as well
+    as the visible answer, so a cap sized for the answer alone can be spent
+    entirely on reasoning: finish_reason=length with zero content. Retrying
+    reproduces it exactly and bills the same tokens again, so mark it fatal
+    and name the fix.
+    """
+    if str(_get_field(choice, "finish_reason") or "").lower() == "length":
+        reasoning = count_openrouter_reasoning_tokens(response)
+        return (
+            f"{FATAL_PROBLEM_PREFIX}assistant content is empty and "
+            f"finish_reason=length -- the completion cap was consumed by "
+            f"{reasoning} reasoning tokens before any visible output. Raise "
+            f"max_tokens for this call or lower its reasoning effort "
+            f"(see REASONING_HEADROOM_TOKENS in llm_provider.py)."
+        )
+    return "assistant message content is empty"
 
 
 def _validate_tool_loop_response(response: Any) -> str | None:
@@ -206,6 +237,8 @@ def _validate_tool_loop_response(response: Any) -> str | None:
 
     content = _get_field(message, "content")
     if content is None or not str(content).strip():
+        if str(finish_reason or "").lower() == "length":
+            return _empty_content_problem(choice, response)
         return f"finish_reason={finish_reason!r} but assistant content is empty"
     return None
 
@@ -213,7 +246,7 @@ def _validate_tool_loop_response(response: Any) -> str | None:
 def _validate_common_openrouter_response(response: Any) -> str | None:
     response_error = _extract_openrouter_error(response)
     if response_error:
-        return f"OpenRouter/provider error: {response_error}"
+        return f"{llm_provider.provider_name()}/provider error: {response_error}"
 
     choices = _get_field(response, "choices")
     if not isinstance(choices, list) or not choices:
@@ -290,8 +323,13 @@ def _format_value(value: Any) -> str:
 def _user_message(prompt: str, cache_static_prefix: bool) -> dict:
     """Build the user message, optionally marking the prompt as a cacheable
     prefix (OpenRouter forwards cache_control to providers that support
-    prompt caching, e.g. Anthropic; others ignore it)."""
-    if not cache_static_prefix:
+    prompt caching, e.g. Anthropic; others ignore it).
+
+    The OpenAI API has no message-body equivalent -- it caches automatically
+    and is steered by ``prompt_cache_options`` instead -- so the breakpoint is
+    dropped there rather than sent as an unrecognised content-part field.
+    """
+    if not cache_static_prefix or not llm_provider.supports_cache_control_breakpoints():
         return {"role": "user", "content": prompt}
     return {
         "role": "user",
@@ -315,17 +353,22 @@ async def call_llm(
     cache_static_prefix: bool = False,
     max_tokens: int | None = None,
 ) -> str | tuple[str, str]:
-    """Call the LLM via OpenRouter.
+    """Call the LLM via the provider selected by ``LLM_PROVIDER``.
 
     The returned transcript intentionally omits the user prompt; callers that
     save transcripts store the prompt once themselves. ``max_tokens`` caps the
     response length when set (used by bounded utility passes like the
-    compiler's pre-compression); when None the provider default applies.
+    compiler's pre-compression); when None the provider default applies. Under
+    OpenAI the cap is grown to cover reasoning tokens -- see
+    ``llm_provider.max_completion_tokens_for``.
+
+    ``model`` is given in the bot's internal namespace (e.g.
+    ``anthropic/claude-opus-5``, which names the *role* as much as the model)
+    and is translated to the active provider's namespace here, so logs, the
+    transcript, and the usage ledger all record what actually ran.
     """
-    client = AsyncOpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=OPENROUTER_API_KEY,
-    )
+    model = llm_provider.resolve_model(model)
+    client = llm_provider.make_async_client()
     transcript_parts = [
         "# LLM Transcript",
         f"Label: {_label}",

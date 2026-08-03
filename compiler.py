@@ -6,11 +6,9 @@ import re
 from dataclasses import dataclass
 from typing import Iterable
 
-from openai import AsyncOpenAI
-
-from config import OPENROUTER_API_KEY, llm_rate_limiter
+import llm_provider
+from config import llm_rate_limiter
 from monetary_cost_manager import (
-    OPENROUTER_USAGE_ACCOUNTING,
     HardLimitExceededError,
     MonetaryCostManager,
 )
@@ -602,9 +600,14 @@ async def _try_llm_compile(
     model: str,
     artifact_check: dict | None = None,
 ) -> str | None:
-    if not OPENROUTER_API_KEY:
-        logger.info("Research compiler skipped LLM pass because OPENROUTER_API_KEY is not set.")
+    if not llm_provider.api_key():
+        logger.info(
+            "Research compiler skipped LLM pass because %s is not set.",
+            llm_provider.api_key_env_var(),
+        )
         return None
+
+    model = llm_provider.resolve_model(model)
 
     cleaned_sections = await _fit_sections_to_budget(cleaned_sections)
     # Byte-exact record of what the compiler can know. "Dropped by the
@@ -634,10 +637,7 @@ async def _try_llm_compile(
         artifact_check=artifact_check,
     )
 
-    client = AsyncOpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=OPENROUTER_API_KEY,
-    )
+    client = llm_provider.make_async_client()
     messages = [
         {
             "role": "system",
@@ -659,15 +659,22 @@ async def _try_llm_compile(
                 {"messages": messages, "max_tokens": _COMPILER_MAX_OUTPUT_TOKENS},
             )
             response = await client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=0.1,
-                max_tokens=_COMPILER_MAX_OUTPUT_TOKENS,
-                stream=False,
-                extra_body=OPENROUTER_USAGE_ACCOUNTING,
+                **llm_provider.chat_kwargs(
+                    model,
+                    {
+                        "messages": messages,
+                        "temperature": 0.1,
+                        "max_tokens": _COMPILER_MAX_OUTPUT_TOKENS,
+                        "stream": False,
+                    },
+                )
             )
         usage_handle.record_response(response)
-        logger.info("research-compiler | model=%s | OpenRouter usage recorded", model)
+        logger.info(
+            "research-compiler | model=%s | %s usage recorded",
+            model,
+            llm_provider.provider_name(),
+        )
         choice = response.choices[0]
         content = choice.message.content
         if not content or not content.strip():

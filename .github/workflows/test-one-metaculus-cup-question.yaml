@@ -3,6 +3,15 @@ name: Test Metaculus Cup questions
 "on":
   workflow_dispatch:
     inputs:
+      llm_provider:
+        description: "LLM provider for this run (repo default = the LLM_PROVIDER repo variable)"
+        required: false
+        default: "repo default"
+        type: choice
+        options:
+          - "repo default"
+          - "openrouter"
+          - "openai"
       question_id:
         description: "Optional Metaculus question ID. Leave blank to test eligible open Metaculus Cup questions."
         required: false
@@ -260,6 +269,10 @@ jobs:
           TOKEN_LIMIT: ${{ inputs.token_limit }}
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # Selects which API every LLM call goes to. Precedence:
+          # this run's dropdown -> LLM_PROVIDER repo variable -> openrouter.
+          LLM_PROVIDER: ${{ (inputs.llm_provider != 'repo default' && inputs.llm_provider) || vars.LLM_PROVIDER || 'openrouter' }}
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
           ASKNEWS_API_KEY: ${{ secrets.ASKNEWS_API_KEY }}

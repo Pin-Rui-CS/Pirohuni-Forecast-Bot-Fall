@@ -5,6 +5,8 @@ import os
 
 import dotenv
 
+import llm_provider
+
 dotenv.load_dotenv()
 
 
@@ -45,13 +47,24 @@ NUM_RUNS_PER_QUESTION = 3
 # cost can be a multiple of the $5/$30 sticker. Note Gemini 3.1 Pro is
 # currently unreachable via the OpenRouter BYOK Google key (free tier, daily
 # limit 0) until that key has billing enabled or BYOK is disabled.
-DEFAULT_FORECASTER_MODEL = "anthropic/claude-opus-5"
+#
+# --- Under LLM_PROVIDER=openai ------------------------------------------------
+# The pool below cannot simply be translated model-by-model: llm_provider maps
+# BOTH anthropic/claude-opus-5 and openai/gpt-5.6-sol onto gpt-5.6-sol, which
+# would make runs 1 and 2 the same model on the same brief. That is not an
+# ensemble -- and because the GPT-5 models reject `temperature`, the two runs
+# could not even be decorrelated by sampling. The OpenAI pool is therefore a
+# capability ladder (sol + terra) rather than a lineage mix. This is the
+# accepted cost of a single-vendor setup: it is weaker decorrelation than the
+# cross-lineage pool above, so watch for all three runs sharing one error.
+DEFAULT_FORECASTER_MODEL = (
+    "gpt-5.6-sol" if llm_provider.is_openai() else "anthropic/claude-opus-5"
+)
 FORECASTER_MODELS = _env_list(
     "FORECASTER_MODELS",
-    [
-        DEFAULT_FORECASTER_MODEL,
-        "openai/gpt-5.6-sol",
-    ],
+    ["gpt-5.6-sol", "gpt-5.6-terra"]
+    if llm_provider.is_openai()
+    else [DEFAULT_FORECASTER_MODEL, "openai/gpt-5.6-sol"],
 )
 # The tiebreaker / synthesis judge is a single fixed strong model so the final
 # call doesn't inherit whichever ensemble member happened to run last.
@@ -70,7 +83,8 @@ FORECASTER_TIEBREAKER_MODEL = os.getenv(
 # rate offsets the larger raw input); it does not add one.
 HETEROGENEOUS_RUN_ENABLED = _env_bool("HETEROGENEOUS_RUN_ENABLED", True)
 HETEROGENEOUS_RUN_MODEL = os.getenv(
-    "HETEROGENEOUS_RUN_MODEL", "anthropic/claude-sonnet-5"
+    "HETEROGENEOUS_RUN_MODEL",
+    "gpt-5.6-terra" if llm_provider.is_openai() else "anthropic/claude-sonnet-5",
 )
 SKIP_PREVIOUSLY_FORECASTED_QUESTIONS = True
 METACULUS_MAX_CONCURRENT_REQUESTS = int(os.getenv("METACULUS_MAX_CONCURRENT_REQUESTS", "1"))
@@ -82,6 +96,11 @@ ASKNEWS_CLIENT_ID = os.getenv("ASKNEWS_CLIENT_ID")
 ASKNEWS_SECRET = os.getenv("ASKNEWS_SECRET")
 ASKNEWS_API_KEY = os.getenv("ASKNEWS_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# The key for whichever provider LLM_PROVIDER selects. Prefer this over the
+# two above wherever a call is about to be made; the provider-specific names
+# stay for env validation and for the OpenRouter-only credit endpoint.
+LLM_API_KEY = llm_provider.api_key()
 SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
 FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")

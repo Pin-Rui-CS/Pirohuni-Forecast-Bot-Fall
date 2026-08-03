@@ -7,6 +7,7 @@ import time
 import traceback
 
 from artifacts import QuestionArtifacts
+import llm_provider
 from config import API_BASE_URL, OPENROUTER_API_KEY
 from forecasters.base import ForecastResult
 from forecasters.binary import get_binary_gpt_prediction
@@ -49,6 +50,16 @@ _QUESTION_SNAPSHOT_KEYS = (
 
 
 async def get_openrouter_usage_summary() -> str:
+    # OpenRouter exposes remaining credit on /key. The OpenAI API has no
+    # equivalent: its Costs API is daily-bucketed and needs a separate admin
+    # key, so per-run spend there comes from the local price table in the
+    # usage ledger instead (llm_provider.PRICES).
+    if llm_provider.is_openai():
+        return (
+            "Key usage summary unavailable on the OpenAI API (no per-key credit "
+            "endpoint) — see total_cost_usd in the usage ledger, computed from "
+            "llm_provider.PRICES."
+        )
     try:
         data = await get_openrouter_key_usage(OPENROUTER_API_KEY or "")
     except Exception as exc:

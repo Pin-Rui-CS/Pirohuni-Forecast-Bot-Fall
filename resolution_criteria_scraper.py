@@ -21,13 +21,12 @@ Usage:
 
 import asyncio
 import logging
-import os
 import re
 from dataclasses import dataclass
 
-from config import OPENROUTER_API_KEY, llm_rate_limiter  # noqa: E402
+import llm_provider  # noqa: E402
+from config import llm_rate_limiter  # noqa: E402
 from monetary_cost_manager import (  # noqa: E402
-    OPENROUTER_USAGE_ACCOUNTING,
     HardLimitExceededError,
     MonetaryCostManager,
 )
@@ -51,14 +50,22 @@ logger = logging.getLogger(__name__)
 
 
 def _get_openrouter_api_key() -> str:
-    api_key = OPENROUTER_API_KEY or os.getenv("OPENROUTER_API_KEY", "")
+    """API key for the active LLM provider (name kept for call-site stability)."""
+    api_key = llm_provider.api_key()
     if not api_key:
-        raise ValueError("OPENROUTER_API_KEY is required for LLM-based source cleaning.")
+        raise ValueError(
+            f"{llm_provider.api_key_env_var()} is required for LLM-based source cleaning."
+        )
     return api_key
 
 
 def _log_openrouter_call(label: str, model: str) -> None:
-    logger.info("%s | model=%s | OpenRouter usage recorded", label, model)
+    logger.info(
+        "%s | model=%s | %s usage recorded",
+        label,
+        model,
+        llm_provider.provider_name(),
+    )
 
 # ===========================================================================
 # 1. URL extraction
@@ -366,12 +373,9 @@ async def _summarize_snapshot_history(
     Resolution Mechanics section, giving the forecaster a real same-source flow
     rate instead of an improvised one.
     """
-    from openai import AsyncOpenAI
-
-    client = AsyncOpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=_get_openrouter_api_key(),
-    )
+    _get_openrouter_api_key()  # fail fast with a clear message when unset
+    model = llm_provider.resolve_model(model)
+    client = llm_provider.make_async_client()
 
     snapshot_blocks = "\n\n---\n\n".join(
         f"## Snapshot captured {snapshot.iso_date}\n{snapshot.text}"
@@ -414,11 +418,10 @@ async def _summarize_snapshot_history(
             {"messages": messages, "max_tokens": max_tokens},
         )
         response = await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=0.1,
-            extra_body=OPENROUTER_USAGE_ACCOUNTING,
+            **llm_provider.chat_kwargs(
+                model,
+                {"messages": messages, "max_tokens": max_tokens, "temperature": 0.1},
+            )
         )
     usage_handle.record_response(response)
     _log_openrouter_call("resolution-scraper/wayback-history", model)
@@ -481,15 +484,12 @@ async def _llm_summarize(
 ) -> str:
     """Summarize scraped page content into a structured forecast-ready report.
 
-    Uses the same OpenRouter / AsyncOpenAI setup as the main forecasting bot.
+    Uses the same provider setup as the main forecasting bot.
     Falls back to the heuristically-cleaned content if the call fails.
     """
-    from openai import AsyncOpenAI  # imported here to avoid hard dep if unused
-
-    client = AsyncOpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=_get_openrouter_api_key(),
-    )
+    _get_openrouter_api_key()  # fail fast with a clear message when unset
+    model = llm_provider.resolve_model(model)
+    client = llm_provider.make_async_client()
 
     prompt = _build_resolution_summary_prompt(question_text, resolution_criteria, url, content, key_terms)
     messages = [{"role": "user", "content": prompt}]
@@ -501,11 +501,10 @@ async def _llm_summarize(
             {"messages": messages, "max_tokens": max_tokens},
         )
         response = await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=0.1,
-            extra_body=OPENROUTER_USAGE_ACCOUNTING,
+            **llm_provider.chat_kwargs(
+                model,
+                {"messages": messages, "max_tokens": max_tokens, "temperature": 0.1},
+            )
         )
     usage_handle.record_response(response)
     _log_openrouter_call("resolution-scraper/page-summary", model)
@@ -578,12 +577,9 @@ async def _compile_summaries(
     model: str,
 ) -> str:
     """Ask the LLM to compile multiple page summaries into one coherent report."""
-    from openai import AsyncOpenAI
-
-    client = AsyncOpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=_get_openrouter_api_key(),
-    )
+    _get_openrouter_api_key()  # fail fast with a clear message when unset
+    model = llm_provider.resolve_model(model)
+    client = llm_provider.make_async_client()
     prompt = _build_compile_prompt(question_text, resolution_criteria, summaries)
     messages = [{"role": "user", "content": prompt}]
     async with llm_rate_limiter:
@@ -593,11 +589,10 @@ async def _compile_summaries(
             {"messages": messages, "max_tokens": 2000},
         )
         response = await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_tokens=2000,
-            temperature=0.1,
-            extra_body=OPENROUTER_USAGE_ACCOUNTING,
+            **llm_provider.chat_kwargs(
+                model,
+                {"messages": messages, "max_tokens": 2000, "temperature": 0.1},
+            )
         )
     usage_handle.record_response(response)
     _log_openrouter_call("resolution-scraper/compile-summaries", model)

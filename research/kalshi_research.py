@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import re
 import sys
 from pathlib import Path
@@ -29,8 +28,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+import llm_provider
 from monetary_cost_manager import (
-    OPENROUTER_USAGE_ACCOUNTING,
     HardLimitExceededError,
     MonetaryCostManager,
 )
@@ -39,9 +38,7 @@ from monetary_cost_manager import (
 # Config
 # ---------------------------------------------------------------------------
 
-_OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-_KALSHI_SCORING_MODEL = "anthropic/claude-sonnet-5"
+_KALSHI_SCORING_MODEL = llm_provider.resolve_model("anthropic/claude-sonnet-5")
 
 _KALSHI_API_BASE = "https://external-api.kalshi.com/trade-api/v2"
 _MAX_RESULTS = 3
@@ -99,10 +96,10 @@ def _generate_search_queries(question: str) -> list[str]:
             {"messages": messages},
         )
         response = _get_openai_client().chat.completions.create(
-            model=_KALSHI_SCORING_MODEL,
-            messages=messages,
-            temperature=0,
-            extra_body=OPENROUTER_USAGE_ACCOUNTING,
+            **llm_provider.chat_kwargs(
+                _KALSHI_SCORING_MODEL,
+                {"messages": messages, "temperature": 0},
+            )
         )
         usage_handle.record_response(response)
         content = response.choices[0].message.content.strip()
@@ -322,10 +319,7 @@ _openai_client: OpenAI | None = None
 def _get_openai_client() -> OpenAI:
     global _openai_client
     if _openai_client is None:
-        _openai_client = OpenAI(
-            base_url=_OPENROUTER_BASE_URL,
-            api_key=_OPENROUTER_API_KEY,
-        )
+        _openai_client = llm_provider.make_sync_client()
     return _openai_client
 
 
@@ -367,10 +361,10 @@ def _score_markets(question: str, markets: list[dict]) -> list[float]:
         {"messages": messages},
     )
     response = _get_openai_client().chat.completions.create(
-        model=_KALSHI_SCORING_MODEL,
-        messages=messages,
-        temperature=0,
-        extra_body=OPENROUTER_USAGE_ACCOUNTING,
+        **llm_provider.chat_kwargs(
+            _KALSHI_SCORING_MODEL,
+            {"messages": messages, "temperature": 0},
+        )
     )
     usage_handle.record_response(response)
     content = response.choices[0].message.content.strip()
