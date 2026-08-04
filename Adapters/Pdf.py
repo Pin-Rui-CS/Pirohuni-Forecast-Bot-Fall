@@ -15,8 +15,9 @@ USER_AGENT = (
 )
 # Aligned with serp_research._MAX_SCRAPE_CHARS (not imported: Adapters must not
 # depend on research modules) so downstream truncation never silently cuts a
-# table mid-row that this adapter already reported as complete.
-MAX_PDF_CONTENT_CHARS = 18_000
+# table mid-row that this adapter already reported as complete. Raised 18K->40K
+# with that constant on 45087; keep the two in step.
+MAX_PDF_CONTENT_CHARS = 40_000
 MAX_PDF_BYTES = 25 * 1024 * 1024
 # Statistical releases put their data tables up front; report appendices past
 # this point are rarely worth the parse time or the extractor tokens.

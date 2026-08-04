@@ -102,13 +102,25 @@ _MAX_CONTENT_CHARS = 8_000
 # in scrape_resolution_sources rather than silently cut.
 _CRAWL4AI_CONTENT_BUDGET = 100_000
 # Reduced per-URL budget for URLs found only in the question BACKGROUND text
-# (not the resolution criteria). Background links are usually context
-# (Wikipedia primers, news articles), and on 44773 two Wikipedia pages at
-# ~60K chars each consumed two extra 15K-token summary calls. 20K (applied
-# AFTER boilerplate cleaning) keeps the head of a background-linked primary
-# source readable — the docstring case of a congress.gov bill page linked only
-# in the background — while criteria URLs keep the full 44382-safe budget.
-_BACKGROUND_CONTENT_CHARS = 20_000
+# (not the resolution criteria or fine print). Background links are usually
+# context (Wikipedia primers, news articles), and on 44773 two Wikipedia pages
+# at ~60K chars each consumed two extra 15K-token summary calls.
+#
+# Raised 20K -> 50K on 45087. The old value sat BELOW the length of an ordinary
+# institutional page: WastewaterSCAN's monthly newsletter cleans to 23,386
+# chars and keeps its per-pathogen results at the tail, so a 20K head-cut
+# discarded "no positive detections of WNV in July 2026" (offset 21,998) and
+# the matching Mpox clade Ib line (offset 20,558) — the entire reference class
+# for the question — while the summarizer they were trimmed for used 46,123 of
+# its 100,000-char budget. A background cap must clear the document class that
+# stores its data at the tail (institutional pages and newsletters, 20-40K) and
+# still trim the 60K+ primers that motivated the tier; 50K does both.
+#
+# A fetch-time cut is made blind: this stage does not know what the question
+# needs, cannot see whether another source covers the same fact, and its loss
+# is irreversible for the rest of the run. Never set this below the length of
+# a document class we expect to read.
+_BACKGROUND_CONTENT_CHARS = 50_000
 
 # The Wayback history pass reconstructs a resolution page's value history and
 # update cadence from archive captures — built for slowly-updating
@@ -1143,6 +1155,7 @@ async def scrape_resolution_sources(
     timeout: int = 30,
     max_urls: int = 10,
     question_type: str = "",
+    fine_print: str = "",
 ) -> str:
     """Scrape the URLs embedded in the question and summarize them once.
 
@@ -1154,9 +1167,21 @@ async def scrape_resolution_sources(
     free local crawl, and all sources feed a single combined summary call, so
     every candidate (up to ``max_urls`` as a guard against pathological link
     counts) is scraped concurrently rather than pre-filtered.
+
+    ``fine_print`` is read for URLs at the CRITERIA tier, not the background
+    tier. A source the question names as the thing it resolves off is a
+    resolution source wherever the question happens to name it, and fine print
+    is where backup/fallback sources are conventionally declared ("in case of
+    accessibility issues ... may check the August monthly update"). On 45087
+    that backup source was passed in only via ``question_text``, so it drew the
+    reduced background budget and was cut 558 chars short of the answer.
+    Background and evidence-plan links keep the reduced tier: promoting those
+    would reintroduce the 44773 cost problem the tier exists to prevent.
     """
 
-    criteria_urls = extract_urls(resolution_criteria)
+    criteria_urls = extract_urls(
+        "\n".join(part for part in (resolution_criteria, fine_print) if part)
+    )
     seen: set[str] = set()
     urls: list[str] = []
     for url in [*criteria_urls, *extract_urls(question_text)]:

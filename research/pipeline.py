@@ -161,6 +161,9 @@ async def run_research(
             question_text=question_context,
             use_llm_cleaning=True,
             question_type=question_type,
+            # Fine print names backup/fallback resolution sources; they get the
+            # criteria content budget, not the reduced background tier (45087).
+            fine_print=fine_print,
         )
 
     async def serpapi_call(asknews_research: str = "") -> str:

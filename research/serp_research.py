@@ -32,8 +32,38 @@ DEFAULT_MAX_RANKED_URLS = 20
 DEFAULT_MAX_SCRAPE_CYCLES = 3
 SERPAPI_SEARCH_URL = "https://serpapi.com/search"
 _MAX_RANKING_INPUT_RESULTS = 80
-_MAX_SCRAPE_CHARS = 18_000
-_MAX_EXTRACT_INPUT_CHARS = 90_000
+# Per-scrape retention, applied BEFORE the extract stage reads the page.
+#
+# Was 18_000 — one fifth of the budget of the only stage that consumes it. That
+# is a fetch-time cut made blind: this layer does not know which of the page's
+# facts the question needs, cannot see whether any other source covers them,
+# and its loss is irreversible for the rest of the run (the focused artifact
+# retry can only search again, and searching cannot un-truncate a document).
+# On 45087 it cut the WastewaterSCAN June, May and March newsletters at exactly
+# 18,000 chars — all three mid-H5-influenza, all three before the West Nile
+# Virus and Mpox clade Ib sections that were the question's entire reference
+# class. Head-keep makes that a systematic bias rather than random loss:
+# boilerplate lives at the top of a document and the specific data at the
+# bottom, so the same category of evidence dies every time (the 44619
+# section-ordering lesson, one layer upstream).
+#
+# 40K clears that document class with margin. It is deliberately NOT raised to
+# the full extract budget: the extract stage head-truncates the CONCATENATION
+# of a cycle's scrapes (line ~1517), not each scrape, so a per-scrape cap equal
+# to the combined cap would let the first page of a cycle consume the whole
+# budget and silently delete every later page. The two constants below must
+# move together, and the invariant is:
+#
+#     _MAX_SCRAPE_CHARS * (typical scrapes per cycle) <= _MAX_EXTRACT_INPUT_CHARS
+#
+# Until the extract stage cuts by relevance (or splits into several calls)
+# instead of by position, that inequality is what keeps the cut off the data.
+_MAX_SCRAPE_CHARS = 40_000
+# Raised 90K -> 180K alongside _MAX_SCRAPE_CHARS so ~4-5 full-size pages in one
+# cycle still fit whole. This is a head-cut of the joined cycle text, so when it
+# does bind it drops the LAST scrapes of the cycle entirely, not a tail from
+# each — the reason it must stay comfortably above the per-scrape cap.
+_MAX_EXTRACT_INPUT_CHARS = 180_000
 # Below this, a fetch is treated as "shell only" and the ladder keeps escalating
 # instead of accepting the page. Deliberately generous: because inadequate
 # content is never DISCARDED (the best attempt is returned with a warning
