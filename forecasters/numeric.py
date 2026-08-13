@@ -2007,6 +2007,58 @@ def _fallback_mixture_spec(geometry: dict) -> dict:
     return {"type": "normal", "params": {"mean": lower + 0.5 * rng, "std": 0.25 * rng}}
 
 
+def _extract_final_json_object(response: str) -> dict:
+    """Return the LAST decodable JSON object in ``response``.
+
+    The prompt asks for the forecast JSON as "the very last thing you write",
+    after several phases of prose — so the object we want is the last one, and
+    anything brace-shaped before it is commentary.
+
+    This replaces ``re.findall(r"\\{.*\\}", response, re.DOTALL)[-1]``, which
+    could never do that job: ``.*`` is greedy under DOTALL, so findall always
+    returned exactly ONE span — first ``{`` in the reply to last ``}`` — and
+    indexing ``[-1]`` picked that same poisoned span. Any brace in the prose
+    swallowed the real JSON along with everything between them. On Q45197 and
+    Q45362 (2026-08-13) the GPT runs echoed the prompt's own ``"params": { ... }``
+    template in their write-ups; all three runs then failed to parse, the
+    ensemble emptied, and both questions abstained instead of submitting.
+
+    ``raw_decode`` is the fix because it parses ONE value and reports where it
+    ended, so a brace that opens junk fails locally instead of consuming the
+    rest of the reply. The same scanner is used in research/pipeline.py and
+    query_maker.py; the only difference here is that we keep scanning to the end
+    rather than stopping at the first hit.
+
+    "Last" is the tie-break, not the test: a run that appends a brace-shaped
+    afterword to a correct forecast would beat position alone, so a trailing
+    object only wins if nothing better is on offer. Preference goes to the last
+    object that actually carries a forecast key.
+    """
+    decoder = json.JSONDecoder()
+    objects: list[dict] = []
+    index = response.find("{")
+    while index != -1:
+        try:
+            value, end = decoder.raw_decode(response, index)
+        except json.JSONDecodeError:
+            # Not the start of a well-formed value — advance one brace and retry.
+            index = response.find("{", index + 1)
+            continue
+        if isinstance(value, dict):
+            objects.append(value)
+            # Skip past what we just consumed: a nested object inside this one is
+            # never the final answer, and re-decoding it would be wasted work.
+            index = response.find("{", end)
+        else:
+            index = response.find("{", index + 1)
+    if not objects:
+        raise ValueError(f"Could not extract JSON from LLM response: {response[:300]}")
+    for candidate in reversed(objects):
+        if candidate.get("components") or candidate.get("distribution"):
+            return candidate
+    return objects[-1]
+
+
 def parse_numeric_response(response: str) -> tuple[dict, str]:
     """Parse the model's final JSON into ({'kind': ..., ...}, reasoning).
 
@@ -2017,11 +2069,10 @@ def parse_numeric_response(response: str) -> tuple[dict, str]:
     """
     try:
         parsed = json.loads(response)
+        if not isinstance(parsed, dict):
+            raise json.JSONDecodeError("not an object", response, 0)
     except json.JSONDecodeError:
-        candidates = re.findall(r"\{.*\}", response, re.DOTALL)
-        if not candidates:
-            raise ValueError(f"Could not extract JSON from LLM response: {response[:300]}")
-        parsed = json.loads(candidates[-1])
+        parsed = _extract_final_json_object(response)
 
     reasoning = str(parsed.get("reasoning") or parsed.get("reasoning_summary") or "")
 
@@ -2529,6 +2580,21 @@ async def get_numeric_gpt_prediction(
         logger.warning(message, *args)
         stage_events.append(message % args if args else message)
 
+    def keep_dropped_transcript(run, reason: str) -> None:
+        """Persist a dropped run's raw reply into runs.md.
+
+        Dropped runs used to be discarded whole: runs.md held the prompt and the
+        failure line, and the text the model actually produced existed nowhere.
+        On Q45197/Q45362 that left the abstain undiagnosable from the artifacts —
+        the reason had to be reverse-engineered from a JSON decoder's column
+        offsets. A reply that broke the parser is exactly the reply worth
+        keeping."""
+        transcripts.append(
+            f"**Model: {run.model}** — DROPPED (not aggregated)\n"
+            f"Reason: {reason}\n\n"
+            f"{run.transcript}"
+        )
+
     for run in runs:
         record = {"model": run.model, "valid": run.valid, "repaired": run.repaired}
         if not run.valid:
@@ -2537,6 +2603,8 @@ async def get_numeric_gpt_prediction(
                 run.model, run.error,
             )
             record["dropped"] = True
+            record["error"] = run.error
+            keep_dropped_transcript(run, str(run.error))
             ensemble.append(record)
             continue
         try:
@@ -2549,6 +2617,7 @@ async def get_numeric_gpt_prediction(
             note_event("dropping unparseable numeric run (%s): %s", run.model, exc)
             record["dropped"] = True
             record["error"] = str(exc)
+            keep_dropped_transcript(run, f"{type(exc).__name__}: {exc}")
             ensemble.append(record)
             continue
         record["used_fallback"] = used_fallback
@@ -2613,6 +2682,11 @@ async def get_numeric_gpt_prediction(
                 )
                 record["dropped"] = True
                 record["self_contradictory"] = True
+                keep_dropped_transcript(
+                    run,
+                    f"rendered distribution contradicts its own answer-space check "
+                    f"by {disagreement:.3f} (tolerance {ANSWER_SPACE_TOLERANCE:.2f})",
+                )
                 ensemble.append(record)
                 continue
 
@@ -2628,6 +2702,11 @@ async def get_numeric_gpt_prediction(
             )
             record["dropped"] = True
             record["off_grid"] = True
+            keep_dropped_transcript(
+                run,
+                f"entirely off-grid and uncorroborated by its own answer-space "
+                f"check (unit conversion: {unit_note})",
+            )
             ensemble.append(record)
             continue
         if used_fallback:

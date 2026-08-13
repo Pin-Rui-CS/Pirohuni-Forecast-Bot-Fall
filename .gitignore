@@ -33,9 +33,10 @@ bot_run.log
 *_What_will_*.txt
 
 # Local forecast post-mortem / analysis folders (not committed)
-44805_Will_the_2026_World_Humanoid_Robot_Games_1500-meter_run_be_w
-44807_Will_Democrats_lead_in_the_generic_congressional_ballot_fail
+45194_What_will_be_the_water_level_of_the_Rhine_river_according_to
 44875_How_many_daily_likers_will_there_be_on_Bluesky_on_August_31
+45197_What_percentage_of_all_startup_or_tech_company_job_openings
+45362_What_will_be_the_percentage_change_in_the_SP_500_from_close
 
 # Feedback-loop architecture rebuild — work in progress, not committed yet
 # (standalone package; nothing in the main pipeline imports it)
