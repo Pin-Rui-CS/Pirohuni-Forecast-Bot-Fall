@@ -6,7 +6,7 @@ name: Forecast via external cron
       tournament:
         description: "Space-separated tournament aliases or IDs"
         required: false
-        default: "summer-2026-ai"
+        default: "fall-2026-ai"
         type: string
       num_runs:
         description: "Number of LLM runs per question"
@@ -108,7 +108,7 @@ jobs:
           ENABLE_TAVILY_RESEARCH: ${{ vars.ENABLE_TAVILY_RESEARCH || 'true' }}
           ENABLE_PREDICTION_MARKET_RESEARCH: ${{ vars.ENABLE_PREDICTION_MARKET_RESEARCH || 'true' }}
           FIRECRAWL_SEARCH_TBS: ${{ vars.FIRECRAWL_SEARCH_TBS || '' }}
-          DISPATCH_TOURNAMENT: ${{ inputs.tournament || 'summer-2026-ai' }}
+          DISPATCH_TOURNAMENT: ${{ inputs.tournament || 'fall-2026-ai' }}
           DISPATCH_NUM_RUNS: ${{ inputs.num_runs }}
           DISPATCH_COST_LIMIT: ${{ inputs.cost_limit }}
           DISPATCH_NO_SUBMIT: ${{ inputs.no_submit && 'true' || 'false' }}
@@ -166,7 +166,7 @@ jobs:
           ENABLE_TAVILY_RESEARCH: ${{ vars.ENABLE_TAVILY_RESEARCH || 'true' }}
           ENABLE_PREDICTION_MARKET_RESEARCH: ${{ vars.ENABLE_PREDICTION_MARKET_RESEARCH || 'true' }}
           FIRECRAWL_SEARCH_TBS: ${{ vars.FIRECRAWL_SEARCH_TBS || '' }}
-          DISPATCH_TOURNAMENT: ${{ inputs.tournament || 'summer-2026-ai' }}
+          DISPATCH_TOURNAMENT: ${{ inputs.tournament || 'fall-2026-ai' }}
           DISPATCH_NUM_RUNS: ${{ inputs.num_runs }}
           DISPATCH_COST_LIMIT: ${{ inputs.cost_limit }}
           DISPATCH_NO_SUBMIT: ${{ inputs.no_submit && 'true' || 'false' }}

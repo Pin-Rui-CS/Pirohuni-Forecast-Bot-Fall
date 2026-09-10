@@ -144,16 +144,27 @@ Q1_2025_AI_BENCHMARKING_ID = 32627
 FALL_2025_AI_BENCHMARKING_ID = "fall-aib-2025"
 SPRING_2026_AI_BENCHMARKING_ID = "spring-aib-2026"
 SUMMER_2026_AI_BENCHMARKING_ID = "summer-futureeval-2026"
+# Current season: Fall FutureEval 2026, Metaculus project 33121. The slug and
+# the numeric id are interchangeable in the /posts/ `tournaments=` query; the
+# slug is used here to match every other post-2025 tournament.
+FALL_2026_AI_BENCHMARKING_ID = "fall-futureeval-2026"
 CURRENT_MINIBENCH_ID = "minibench"
 
 Q4_2024_QUARTERLY_CUP_ID = 3672
 Q1_2025_QUARTERLY_CUP_ID = 32630
-CURRENT_METACULUS_CUP_ID = "metaculus-cup-summer-2026"
+SUMMER_2026_METACULUS_CUP_ID = "metaculus-cup-summer-2026"
+# Both metaculus-cup-* workflows resolve their question list through this
+# constant, so bumping it each season is all they need.
+CURRENT_METACULUS_CUP_ID = "metaculus-cup-fall-2026"
 
 AXC_2025_TOURNAMENT_ID = 32564
 AI_2027_TOURNAMENT_ID = "ai-2027"
 
-DEFAULT_TOURNAMENT_ID = CURRENT_METACULUS_CUP_ID
+# Used when --tournament is omitted. Points at the seasonal AI-benchmarking
+# tournament rather than the cup, because that is what the scheduled workflows
+# actually forecast on; the cup is reached explicitly, via --tournament
+# metaculus-cup or the two metaculus-cup-* workflows.
+DEFAULT_TOURNAMENT_ID = FALL_2026_AI_BENCHMARKING_ID
 
 TOURNAMENT_MAPPING = {
     "q4-2024-ai": Q4_2024_AI_BENCHMARKING_ID,
@@ -161,9 +172,11 @@ TOURNAMENT_MAPPING = {
     "fall-2025-ai": FALL_2025_AI_BENCHMARKING_ID,
     "spring-2026-ai": SPRING_2026_AI_BENCHMARKING_ID,
     "summer-2026-ai": SUMMER_2026_AI_BENCHMARKING_ID,
+    "fall-2026-ai": FALL_2026_AI_BENCHMARKING_ID,
     "minibench": CURRENT_MINIBENCH_ID,
     "q4-2024-cup": Q4_2024_QUARTERLY_CUP_ID,
     "q1-2025-cup": Q1_2025_QUARTERLY_CUP_ID,
+    "summer-2026-cup": SUMMER_2026_METACULUS_CUP_ID,
     "metaculus-cup": CURRENT_METACULUS_CUP_ID,
     "axc-2025": AXC_2025_TOURNAMENT_ID,
     "ai-2027": AI_2027_TOURNAMENT_ID,

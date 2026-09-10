@@ -27,8 +27,10 @@ _MAX_PROBE_POSTS = 6
 
 
 async def main() -> None:
+    from config import DEFAULT_TOURNAMENT_ID  # noqa: E402
+
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("tournament", nargs="?", default="metaculus-cup-summer-2026")
+    parser.add_argument("tournament", nargs="?", default=DEFAULT_TOURNAMENT_ID)
     parser.add_argument("--runs", type=int, default=2)
     args = parser.parse_args()
 

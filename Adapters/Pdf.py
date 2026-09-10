@@ -11,7 +11,7 @@ from utils import _truncate_text
 
 USER_AGENT = (
     "Pirohuni-Forecast-Bot/0.1 "
-    "(https://github.com/Pirohuni/Pirohuni-Forecast-Bot-Summer; forecasting research)"
+    "(https://github.com/Pirohuni/Pirohuni-Forecast-Bot-Fall; forecasting research)"
 )
 # Aligned with serp_research._MAX_SCRAPE_CHARS (not imported: Adapters must not
 # depend on research modules) so downstream truncation never silently cuts a

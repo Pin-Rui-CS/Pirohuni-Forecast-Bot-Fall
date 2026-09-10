@@ -1,4 +1,4 @@
-# Pirohuni Forecast Bot Summer
+# Pirohuni Forecast Bot Fall
 
 It fetches open tournament questions, asks an LLM for forecasts, aggregates repeated runs, saves the LLM outputs locally, and optionally submits forecasts plus private rationale comments to Metaculus.
 
@@ -118,19 +118,19 @@ poetry run python forecasting_bot.py --mode tournament --no-submit
 Dry run on specific tournaments:
 
 ```bash
-poetry run python forecasting_bot.py --mode tournament --tournament metaculus-cup minibench --no-submit
+poetry run python forecasting_bot.py --mode tournament --tournament fall-2026-ai minibench --no-submit
 ```
 
 Submit forecasts:
 
 ```bash
-poetry run python forecasting_bot.py --mode tournament --tournament metaculus-cup
+poetry run python forecasting_bot.py --mode tournament --tournament fall-2026-ai
 ```
 
 Use fewer runs while debugging:
 
 ```bash
-poetry run python forecasting_bot.py --mode tournament --tournament metaculus-cup --num-runs 1 --no-submit
+poetry run python forecasting_bot.py --mode tournament --tournament fall-2026-ai --num-runs 1 --no-submit
 ```
 
 ## CLI reference
@@ -138,7 +138,7 @@ poetry run python forecasting_bot.py --mode tournament --tournament metaculus-cu
 | Flag | Default | Description |
 |---|---|---|
 | `--mode` | `tournament` | `tournament` or `examples` |
-| `--tournament` | `metaculus-cup-summer-2026` | One or more tournament aliases or raw integer IDs |
+| `--tournament` | `fall-2026-ai` (Fall FutureEval 2026) | One or more tournament aliases or raw integer IDs |
 | `--no-submit` | off | Dry run; no forecasts or comments are posted |
 | `--num-runs` | `3` | Number of LLM runs per question; must be at least 1 |
 | `--token-limit`, `--cost-limit` | `OPENROUTER_COST_HARD_LIMIT_USD` | Optional OpenRouter estimated-token hard limit per question; `0` tracks only |
@@ -147,10 +147,12 @@ poetry run python forecasting_bot.py --mode tournament --tournament metaculus-cu
 
 | Alias | Tournament |
 |---|---|
-| `metaculus-cup` | Metaculus Cup Summer 2026 |
+| `fall-2026-ai` | **Fall FutureEval 2026 — current default** (project 33121) |
+| `metaculus-cup` | Metaculus Cup Fall 2026 |
 | `minibench` | MiniBench |
 | `spring-2026-ai` | Spring 2026 AI Benchmarking |
 | `summer-2026-ai` | Summer FutureEval 2026 |
+| `summer-2026-cup` | Metaculus Cup Summer 2026 |
 | `fall-2025-ai` | Fall 2025 AI Benchmarking |
 | `q1-2025-ai` | Q1 2025 AI Benchmarking |
 | `q4-2024-ai` | Q4 2024 AI Benchmarking |

@@ -43,8 +43,8 @@ identical flag set ([feedback_loop/run_bot.py:22-26](feedback_loop/run_bot.py#L2
 
 | Workflow | Schedule | What it runs |
 |---|---|---|
-| `.github/workflows/main.yaml` | `4,24,44 * * * *` (3×/hour) + `workflow_dispatch` | `poetry run python forecasting_bot.py --mode tournament --tournament summer-2026-ai` (`.github/workflows/main.yaml`, "Run forecasting bot" step) |
-| `.github/workflows/main_ec2.yml` | `4,24,44 * * * *` + `workflow_dispatch`, on `[self-hosted, linux, x64, ec2-bot]` | `forecasting_bot.py --mode tournament --tournament summer-2026-ai minibench` |
+| `.github/workflows/main.yaml` | `4,24,44 * * * *` (3×/hour) + `workflow_dispatch` | `poetry run python forecasting_bot.py --mode tournament --tournament fall-2026-ai` (`.github/workflows/main.yaml`, "Run forecasting bot" step) |
+| `.github/workflows/main_ec2.yml` | `4,24,44 * * * *` + `workflow_dispatch`, on `[self-hosted, linux, x64, ec2-bot]` | `forecasting_bot.py --mode tournament --tournament fall-2026-ai minibench` |
 
 Both use `concurrency.group: ${{ github.workflow }}` with `cancel-in-progress: false`, so runs of
 the *same* workflow queue rather than overlap — but `main.yaml` and `main_ec2.yml` are separate
@@ -615,7 +615,7 @@ Module-level, not env-overridable:
 |---|---|---|---|
 | `NUM_RUNS_PER_QUESTION` | `3` | [config.py:26](config.py#L26) | Default ensemble size (CLI-overridable) |
 | `SKIP_PREVIOUSLY_FORECASTED_QUESTIONS` | `True` | [config.py:75](config.py#L75) | Hardcoded; no CLI flag, no env var |
-| `DEFAULT_TOURNAMENT_ID` | `metaculus-cup-summer-2026` | [config.py:137](config.py#L137) | Used when `--tournament` omitted |
+| `DEFAULT_TOURNAMENT_ID` | `fall-futureeval-2026` | [config.py:137](config.py#L137) | Used when `--tournament` omitted |
 | `EXAMPLE_QUESTIONS` | 4 hardcoded IDs | [config.py:153](config.py#L153) | `--mode examples` |
 | `MAX_API_GET_RETRIES` | `3` | [config.py:162](config.py#L162) | Metaculus retries |
 | `list_posts_from_tournament` `count` | `50` | [metaculus_client.py:274](metaculus_client.py#L274) | Hard cap on questions per tournament |
@@ -1073,7 +1073,7 @@ try/except around `wayback_module.snapshot_fallback_text`, with independent logg
 `main.yaml` (GitHub-hosted) and `main_ec2.yml` (self-hosted) have **identical** schedules
 (`4,24,44 * * * *`) and different concurrency groups. If a self-hosted EC2 runner is registered,
 both fire every 20 minutes against the same `METACULUS_TOKEN`, differing only in tournament list
-(`summer-2026-ai` vs `summer-2026-ai minibench`). Nothing in either workflow disables the other.
+(`fall-2026-ai` vs `fall-2026-ai minibench`). Nothing in either workflow disables the other.
 
 ### 6.18 Same fact scraped twice per question, by design and by accident
 

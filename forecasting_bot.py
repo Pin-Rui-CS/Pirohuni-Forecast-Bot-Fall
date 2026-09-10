@@ -37,7 +37,7 @@ def parse_arguments() -> argparse.Namespace:
         epilog="""
 Examples:
   poetry run python forecasting_bot --mode tournament
-  poetry run python forecasting_bot --mode tournament --tournament metaculus-cup
+  poetry run python forecasting_bot --mode tournament --tournament fall-2026-ai
   poetry run python forecasting_bot --mode examples
   poetry run python forecasting_bot --mode tournament --no-submit --tournament q1-2025-ai
         """

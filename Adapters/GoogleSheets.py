@@ -12,7 +12,7 @@ from Adapters.base import AdapterResult, UrlAdapter
 
 USER_AGENT = (
     "Pirohuni-Forecast-Bot/0.1 "
-    "(https://github.com/Pirohuni/Pirohuni-Forecast-Bot-Summer; forecasting research)"
+    "(https://github.com/Pirohuni/Pirohuni-Forecast-Bot-Fall; forecasting research)"
 )
 
 # Page-scraping a large sheet (Firecrawl/Crawl4AI) returns whatever rows the

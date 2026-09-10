@@ -93,7 +93,7 @@ jobs:
           set -o pipefail
           poetry run python forecasting_bot.py \
             --mode tournament \
-            --tournament summer-2026-ai \
+            --tournament fall-2026-ai \
             2>&1 | tee bot_run.log
           echo "Clean LLM result files created:"
           find docs/runs -type f -print 2>/dev/null || true
