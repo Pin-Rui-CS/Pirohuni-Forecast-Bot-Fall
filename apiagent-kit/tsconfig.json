@@ -1,0 +1,35 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+
+    /*
+     * `strict` matches the project this was extracted from. Deliberately NOT
+     * `noUncheckedIndexedAccess` — the 24 adapter files are verbatim copies,
+     * and keeping them byte-identical to their source is what makes re-syncing
+     * a `diff` rather than a merge.
+     */
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": ["node"],
+
+    /*
+     * The two settings that make this a drop-in folder.
+     *
+     * `allowImportingTsExtensions` lets every file import its neighbours with an
+     * explicit `.ts`, which is what Node's own type stripping requires — so the
+     * package runs with no build step and no TypeScript runner.
+     *
+     * `erasableSyntaxOnly` enforces the other half: it rejects enums, parameter
+     * properties, namespaces and anything else Node cannot simply erase. Without
+     * it the constraint is a comment nobody notices breaking.
+     */
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true
+  },
+  "include": ["src/**/*.ts", "examples/**/*.ts", "cli.ts"]
+}
