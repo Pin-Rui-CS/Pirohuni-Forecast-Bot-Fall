@@ -12,7 +12,6 @@ name: Test Metaculus Cup questions
           - "repo default"
           - "openrouter"
           - "openai"
-          - "mixed"
       question_id:
         description: "Optional Metaculus question ID. Leave blank to test eligible open Metaculus Cup questions."
         required: false
@@ -271,6 +270,8 @@ jobs:
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           SOCLAAS_API_KEY: ${{ secrets.SOCLAAS_API_KEY }}
+          TIER1_MODEL: ${{ vars.TIER1_MODEL }}
+          TIER2_MODEL: ${{ vars.TIER2_MODEL }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           # Selects which API every LLM call goes to. Precedence:
           # this run's dropdown -> LLM_PROVIDER repo variable -> openrouter.

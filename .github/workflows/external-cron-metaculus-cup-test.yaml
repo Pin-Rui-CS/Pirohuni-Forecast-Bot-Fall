@@ -12,7 +12,6 @@ name: Test one Metaculus Cup question via external cron
           - "repo default"
           - "openrouter"
           - "openai"
-          - "mixed"
       num_runs:
         description: "Number of LLM runs for the selected question"
         required: false
@@ -77,6 +76,8 @@ jobs:
           echo "LLM_PROVIDER:         ${{ (inputs.llm_provider != 'repo default' && inputs.llm_provider) || vars.LLM_PROVIDER || 'openrouter' }}"
           echo "OPENROUTER_API_KEY:   $([ -n '${{ secrets.OPENROUTER_API_KEY }}'   ] && echo 'SET' || echo 'MISSING')"
           echo "SOCLAAS_API_KEY:      $([ -n '${{ secrets.SOCLAAS_API_KEY }}'      ] && echo 'SET' || echo 'MISSING')"
+          echo "TIER1_MODEL:          ${{ vars.TIER1_MODEL || '(preset default)' }}"
+          echo "TIER2_MODEL:          ${{ vars.TIER2_MODEL || '(preset default)' }}"
           echo "OPENAI_API_KEY:       $([ -n '${{ secrets.OPENAI_API_KEY }}'       ] && echo 'SET' || echo 'MISSING')"
           echo "ASKNEWS_CLIENT_ID:    $([ -n '${{ secrets.ASKNEWS_CLIENT_ID }}'    ] && echo 'SET' || echo 'MISSING')"
           echo "ASKNEWS_SECRET:       $([ -n '${{ secrets.ASKNEWS_SECRET }}'       ] && echo 'SET' || echo 'MISSING')"
@@ -240,6 +241,8 @@ jobs:
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           SOCLAAS_API_KEY: ${{ secrets.SOCLAAS_API_KEY }}
+          TIER1_MODEL: ${{ vars.TIER1_MODEL }}
+          TIER2_MODEL: ${{ vars.TIER2_MODEL }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           # Selects which API every LLM call goes to. Precedence:
           # this run's dropdown -> LLM_PROVIDER repo variable -> openrouter.

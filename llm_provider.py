@@ -89,13 +89,7 @@ logger = logging.getLogger(__name__)
 
 PROVIDER_OPENROUTER: Final = "openrouter"
 PROVIDER_OPENAI: Final = "openai"
-# Two endpoints in one run: paid Tier 1 on OpenRouter, free Tier 2 on the NUS
-# SoC gateway. This is the mode the Route table was built for -- a single
-# global "which provider" flag cannot express it.
-PROVIDER_MIXED: Final = "mixed"
-_VALID_PROVIDERS: Final = frozenset(
-    {PROVIDER_OPENROUTER, PROVIDER_OPENAI, PROVIDER_MIXED}
-)
+_VALID_PROVIDERS: Final = frozenset({PROVIDER_OPENROUTER, PROVIDER_OPENAI})
 
 
 def _read_provider() -> str:
@@ -577,28 +571,48 @@ INTERNAL_MODEL_NAMES: Final[tuple[str, ...]] = (
 )
 
 
-# Tier 1 (compiler, forecasters, tiebreaker). Non-pro deliberately: pro is the
-# same underlying model with reasoning.mode=pro at an IDENTICAL sticker price,
-# so its whole premium lands on extra reasoning tokens billed as output at
-# $50/1M -- against prompts that already force their reasoning into visible
-# output and already emit 10-17k tokens.
-MIXED_TIER1_MODEL: Final = "openai/gpt-6-astra"
-
-# Tier 2 (every research and utility call). Confirmed present in GET /v1/models
-# on 2026-09-12 with a 262144-token context, which clears the largest Tier-2
-# input in the repo (_MAX_EXTRACT_INPUT_CHARS = 180_000 chars, ~56k tokens).
-MIXED_TIER2_MODEL: Final = "qwen3.8:27b"
+# --- Choosing models: two env vars, not a mode name -------------------------
+# The role names above say WHICH JOB a call is doing; TIER1_MODEL and
+# TIER2_MODEL say which concrete model does that job. Naming the models
+# directly beats an opaque profile label ("mixed") on every count: it is
+# self-describing, it composes (any Tier-1 with any Tier-2, no new label), and
+# it does not multiply -- a third pairing needs no third mode.
+#
+#   TIER1_MODEL=openai/gpt-6-astra  TIER2_MODEL=qwen3.8:27b
+#
+# What is deliberately NOT configurable is request POLICY. accepts_temperature,
+# reasoning_headroom_tokens, supports_cache_control, sends_usage_accounting and
+# cost_source are facts about a model/endpoint pair, not preferences: get one
+# wrong and you pay a 1.25x cache-write premium, or send a body argument the
+# endpoint rejects, or have a 20k output cap eaten entirely by hidden
+# reasoning. Those come from MODEL_ROUTES below, keyed on the model.
+#
+# Unset means unchanged: LLM_ROUTING still selects a legacy preset, and each
+# role name keeps routing to itself. The overrides are a layer on top.
+TIER1_ROLE: Final = "anthropic/claude-opus-5"
+TIER2_ROLE: Final = "anthropic/claude-sonnet-5"
+TIER1_ROLE_NAMES: Final[frozenset[str]] = frozenset(
+    {TIER1_ROLE, "openai/gpt-5.6-sol"}
+)
+TIER2_ROLE_NAMES: Final[frozenset[str]] = frozenset(
+    {TIER2_ROLE, "openai/gpt-5.6-terra", "openai/gpt-5.6-luna"}
+)
 
 # Microdollars per 1M tokens (input, output), from the gateway's own model
 # table. No real money is charged, but the allowance is real -- measured
 # $50/day against documented $80 -- so it is tracked as `quota`, never as cost.
-MIXED_TIER2_QUOTA_RATES: Final = (195_000.0, 900_000.0)
+SOCLAAS_QUOTA_RATES: Final[dict[str, tuple[float, float]]] = {
+    "qwen3.8:27b": (195_000.0, 900_000.0),
+    "qwen3.6:35b": (140_000.0, 900_000.0),
+    "gemma4:26b": (60_000.0, 300_000.0),
+    "llama3.1:8b": (20_000.0, 30_000.0),
+}
 
-# Where a SoCLaaS route goes when the gateway is down. An internal NAME, so the
-# fallback arrives with its own policy. It must resolve to a route on a
-# DIFFERENT endpoint or the fallback is circular, which is why
-# openai/gpt-5.6-terra stays on OpenRouter below.
-_MIXED_TIER2_FALLBACK: Final = "openai/gpt-5.6-terra"
+# Where a SoCLaaS route falls back when the gateway is down. An internal NAME,
+# so the fallback arrives with its own policy, and one that must resolve to a
+# route on a DIFFERENT endpoint -- a fallback onto the endpoint that just
+# failed is not a fallback. preflight() asserts exactly that.
+_QUOTA_FALLBACK_ROLE: Final = "openai/gpt-5.6-terra"
 
 
 def _openrouter_route(model: str) -> Route:
@@ -635,8 +649,8 @@ def _openai_route(internal_name: str) -> Route:
     )
 
 
-def _astra_route() -> Route:
-    """Tier 1 on OpenRouter.
+def _gpt6_openrouter_route(model_id: str) -> Route:
+    """A GPT-6-family reasoning model reached through OpenRouter.
 
     ``supports_cache_control=False`` is load-bearing rather than cosmetic.
     OpenRouter forwards Anthropic-style cache_control breakpoints, and the
@@ -653,7 +667,7 @@ def _astra_route() -> Route:
     """
     return Route(
         endpoint=ENDPOINT_OPENROUTER,
-        model_id=MIXED_TIER1_MODEL,
+        model_id=model_id,
         accepts_temperature=True,      # measured live: 5/5 distinct completions
         uses_max_completion_tokens=False,
         reasoning_headroom_tokens=24_000,
@@ -663,11 +677,11 @@ def _astra_route() -> Route:
     )
 
 
-def _qwen_route() -> Route:
-    """Tier 2 on SoCLaaS: free in money, metered in quota, rate-limited."""
+def _soclaas_route(model_id: str) -> Route:
+    """An open-weight model on the gateway: free in money, metered in quota."""
     return Route(
         endpoint=ENDPOINT_SOCLAAS,
-        model_id=MIXED_TIER2_MODEL,
+        model_id=model_id,
         accepts_temperature=True,      # open-weight model; verified accepted
         uses_max_completion_tokens=False,
         supports_cache_control=False,
@@ -675,49 +689,88 @@ def _qwen_route() -> Route:
         # extension; sending one would be an unrecognised body argument.
         sends_usage_accounting=False,
         cost_source="quota",
-        quota_rate_microdollars=MIXED_TIER2_QUOTA_RATES,
-        fallback=_MIXED_TIER2_FALLBACK,
+        quota_rate_microdollars=SOCLAAS_QUOTA_RATES.get(model_id),
+        fallback=_QUOTA_FALLBACK_ROLE,
     )
 
 
-def _mixed_profile() -> Profile:
-    """Paid Tier 1 on OpenRouter, free Tier 2 on SoCLaaS.
+def route_for_model(model_id: str) -> Route:
+    """Concrete model id -> how to reach it. The registry the tiers select from.
 
-    The ensemble is Astra(brief) + qwen3.8(brief) + qwen3.8(raw). Two Astra
-    runs on one brief was the alternative; sampling there is genuinely live
-    (measured), but they would still share a lineage AND an input, and the
-    44620 post-mortem is explicit that input diversity cannot decorrelate
-    shared reasoning fallacies. Two lineages over three inputs costs less and
-    decorrelates more.
+    Recognised by shape rather than by an exhaustive list, so a sibling model
+    (gpt-6-astra-pro, qwen3.6:35b) works without an edit here. An unrecognised
+    id falls through to OpenRouter, which is the one endpoint that multiplexes
+    every vendor -- the safest guess, and it is logged.
     """
-    return Profile(
-        name=PROVIDER_MIXED,
-        routes={
-            # Tier 1 -- both role names mean "the strong model".
-            "anthropic/claude-opus-5": _astra_route(),
-            "openai/gpt-5.6-sol": _astra_route(),
-            # Tier 2 -- every research and utility call.
-            "anthropic/claude-sonnet-5": _qwen_route(),
-            "openai/gpt-5.6-luna": _qwen_route(),
-            # The designated PAID Tier-2 route, and the fallback target above.
-            # Deliberately NOT on SoCLaaS: a fallback pointing at the endpoint
-            # that just failed is not a fallback.
-            "openai/gpt-5.6-terra": _openrouter_route("anthropic/claude-sonnet-5"),
-        },
-        default_forecaster="anthropic/claude-opus-5",
-        forecaster_pool=("anthropic/claude-opus-5", "anthropic/claude-sonnet-5"),
-        heterogeneous_model="anthropic/claude-sonnet-5",
+    name = model_id.strip()
+    if name in SOCLAAS_QUOTA_RATES or ":" in name:
+        # `family:size` is the gateway's id convention and nobody else's.
+        return _soclaas_route(name)
+    if "gpt-6" in name or "gpt-5" in name:
+        return _gpt6_openrouter_route(name)
+    return _openrouter_route(name)
+
+
+def _tier_overrides() -> dict[str, Route]:
+    """Role name -> Route, for whichever tiers TIER1/TIER2_MODEL name.
+
+    Returns {} when neither is set, which is what keeps the legacy presets
+    byte-identical and the golden request snapshots valid.
+    """
+    overrides: dict[str, Route] = {}
+    for env_var, role_names in (
+        ("TIER1_MODEL", TIER1_ROLE_NAMES),
+        ("TIER2_MODEL", TIER2_ROLE_NAMES),
+    ):
+        chosen = (os.getenv(env_var) or "").strip()
+        if not chosen:
+            continue
+        route = route_for_model(chosen)
+        for role in role_names:
+            # The quota fallback role must keep a route on a paid endpoint, or
+            # the fallback it provides is circular. Leave it alone.
+            if role == _QUOTA_FALLBACK_ROLE and route.cost_source == "quota":
+                continue
+            overrides[role] = route
+        logger.info(
+            "[routing] %s=%s -> %s @ %s",
+            env_var, chosen, route.model_id, route.endpoint.label,
+        )
+    return overrides
+
+
+def _apply_tier_choice(profile: Profile) -> Profile:
+    """Fold TIER1/TIER2_MODEL into a preset: routes AND the ensemble.
+
+    Deriving the pool from the tiers is what keeps this to two variables
+    instead of four. Naming a Tier 2 model is a statement about the whole run,
+    so the ensemble follows it: the pool becomes one model of each tier and the
+    raw-research member becomes the Tier 2 one, which is the cheaper and more
+    decorrelated arrangement (two lineages over three inputs) rather than two
+    identical Tier 1 runs on one brief.
+
+    FORECASTER_MODELS still overrides this in config.py, so an unusual pool
+    stays expressible.
+    """
+    overrides = _tier_overrides()
+    if not overrides:
+        return profile
+    return replace(
+        profile,
+        routes=dict(profile.routes) | overrides,
+        forecaster_pool=(TIER1_ROLE, TIER2_ROLE),
+        heterogeneous_model=TIER2_ROLE,
     )
 
 
 def _openrouter_profile() -> Profile:
-    return Profile(
+    return _apply_tier_choice(Profile(
         name=PROVIDER_OPENROUTER,
         routes={name: _openrouter_route(name) for name in INTERNAL_MODEL_NAMES},
         default_forecaster="anthropic/claude-opus-5",
         forecaster_pool=("anthropic/claude-opus-5", "openai/gpt-5.6-sol"),
         heterogeneous_model="anthropic/claude-sonnet-5",
-    )
+    ))
 
 
 def _openai_profile() -> Profile:
@@ -726,19 +779,18 @@ def _openai_profile() -> Profile:
     # gpt-5.6-sol, so a lineage pool would make runs 1 and 2 the same model on
     # the same brief -- and temperature is dropped here, so they could not even
     # be decorrelated by sampling. Accepted cost of a single-vendor setup.
-    return Profile(
+    return _apply_tier_choice(Profile(
         name=PROVIDER_OPENAI,
         routes={name: _openai_route(name) for name in INTERNAL_MODEL_NAMES},
         default_forecaster="gpt-5.6-sol",
         forecaster_pool=("gpt-5.6-sol", "gpt-5.6-terra"),
         heterogeneous_model="gpt-5.6-terra",
-    )
+    ))
 
 
 _PROFILE_BUILDERS: Final[dict[str, Any]] = {
     PROVIDER_OPENROUTER: _openrouter_profile,
     PROVIDER_OPENAI: _openai_profile,
-    PROVIDER_MIXED: _mixed_profile,
 }
 
 _PROFILE: Profile | None = None
@@ -795,17 +847,24 @@ def _reverse_index(profile: Profile) -> dict[str, Route]:
 
 
 def _fallback_route(model: str) -> Route:
-    """A name no profile claims. Route it to the profile's own endpoint rather
-    than failing: an unknown name is far more likely to be a new model id than
-    a typo, and a 404 from the provider is a better error than a KeyError."""
-    profile = active_profile()
-    sample = next(iter(profile.routes.values()))
-    logger.warning(
-        "No route for model %r in profile %r -- sending it to %s as-is. "
-        "Add it to INTERNAL_MODEL_NAMES in llm_provider.py.",
-        model, profile.name, sample.endpoint.label,
+    """A name no profile claims -- resolve it as a CONCRETE model id.
+
+    This is the path that makes listing real models work anywhere a model is
+    named: FORECASTER_MODELS=openai/gpt-6-astra,qwen3.8:27b reaches two
+    different endpoints with two different request policies, without either
+    name having to be a role in INTERNAL_MODEL_NAMES.
+
+    It must not fall back to "the profile's own endpoint", which was the
+    previous behaviour: under the OpenRouter preset that would have sent
+    `qwen3.8:27b` to OpenRouter carrying OpenRouter's flags -- a 404 at best,
+    and at worst a request shaped for the wrong endpoint. route_for_model
+    recognises the model instead, so the endpoint follows the model."""
+    route = route_for_model(model)
+    logger.info(
+        "[routing] %r is not a role name; resolved as a concrete model -> %s @ %s",
+        model, route.model_id, route.endpoint.label,
     )
-    return replace(sample, model_id=model)
+    return route
 
 
 def route_for(model: str, *, label: str | None = None) -> Route:
