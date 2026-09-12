@@ -42,7 +42,6 @@ async def build_evidence_plan(
             prompt,
             model=model,
             temperature=0.1,
-            use_tools=False,
             _label="evidence-plan",
         )
         parsed = _extract_json_object(response)

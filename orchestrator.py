@@ -30,6 +30,16 @@ import research_trace
 logger = logging.getLogger(__name__)
 
 QUESTION_TIMEOUT_SECONDS = int(os.getenv("QUESTION_TIMEOUT_SECONDS", str(20 * 60)))
+# How many questions may be in flight at once. This used to be unbounded: a
+# 35-question tournament started 35 questions simultaneously, each fanning out
+# to its own research providers. Nothing downstream could meaningfully throttle
+# that -- the LLM semaphore caps concurrent *calls*, not questions, and the
+# synchronous market providers run in worker threads that bypass it entirely.
+# The cost is invisible while every endpoint is elastic and becomes decisive
+# the moment one is rate-limited, because QUESTION_TIMEOUT_SECONDS is measured
+# from question start and so is spent while merely queueing.
+# 0 restores the old unbounded behaviour.
+QUESTION_CONCURRENCY = int(os.getenv("QUESTION_CONCURRENCY", "0"))
 
 _QUESTION_SNAPSHOT_KEYS = (
     "id",
@@ -378,15 +388,31 @@ async def forecast_questions(
         input_token_hard_limit=0,
         output_token_hard_limit=0,
     ) as run_cost_manager:
-        forecast_tasks = [
-            forecast_individual_question_with_timeout(
-                question_id,
-                post_id,
-                submit_prediction,
-                num_runs_per_question,
-                skip_previously_forecasted_questions,
-                per_question_token_hard_limit,
+        question_gate = (
+            asyncio.Semaphore(QUESTION_CONCURRENCY) if QUESTION_CONCURRENCY > 0 else None
+        )
+
+        async def run_one(question_id: int, post_id: int):
+            if question_gate is None:
+                return await forecast_individual_question_with_timeout(
+                    question_id, post_id, submit_prediction, num_runs_per_question,
+                    skip_previously_forecasted_questions, per_question_token_hard_limit,
+                )
+            # Acquire BEFORE the timeout starts: a question should not spend
+            # its wall-clock budget waiting for a slot it has not been given.
+            async with question_gate:
+                return await forecast_individual_question_with_timeout(
+                    question_id, post_id, submit_prediction, num_runs_per_question,
+                    skip_previously_forecasted_questions, per_question_token_hard_limit,
+                )
+
+        if question_gate is not None:
+            logger.info(
+                "Forecasting %d question(s), at most %d at a time.",
+                len(open_question_id_post_id), QUESTION_CONCURRENCY,
             )
+        forecast_tasks = [
+            run_one(question_id, post_id)
             for question_id, post_id in open_question_id_post_id
         ]
         forecast_summaries = await asyncio.gather(*forecast_tasks, return_exceptions=True)

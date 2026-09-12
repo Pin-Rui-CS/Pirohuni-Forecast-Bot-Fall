@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from config import (
+    FORECAST_MAX_OUTPUT_TOKENS,
     FORECASTER_MODELS,
     HETEROGENEOUS_RUN_ENABLED,
     HETEROGENEOUS_RUN_MODEL,
@@ -166,9 +167,9 @@ async def gather_forecast_runs(
             call_prompt,
             model=model,
             temperature=temperature,
-            use_tools=False,
             _label=sublabel,
             return_transcript=True,
+            max_tokens=FORECAST_MAX_OUTPUT_TOKENS,
         )
 
     def _short_error(exc: Exception) -> str:

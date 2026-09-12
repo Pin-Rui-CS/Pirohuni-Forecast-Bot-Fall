@@ -60,7 +60,6 @@ _ARTICLE_PATTERN = re.compile(
     re.DOTALL,
 )
 _MARKDOWN_LINK = re.compile(r"\[([^\]]+)\]\(([^)]*)\)")
-_HEADING_PATTERN = re.compile(r"^#{1,6}\s+", re.MULTILINE)
 _SEPARATOR_LINE = re.compile(r"^\s*[=\-]{5,}\s*$", re.MULTILINE)
 _WHITESPACE = re.compile(r"\s+")
 _DATE_HINT = re.compile(
@@ -431,9 +430,15 @@ async def _compress_section_text(name: str, content: str, target_chars: int) -> 
             ),
             model=_PRECOMPRESS_MODEL,
             temperature=0.1,
-            use_tools=False,
             max_tokens=max_tokens,
             _label="compiler/precompress",
+            # This prompt promises a LOSSLESS compression and the caller
+            # trusts it. A pass cut off at max_tokens keeps the entries before
+            # the cut and silently drops every one after, while still reading
+            # as a complete section (44879: cut mid-URL at entry [5] of 25,
+            # then labelled itself "all distinct claims retained"). Treat it as
+            # a failure so the caller falls back to a VISIBLE truncation.
+            raise_on_truncation=True,
         )
     except HardLimitExceededError:
         raise
@@ -600,14 +605,17 @@ async def _try_llm_compile(
     model: str,
     artifact_check: dict | None = None,
 ) -> str | None:
-    if not llm_provider.api_key():
+    # The key that matters is the one for THIS model's endpoint, which under a
+    # mixed routing profile is not necessarily "the" provider's.
+    route = llm_provider.route_for(model, label="compiler/research-brief")
+    if not llm_provider.api_key_for(route.endpoint):
         logger.info(
             "Research compiler skipped LLM pass because %s is not set.",
-            llm_provider.api_key_env_var(),
+            route.endpoint.api_key_env,
         )
         return None
 
-    model = llm_provider.resolve_model(model)
+    model = route.model_id
 
     cleaned_sections = await _fit_sections_to_budget(cleaned_sections)
     # Byte-exact record of what the compiler can know. "Dropped by the
@@ -637,7 +645,7 @@ async def _try_llm_compile(
         artifact_check=artifact_check,
     )
 
-    client = llm_provider.make_async_client()
+    client = llm_provider.async_client_for(route)
     messages = [
         {
             "role": "system",
@@ -652,6 +660,7 @@ async def _try_llm_compile(
         {"role": "user", "content": prompt},
     ]
     try:
+        await llm_provider.gate_for(route).wait_async()
         async with llm_rate_limiter:
             usage_handle = MonetaryCostManager.start_openrouter_call(
                 "compiler/research-brief",
@@ -659,8 +668,8 @@ async def _try_llm_compile(
                 {"messages": messages, "max_tokens": _COMPILER_MAX_OUTPUT_TOKENS},
             )
             response = await client.chat.completions.create(
-                **llm_provider.chat_kwargs(
-                    model,
+                **llm_provider.build_kwargs(
+                    route,
                     {
                         "messages": messages,
                         "temperature": 0.1,
@@ -673,11 +682,30 @@ async def _try_llm_compile(
         logger.info(
             "research-compiler | model=%s | %s usage recorded",
             model,
-            llm_provider.provider_name(),
+            route.endpoint.label,
         )
         choice = response.choices[0]
         content = choice.message.content
         if not content or not content.strip():
+            # 44880: 123,704 tokens in, 0 out, $0.00 — the brief was swapped
+            # for the heuristic fallback with no log line anywhere, detectable
+            # only from an all-zeros audit row. Unlike call_llm, this path
+            # builds its request directly and so never reaches
+            # _validate_text_completion_response. Say it out loud.
+            logger.warning(
+                "research-compiler | model=%s returned an EMPTY brief "
+                "(finish_reason=%s); falling back to the deterministic brief.",
+                model,
+                getattr(choice, "finish_reason", "unknown"),
+            )
+            research_trace.emit(
+                "brief",
+                "compiler returned an empty brief",
+                "",
+                status="failed",
+                error=f"empty content, finish_reason={getattr(choice, 'finish_reason', 'unknown')}",
+                meta={"chain": "brief", "model": model},
+            )
             return None
         # A brief cut off at the output cap is non-empty, so the old
         # `if not content.strip()` guard passed it through silently: 44875

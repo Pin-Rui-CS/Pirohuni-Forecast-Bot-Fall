@@ -49,22 +49,27 @@ from research.firecrawl_scrape import (  # noqa: E402
 logger = logging.getLogger(__name__)
 
 
-def _get_openrouter_api_key() -> str:
-    """API key for the active LLM provider (name kept for call-site stability)."""
-    api_key = llm_provider.api_key()
-    if not api_key:
+def _require_llm_route(model: str, label: str):
+    """Route this model and fail fast when its endpoint has no key.
+
+    Which key is required depends on where the model is routed, not on a
+    single global provider -- under a mixed profile the resolution scraper and
+    the compiler can legitimately need different ones.
+    """
+    route = llm_provider.route_for(model, label=label)
+    if not llm_provider.api_key_for(route.endpoint):
         raise ValueError(
-            f"{llm_provider.api_key_env_var()} is required for LLM-based source cleaning."
+            f"{route.endpoint.api_key_env} is required for LLM-based source cleaning."
         )
-    return api_key
+    return route
 
 
-def _log_openrouter_call(label: str, model: str) -> None:
+def _log_openrouter_call(label: str, model: str, route) -> None:
     logger.info(
         "%s | model=%s | %s usage recorded",
         label,
         model,
-        llm_provider.provider_name(),
+        route.endpoint.label,
     )
 
 # ===========================================================================
@@ -285,81 +290,6 @@ def _build_resolution_summary_prompt(
     )
 
 
-def _build_summary_prompt(
-    question_text: str,
-    resolution_criteria: str,
-    url: str,
-    content: str,
-    key_terms: list[str] | None = None,
-) -> str:
-    key_terms_section = ""
-    if key_terms:
-        terms_list = ", ".join(f'"{t}"' for t in key_terms)
-        key_terms_section = (
-            f"## Key Terms to Search For\n"
-            f"The resolution criteria require entries matching these specific terms/labels: "
-            f"{terms_list}\n"
-            f"Search the web page content for these exact strings and report how many times "
-            f"each appears, and in what context (quote the surrounding text).\n\n"
-        )
-
-    return (
-        "You are a research assistant helping a forecaster understand a resolution source.\n\n"
-        f"## Forecast Question\n{question_text}\n\n"
-        f"## Resolution Criteria\n{resolution_criteria}\n\n"
-        f"{key_terms_section}"
-        f"## Web Page Content (from {url})\n{content[:_LLM_MAX_INPUT]}\n\n"
-        "## IMPORTANT: How to read this content\n"
-        "The content above is a full-page scrape rendered as markdown. It includes "
-        "navigation menus, header/footer links, and other site chrome mixed in with the "
-        "actual page data. Navigation menus typically appear as bulleted link lists near "
-        "the top and bottom of the content. IGNORE these — focus only on the substantive "
-        "content in the middle of the page (headings, data entries, tables, paragraphs). "
-        "Labels and entry types (e.g. 'Grand Chamber Judgment', 'Chamber Judgment') may "
-        "appear as markdown link text in the form [Label](url) — treat the text inside "
-        "the brackets as the label, not the URL.\n\n"
-        "## Task\n\n"
-        "### Step 1: EXTRACT\n"
-        "Scan the web page content and list up to 10 specific entries that are most "
-        "relevant to the resolution criteria. For each, quote the exact text showing "
-        "dates, labels, values, or status fields that matter. If the resolution criteria "
-        "mention a specific label or term, search for that exact string — including as "
-        "markdown link text in the form [Label](url) — and report whether it appears, "
-        "how many times, and in what context.\n\n"
-        "### Step 2: SUMMARIZE\n"
-        "Using your extractions above, write a structured summary with exactly these "
-        "four sections:\n\n"
-        "**1. CURRENT STATE:** What does the resolution source currently show? "
-        "List the most recent 5-10 relevant entries with their exact dates and labels. "
-        "Explicitly state whether any entries fall within the resolution criteria's "
-        "date range or match its required labels. If none do, say so clearly and state "
-        "what the most recent qualifying entry is and when it appeared.\n\n"
-        "**2. GAP TO RESOLUTION:** What exactly would need to appear/change on the "
-        "resolution source for this question to resolve Yes? Has any part of the criteria "
-        "already been met?\n\n"
-        "**3. HISTORICAL PATTERN:** List the dates of the most recent 5-10 qualifying "
-        "entries to establish the cadence. Calculate the gaps between them. Note the "
-        "longest gap and the average gap. State how long it has been since the last "
-        "qualifying entry.\n\n"
-        "**4. KEY AMBIGUITY:** Is there any mismatch between what the resolution criteria "
-        "require (exact labels, specific page, date ranges) and what the source actually "
-        "displays? Flag any labeling, formatting, or scoping issues.\n\n"
-        "## IMPORTANT RULES\n"
-        "- Base your summary ONLY on what is actually present in the web page content "
-        "provided above.\n"
-        "- Do not identify, request, or recommend follow-up links. The crawler has "
-        "already gathered the source material to use.\n"
-        "weekly report listed) — older entries matter as much as recent ones for "
-        "- If a field or label is visible in the content, cite it exactly as it appears "
-        "(including if it is inside markdown link syntax like [Label](url)).\n"
-        "- If information is missing from the scrape, say 'not present in scraped content' "
-        "— do not speculate about what the page 'likely' or 'appears to' contain.\n"
-        "- Do not use external knowledge about the source to fill gaps in the scraped data.\n"
-        "- When stating that something is absent, confirm you searched for it by noting "
-        "the exact string you looked for, including its markdown link form if applicable."
-    )
-
-
 def _summary_token_cap(num_pages: int) -> int:
     """Output token budget for the resolution summary, scaled by page count.
 
@@ -385,9 +315,9 @@ async def _summarize_snapshot_history(
     Resolution Mechanics section, giving the forecaster a real same-source flow
     rate instead of an improvised one.
     """
-    _get_openrouter_api_key()  # fail fast with a clear message when unset
-    model = llm_provider.resolve_model(model)
-    client = llm_provider.make_async_client()
+    route = _require_llm_route(model, "resolution-scraper/wayback-history")
+    model = route.model_id
+    client = llm_provider.async_client_for(route)
 
     snapshot_blocks = "\n\n---\n\n".join(
         f"## Snapshot captured {snapshot.iso_date}\n{snapshot.text}"
@@ -423,6 +353,7 @@ async def _summarize_snapshot_history(
     )
     messages = [{"role": "user", "content": prompt}]
 
+    await llm_provider.gate_for(route).wait_async()
     async with llm_rate_limiter:
         usage_handle = MonetaryCostManager.start_openrouter_call(
             "resolution-scraper/wayback-history",
@@ -430,13 +361,13 @@ async def _summarize_snapshot_history(
             {"messages": messages, "max_tokens": max_tokens},
         )
         response = await client.chat.completions.create(
-            **llm_provider.chat_kwargs(
-                model,
+            **llm_provider.build_kwargs(
+                route,
                 {"messages": messages, "max_tokens": max_tokens, "temperature": 0.1},
             )
         )
     usage_handle.record_response(response)
-    _log_openrouter_call("resolution-scraper/wayback-history", model)
+    _log_openrouter_call("resolution-scraper/wayback-history", model, route)
     return response.choices[0].message.content.strip()
 
 
@@ -499,13 +430,14 @@ async def _llm_summarize(
     Uses the same provider setup as the main forecasting bot.
     Falls back to the heuristically-cleaned content if the call fails.
     """
-    _get_openrouter_api_key()  # fail fast with a clear message when unset
-    model = llm_provider.resolve_model(model)
-    client = llm_provider.make_async_client()
+    route = _require_llm_route(model, "resolution-scraper/page-summary")
+    model = route.model_id
+    client = llm_provider.async_client_for(route)
 
     prompt = _build_resolution_summary_prompt(question_text, resolution_criteria, url, content, key_terms)
     messages = [{"role": "user", "content": prompt}]
 
+    await llm_provider.gate_for(route).wait_async()
     async with llm_rate_limiter:
         usage_handle = MonetaryCostManager.start_openrouter_call(
             "resolution-scraper/page-summary",
@@ -513,106 +445,18 @@ async def _llm_summarize(
             {"messages": messages, "max_tokens": max_tokens},
         )
         response = await client.chat.completions.create(
-            **llm_provider.chat_kwargs(
-                model,
+            **llm_provider.build_kwargs(
+                route,
                 {"messages": messages, "max_tokens": max_tokens, "temperature": 0.1},
             )
         )
     usage_handle.record_response(response)
-    _log_openrouter_call("resolution-scraper/page-summary", model)
+    _log_openrouter_call("resolution-scraper/page-summary", model, route)
     return response.choices[0].message.content.strip()
 
 
 # ===========================================================================
 # 4. Follow-up link extraction and compilation
-# ===========================================================================
-
-_FOLLOW_UP_SECTION = re.compile(
-    r'##\s*FOLLOW_UP_LINKS\s*\n((?:\s*-\s*https?://[^\s]+\s*\n?)+)',
-    re.IGNORECASE,
-)
-
-
-def _extract_follow_up_links(llm_response: str) -> tuple[str, list[str]]:
-    """Parse the FOLLOW_UP_LINKS section from an LLM response.
-
-    Returns (cleaned_response, list_of_urls) where cleaned_response has the
-    section stripped out.
-    """
-    match = _FOLLOW_UP_SECTION.search(llm_response)
-    if not match:
-        return llm_response, []
-
-    urls: list[str] = []
-    for line in match.group(1).splitlines():
-        line = line.strip().lstrip("- ").strip()
-        if line.startswith("http"):
-            urls.append(line)
-
-    cleaned = llm_response[: match.start()].rstrip()
-    return cleaned, urls
-
-
-def _build_compile_prompt(
-    question_text: str,
-    resolution_criteria: str,
-    summaries: list[tuple[str, str]],
-) -> str:
-    summaries_text = "\n\n---\n\n".join(
-        f"### Source: {url}\n{summary}" for url, summary in summaries
-    )
-    return (
-        "You are a research assistant helping a forecaster. "
-        "You have been given summaries from multiple web pages relevant to a forecast "
-        "question. Compile them into a single coherent report.\n\n"
-        f"## Forecast Question\n{question_text}\n\n"
-        f"## Resolution Criteria\n{resolution_criteria}\n\n"
-        f"## Individual Page Summaries\n\n{summaries_text}\n\n"
-        "## Task\n"
-        "Synthesize all of the above into a single structured report using exactly "
-        "these four sections:\n\n"
-        "**1. CURRENT STATE:** What do the sources collectively show? Combine the most "
-        "recent relevant entries across all sources with their dates and labels.\n\n"
-        "**2. GAP TO RESOLUTION:** What exactly would need to appear/change for this "
-        "question to resolve Yes? Has any part of the criteria already been met?\n\n"
-        "**3. HISTORICAL PATTERN:** Combine the historical patterns across all sources. "
-        "Note cadence, gaps, and how long it has been since the last qualifying entry.\n\n"
-        "**4. KEY AMBIGUITY:** Note any conflicts between sources, or gaps in coverage.\n\n"
-        "Base your report only on the summaries provided. Do not speculate beyond them."
-    )
-
-
-async def _compile_summaries(
-    question_text: str,
-    resolution_criteria: str,
-    summaries: list[tuple[str, str]],
-    model: str,
-) -> str:
-    """Ask the LLM to compile multiple page summaries into one coherent report."""
-    _get_openrouter_api_key()  # fail fast with a clear message when unset
-    model = llm_provider.resolve_model(model)
-    client = llm_provider.make_async_client()
-    prompt = _build_compile_prompt(question_text, resolution_criteria, summaries)
-    messages = [{"role": "user", "content": prompt}]
-    async with llm_rate_limiter:
-        usage_handle = MonetaryCostManager.start_openrouter_call(
-            "resolution-scraper/compile-summaries",
-            model,
-            {"messages": messages, "max_tokens": 2000},
-        )
-        response = await client.chat.completions.create(
-            **llm_provider.chat_kwargs(
-                model,
-                {"messages": messages, "max_tokens": 2000, "temperature": 0.1},
-            )
-        )
-    usage_handle.record_response(response)
-    _log_openrouter_call("resolution-scraper/compile-summaries", model)
-    return response.choices[0].message.content.strip()
-
-
-# ===========================================================================
-# 5. Adapter + Crawl4AI scraping
 # ===========================================================================
 
 @dataclass(frozen=True)
@@ -954,197 +798,6 @@ async def _scrape_resolution_urls(
 # ===========================================================================
 # 6. Main pipeline
 # ===========================================================================
-
-async def _legacy_scrape_resolution_sources_with_followups(
-    resolution_criteria: str,
-    question_text: str = "",
-    use_llm_cleaning: bool = False,
-    llm_model: str = "anthropic/claude-sonnet-5",
-    max_concurrent: int = 3,
-    timeout: int = 30,
-) -> str:
-    """Extract URLs from the full question context, scrape them, return clean content.
-
-    Args:
-        resolution_criteria: Full resolution criteria text of the question.
-        question_text:        Forecast question context, usually title/background/fine print.
-        use_llm_cleaning:     If True, pass each page through an LLM to extract
-                              only the forecast-relevant parts. Requires OPENROUTER_API_KEY.
-        llm_model:            OpenRouter model ID to use when use_llm_cleaning=True.
-        max_concurrent:       Max simultaneous scrape jobs.
-        timeout:              Per-URL timeout in seconds.
-
-    Returns:
-        A formatted string with cleaned content from each URL, suitable for
-        appending to an LLM forecasting prompt. Empty string if no URLs found
-        or all scrapes failed.
-    """
-    source_text = "\n\n".join(part for part in [question_text, resolution_criteria] if part)
-    urls = extract_urls(source_text)
-    if not urls:
-        logger.info("No external URLs found in question text or resolution criteria.")
-        return ""
-
-    logger.info("Found %d URL(s) in question text/resolution criteria: %s", len(urls), urls)
-
-    sections: list[str] = []
-    # Accumulates (url, summary) pairs for the final compilation step.
-    all_summaries: list[tuple[str, str]] = []
-
-    # ------------------------------------------------------------------
-    # Step 1: scrape source URLs through URL adapters, then Crawl4AI.
-    # ------------------------------------------------------------------
-    source_urls = list(urls)
-
-    # ------------------------------------------------------------------
-    # Step 2: clean and optionally summarize scraped source content.
-    # ------------------------------------------------------------------
-    if source_urls:
-        results = await _scrape_resolution_urls(
-            source_urls,
-            question_text=question_text,
-            resolution_criteria=resolution_criteria,
-            max_concurrent=max_concurrent,
-            timeout=timeout,
-        )
-
-        for result in results:
-            if not result.success:
-                logger.warning("Failed to scrape %s: %s", result.url, result.error)
-                sections.append(
-                    f"## Source: {result.url}\n_Scrape failed: {result.error}_"
-                )
-                continue
-
-            # When LLM cleaning is enabled, defer char truncation to the LLM's own
-            # input limit so the LLM sees as much of the page as possible, and
-            # preserve URLs so the LLM can identify follow-up links.
-            heuristic_max = _LLM_MAX_INPUT if use_llm_cleaning else _MAX_CONTENT_CHARS
-            cleaned = _clean_content(result.content, max_chars=heuristic_max, keep_urls=use_llm_cleaning)
-
-            if not cleaned.strip():
-                sections.append(
-                    f"## Source: {result.url}\n_No usable content extracted._"
-                )
-                continue
-
-            follow_up_urls: list[str] = []
-
-            if use_llm_cleaning:
-                try:
-                    raw_summary = await _llm_summarize(
-                        url=result.url,
-                        content=cleaned,
-                        question_text=question_text,
-                        resolution_criteria=resolution_criteria,
-                        model=llm_model,
-                    )
-                    cleaned, follow_up_urls = _extract_follow_up_links(raw_summary)
-                    if follow_up_urls:
-                        logger.info(
-                            "LLM identified %d follow-up link(s) from %s: %s",
-                            len(follow_up_urls), result.url, follow_up_urls,
-                        )
-                except HardLimitExceededError:
-                    raise
-                except Exception as exc:
-                    logger.warning(
-                        "LLM cleaning failed for %s: %s — using heuristic output",
-                        result.url, exc,
-                    )
-
-            all_summaries.append((result.url, cleaned))
-            sections.append(
-                f"## Source: {result.url}\n"
-                f"_Scraped via {result.provider_used}_\n\n"
-                f"{cleaned}"
-            )
-
-            # ------------------------------------------------------------------
-            # Follow-up scraping: scrape each link the LLM identified, summarize
-            # each one, and collect for the final compilation step.
-            # ------------------------------------------------------------------
-            if follow_up_urls:
-                follow_up_results = await _scrape_resolution_urls(
-                    follow_up_urls,
-                    question_text=question_text,
-                    resolution_criteria=resolution_criteria,
-                    max_concurrent=max_concurrent,
-                    timeout=timeout,
-                )
-                for fu_result in follow_up_results:
-                    if not fu_result.success:
-                        logger.warning(
-                            "Failed to scrape follow-up %s: %s", fu_result.url, fu_result.error,
-                        )
-                        sections.append(
-                            f"## Follow-up Source: {fu_result.url}\n"
-                            f"_Scrape failed: {fu_result.error}_"
-                        )
-                        continue
-
-                    fu_cleaned = _clean_content(fu_result.content, max_chars=_LLM_MAX_INPUT, keep_urls=False)
-                    if not fu_cleaned.strip():
-                        sections.append(
-                            f"## Follow-up Source: {fu_result.url}\n"
-                            f"_No usable content extracted._"
-                        )
-                        continue
-
-                    try:
-                        fu_summary = await _llm_summarize(
-                            url=fu_result.url,
-                            content=fu_cleaned,
-                            question_text=question_text,
-                            resolution_criteria=resolution_criteria,
-                            model=llm_model,
-                        )
-                        # Strip any follow-up links the LLM might add (no recursion)
-                        fu_summary, _ = _extract_follow_up_links(fu_summary)
-                    except HardLimitExceededError:
-                        raise
-                    except Exception as exc:
-                        logger.warning(
-                            "LLM cleaning failed for follow-up %s: %s — using heuristic output",
-                            fu_result.url, exc,
-                        )
-                        fu_summary = fu_cleaned
-
-                    all_summaries.append((fu_result.url, fu_summary))
-                    sections.append(
-                        f"## Follow-up Source: {fu_result.url}\n"
-                        f"_Scraped via {fu_result.provider_used}_\n\n"
-                        f"{fu_summary}"
-                    )
-
-    if not sections:
-        return ""
-
-    # If we have multiple summaries (original + follow-ups), ask the LLM to
-    # compile them into one coherent report.
-    if use_llm_cleaning and len(all_summaries) > 1:
-        try:
-            compiled = await _compile_summaries(
-                question_text=question_text,
-                resolution_criteria=resolution_criteria,
-                summaries=all_summaries,
-                model=llm_model,
-            )
-            return (
-                "# Resolution Criteria Sources\n\n"
-                "## Compiled Report\n\n"
-                f"{compiled}\n\n"
-                "---\n\n"
-                "## Individual Source Summaries\n\n"
-                + "\n\n---\n\n".join(sections)
-            )
-        except HardLimitExceededError:
-            raise
-        except Exception as exc:
-            logger.warning("Compilation step failed: %s — returning individual summaries", exc)
-
-    return "# Resolution Criteria Sources\n\n" + "\n\n---\n\n".join(sections)
-
 
 async def scrape_resolution_sources(
     resolution_criteria: str,

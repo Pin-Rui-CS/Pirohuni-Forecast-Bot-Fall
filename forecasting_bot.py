@@ -92,10 +92,12 @@ def validate_runtime_configuration() -> None:
     missing_env_vars = []
     if not METACULUS_TOKEN:
         missing_env_vars.append("METACULUS_TOKEN")
-    # Whichever provider LLM_PROVIDER selects is the one whose key must be set;
-    # the other may legitimately be absent.
-    if not llm_provider.api_key():
-        missing_env_vars.append(llm_provider.api_key_env_var())
+    # Every endpoint this routing profile can reach needs its key, including
+    # any fallback target. A mixed profile spans more than one, and a missing
+    # key must fail here rather than forty calls into the first question.
+    for endpoint in llm_provider.required_endpoints():
+        if not llm_provider.api_key_for(endpoint):
+            missing_env_vars.append(endpoint.api_key_env)
 
     has_asknews_oauth = bool(ASKNEWS_CLIENT_ID and ASKNEWS_SECRET)
     has_asknews_api_key = bool(ASKNEWS_API_KEY)

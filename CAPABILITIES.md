@@ -1,5 +1,24 @@
 # CAPABILITIES.md
 
+> **STALENESS NOTICE — read before trusting anything below.**
+>
+> This document was derived from the tree at commit `b1d9743` (2026-07-29) and has not
+> been regenerated since. It is still useful as a map, but it is known-wrong in these ways:
+>
+> | Area | Status |
+> |---|---|
+> | **Line references** (`file.py:123`) | **Do not trust.** They were already drifting at the commit above and several files have changed size since. Search by symbol name instead. |
+> | **§5 Dead or unreachable code** | **Largely obsolete — the code it lists was deleted.** The LLM tool-use loop, the legacy resolution scraper, the unused `query_maker` entry points, `scrape_metaculus`, and the `*_research_to_dict` serializers are gone. |
+> | **Provider layer** | Predates `llm_provider.py`. Every LLM call now routes through it, and `LLM_PROVIDER=openai` remaps models, drops `temperature`, and prices calls locally. Model names in §3 are the OpenRouter side only. |
+> | **`research/asknews_filter.py`** | Not covered. It is now stage 1.5 of the pipeline. |
+> | **`series_gate.py` / `series_discovery.py` / `series_reduce.py`** | Not covered, despite being added in the same commit. See INCIDENTS.md 2026-07-29. |
+> | **`prompts/`** | Not covered. Added later; note its README mis-files "Resolution Source Compile" as active — that prompt was only reachable through the deleted legacy path. |
+> | **§6.11 truncation** | Partly fixed: the artifact check now uses head/tail truncation via `fit_artifact_check_sections`. |
+> | **§6.1 search-chain order** | Fixed. The `config.py` and `.env.example` comments now match the code (`SerpAPI -> Tavily -> Firecrawl`). |
+> | **Tournament** | Migrated to Fall FutureEval 2026 in `5992fa6`. |
+>
+> `§6` (duplication) was re-verified and still holds, apart from the rows about deleted code.
+
 What this project **actually does right now**, derived by reading the code only. README.md,
 INCIDENTS.md, comments, and docstrings were treated as untrusted; where they disagree with the
 code, the disagreement is recorded in §6.

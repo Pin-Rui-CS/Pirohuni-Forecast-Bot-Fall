@@ -68,7 +68,6 @@ async def filter_asknews_research(
             prompt,
             model=model,
             temperature=0.1,
-            use_tools=False,
             _label="asknews-filter",
         )
     except HardLimitExceededError:

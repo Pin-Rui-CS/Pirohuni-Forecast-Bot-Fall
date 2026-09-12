@@ -4,7 +4,7 @@ import datetime
 import logging
 import math
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -309,7 +309,6 @@ async def rank_firecrawl_urls(
         prompt,
         model=model,
         temperature=0.1,
-        use_tools=False,
         _label="firecrawl-url-ranking",
     )
     json_text, summary = _split_ranking_response(response)
@@ -439,19 +438,6 @@ Compiled scraped research:
 {results_block}
 ======================================================================
 """.strip()
-
-
-def firecrawl_research_to_dict(result: FirecrawlResearchResult) -> dict[str, Any]:
-    return {
-        "queries": result.queries,
-        "sources": result.sources,
-        "tbs": result.tbs,
-        "search_results_summary": result.search_results_summary,
-        "search_results": [asdict(item) for item in result.search_results],
-        "ranked_url_groups": [asdict(item) for item in result.ranked_url_groups],
-        "cycles": [asdict(item) for item in result.cycles],
-        "report": result.report,
-    }
 
 
 async def _gather_firecrawl_queries(

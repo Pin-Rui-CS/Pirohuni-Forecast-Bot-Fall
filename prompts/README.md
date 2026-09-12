@@ -20,13 +20,13 @@ provider `LLM_PROVIDER` selects:
 | **Tier 1** | `anthropic/claude-opus-5` | `gpt-5.6-sol` | Forecasting, compiling, tiebreaking |
 | **Tier 2** | `anthropic/claude-sonnet-5` | `gpt-5.6-terra` | All research and utility steps |
 
-Counts: **2** Tier 1, **20** Tier 2, **6** split across both, **5** never called.
+Counts: **2** Tier 1, **19** Tier 2, **6** split across both, **6** never called.
 
 The 6 split prompts are the 3 forecaster templates and their 3 repair fragments: the
 ensemble sends runs 1–2 to Tier 1 on the compiled brief and run 3 to Tier 2 on the raw
 research, and a repair retry inherits whichever model its failed run used.
 
-## 1. Active — runs on every question (18)
+## 1. Active — runs on every question (17)
 
 | Prompt | Tier | Scaffold | Source |
 | --- | --- | ---: | --- |
@@ -43,7 +43,6 @@ research, and a repair retry inherits whichever model its failed run used.
 | [Polymarket Search Query Generation](01-active/polymarket-query-generation-prompt.md) | T2 | 615 | [`research/polymarket_research.py:76`](../research/polymarket_research.py#L76) |
 | [Polymarket Relevance Scoring](01-active/polymarket-relevance-scoring-prompt.md) | T2 | 579 | [`research/polymarket_research.py:256`](../research/polymarket_research.py#L256) |
 | [Resolution Source Summary](01-active/resolution-summary-prompt.md) | T2 | 2,363 | [`resolution_criteria_scraper.py:245`](../resolution_criteria_scraper.py#L245) |
-| [Resolution Source Compile](01-active/resolution-compile-prompt.md) | T2 | 1,035 | [`resolution_criteria_scraper.py:564`](../resolution_criteria_scraper.py#L564) |
 | [Research Compiler (evidence brief)](01-active/compiler-prompt.md) | T1 | 14,973 | [`compiler.py:762`](../compiler.py#L762) |
 | [Binary Forecaster](01-active/binary-prompt-template.md) | T1×2 + T2×1 | 17,249 | [`forecasters/binary.py:22`](../forecasters/binary.py#L22) |
 | [Multiple Choice Forecaster](01-active/multiple-choice-prompt-template.md) | T1×2 + T2×1 | 13,566 | [`forecasters/multiple_choice.py:18`](../forecasters/multiple_choice.py#L18) |
@@ -55,7 +54,7 @@ Pipeline order:
 AskNews  →  asknews-filter  →  evidence-plan  →  query-generation  →  serp-ranking
    →  serp-extract  (×3 scrape cycles)  →  artifact-check  →  compiler  →  forecaster (×3)
 
-in parallel:  resolution-summary (per URL)  →  resolution-compile
+in parallel:  resolution-summary (per URL)
 in parallel:  kalshi / manifold / polymarket  ×  (query-gen + scoring)  =  6 calls
 ```
 
@@ -74,11 +73,12 @@ in parallel:  kalshi / manifold / polymarket  ×  (query-gen + scoring)  =  6 ca
 | [Numeric Repair Instruction](02-conditional/numeric-repair-instruction.md) ᶠ | T1×2 + T2×1 | 273 | [`forecasters/numeric.py:2403`](../forecasters/numeric.py#L2403) |
 | [Binary Tiebreaker / Synthesis](02-conditional/binary-tiebreaker-prompt.md) ᶠ | T1 | 584 | [`forecasters/binary.py:334`](../forecasters/binary.py#L334) |
 
-## 3. Inactive — dead code or parallel architecture (5)
+## 3. Inactive — dead code or parallel architecture (6)
 
 | Prompt | Tier | Scaffold | Source |
 | --- | --- | ---: | --- |
-| [Legacy Binary Prompt (tool-era)](03-inactive/legacy-binary-prompt-template.md) | — | 4,902 | [`docs/templatePrompts.py:1`](../docs/templatePrompts.py#L1) |
+| [Legacy Binary Prompt (tool-era)](03-inactive/legacy-binary-prompt-template.md) | — | 4,902 | source deleted (the `run_python_code` tool loop) |
+| [Resolution Source Compile](01-active/resolution-compile-prompt.md) | — | 1,035 | source deleted; was reachable only from the legacy resolution scraper |
 | [Dead Resolution Page Summary](03-inactive/dead-resolution-summary-prompt.md) | — | 3,299 | [`resolution_criteria_scraper.py:306`](../resolution_criteria_scraper.py#L306) |
 | [Chain Round — Gap Analysis Section](03-inactive/chain-gap-analysis-section.md) ᶠ | — | 1,604 | [`feedback_loop/gap_analysis.py:33`](../feedback_loop/gap_analysis.py#L33) |
 | [Chain Round — Prior Round Appendix](03-inactive/prior-round-appendix-template.md) ᶠ | — | 1,059 | [`feedback_loop/gap_analysis.py:233`](../feedback_loop/gap_analysis.py#L233) |

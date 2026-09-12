@@ -3,9 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import subprocess
-import sys
-import tempfile
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -29,78 +26,41 @@ OPENROUTER_RETRY_BASE_SECONDS = float(os.getenv("OPENROUTER_RETRY_BASE_SECONDS",
 FATAL_PROBLEM_PREFIX = "FATAL: "
 
 
+class ResponseTruncatedError(RuntimeError):
+    """A completion that stopped at the output cap with content already emitted.
+
+    An EMPTY response with finish_reason=length is already fatal upstream (see
+    ``_empty_content_problem``). The dangerous case is the *partial* one: the
+    text looks well-formed, so a caller that treats it as a complete answer
+    silently loses whatever came after the cut. Callers that cannot tolerate a
+    partial answer pass ``raise_on_truncation=True``.
+    """
+
+
 class RetryableLLMResponseError(RuntimeError):
     """Raised when the provider returns an empty or malformed completion."""
 
 
-RUN_PYTHON_CODE_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "run_python_code",
-        "description": (
-            "Execute Python code locally and return stdout/stderr. "
-            "Use this for ALL math, statistics, probability calculations, and data analysis — "
-            "never do mental arithmetic. "
-            "numpy, scipy, pandas, scikit-learn, and statsmodels are available. "
-            "Print results explicitly; the return value is ignored."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "code": {
-                    "type": "string",
-                    "description": "Valid Python 3.12 code to execute.",
-                },
-                "reasoning": {
-                    "type": "string",
-                    "description": "Brief explanation of what this code computes and why.",
-                },
-            },
-            "required": ["code"],
-        },
-    },
-}
-
-
-def execute_python_code(code: str) -> str:
-    """Write code to a temp file and run it; return combined stdout/stderr (30 s timeout)."""
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
-        f.write(code)
-        tmp_path = f.name
-    try:
-        result = subprocess.run(
-            [sys.executable, tmp_path],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        output = result.stdout
-        if result.stderr:
-            output += f"\n[stderr]\n{result.stderr}"
-        return output.strip() if output.strip() else "(no output)"
-    except subprocess.TimeoutExpired:
-        return "[error] Code execution timed out after 30 seconds."
-    except Exception as exc:
-        return f"[error] {exc}"
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-
-
 async def _create_chat_completion_with_retries(
-    client: AsyncOpenAI,
     *,
     label: str,
     model: str,
     request_payload: dict[str, Any],
     validate_response: Callable[[Any], str | None],
+    route: Any = None,
 ) -> Any:
-    provider = llm_provider.provider_name()
+    route = route or llm_provider.route_for(model, label=label)
+    client = llm_provider.async_client_for(route)
+    gate = llm_provider.gate_for(route)
+    provider = route.endpoint.label
     last_problem = f"{provider} request did not run"
     for attempt in range(1, OPENROUTER_MAX_ATTEMPTS + 1):
         retry_after_exception = False
+        # Outside the semaphore: sleeping for a rate slot while holding one of
+        # the five global concurrency slots would starve every other endpoint.
+        # Inside the retry loop: a retry is another request against the limit,
+        # and a limiter that does not charge for retries is a rate amplifier.
+        await gate.wait_async()
         async with llm_rate_limiter:
             usage_handle = MonetaryCostManager.start_openrouter_call(
                 label,
@@ -109,9 +69,10 @@ async def _create_chat_completion_with_retries(
             )
             try:
                 response = await client.chat.completions.create(
-                    **llm_provider.chat_kwargs(model, request_payload)
+                    **llm_provider.build_kwargs(route, request_payload)
                 )
             except (APIConnectionError, APIStatusError, APITimeoutError, RateLimitError) as exc:
+                llm_provider.note_failure(route, exc)
                 problem = _format_openrouter_exception(exc)
                 usage_handle.record_output(problem)
                 last_problem = problem
@@ -218,31 +179,6 @@ def _empty_content_problem(choice: Any, response: Any) -> str:
     return "assistant message content is empty"
 
 
-def _validate_tool_loop_response(response: Any) -> str | None:
-    problem = _validate_common_openrouter_response(response)
-    if problem:
-        return problem
-
-    choice = _get_field(response, "choices")[0]
-    finish_reason = _get_field(choice, "finish_reason")
-    message = _get_field(choice, "message")
-    if message is None:
-        return "choice has no message"
-
-    if finish_reason == "tool_calls":
-        tool_calls = _get_field(message, "tool_calls")
-        if not tool_calls:
-            return "finish_reason=tool_calls but message.tool_calls is empty"
-        return None
-
-    content = _get_field(message, "content")
-    if content is None or not str(content).strip():
-        if str(finish_reason or "").lower() == "length":
-            return _empty_content_problem(choice, response)
-        return f"finish_reason={finish_reason!r} but assistant content is empty"
-    return None
-
-
 def _validate_common_openrouter_response(response: Any) -> str | None:
     response_error = _extract_openrouter_error(response)
     if response_error:
@@ -320,7 +256,7 @@ def _format_value(value: Any) -> str:
     return _truncate_text(text, 1000, "... [truncated]")
 
 
-def _user_message(prompt: str, cache_static_prefix: bool) -> dict:
+def _user_message(prompt: str, cache_static_prefix: bool, route: Any) -> dict:
     """Build the user message, optionally marking the prompt as a cacheable
     prefix (OpenRouter forwards cache_control to providers that support
     prompt caching, e.g. Anthropic; others ignore it).
@@ -329,7 +265,7 @@ def _user_message(prompt: str, cache_static_prefix: bool) -> dict:
     and is steered by ``prompt_cache_options`` instead -- so the breakpoint is
     dropped there rather than sent as an unrecognised content-part field.
     """
-    if not cache_static_prefix or not llm_provider.supports_cache_control_breakpoints():
+    if not cache_static_prefix or not route.supports_cache_control:
         return {"role": "user", "content": prompt}
     return {
         "role": "user",
@@ -347,11 +283,11 @@ async def call_llm(
     prompt: str,
     model: str = "anthropic/claude-opus-5",
     temperature: float = 0.3,
-    use_tools: bool = False,
     _label: str = "forecast",
     return_transcript: bool = False,
     cache_static_prefix: bool = False,
     max_tokens: int | None = None,
+    raise_on_truncation: bool = False,
 ) -> str | tuple[str, str]:
     """Call the LLM via the provider selected by ``LLM_PROVIDER``.
 
@@ -367,8 +303,8 @@ async def call_llm(
     and is translated to the active provider's namespace here, so logs, the
     transcript, and the usage ledger all record what actually ran.
     """
-    model = llm_provider.resolve_model(model)
-    client = llm_provider.make_async_client()
+    route = llm_provider.route_for(model, label=_label)
+    model = route.model_id
     transcript_parts = [
         "# LLM Transcript",
         f"Label: {_label}",
@@ -383,120 +319,44 @@ async def call_llm(
     logger.info("[LLM] %s | model=%s | prompt_chars=%d", _label, model, len(prompt))
     logger.debug("[LLM] %s prompt:\n%s", _label, prompt)
 
-    if not use_tools:
-        messages = [_user_message(prompt, cache_static_prefix)]
-        request_payload: dict = {
-            "messages": messages,
-            "temperature": temperature,
-            "stream": False,
-        }
-        if max_tokens is not None:
-            request_payload["max_tokens"] = max_tokens
-        response = await _create_chat_completion_with_retries(
-            client,
-            label=_label,
-            model=model,
-            request_payload=request_payload,
-            validate_response=_validate_text_completion_response,
+    messages = [_user_message(prompt, cache_static_prefix, route)]
+    request_payload: dict = {
+        "messages": messages,
+        "temperature": temperature,
+        "stream": False,
+    }
+    if max_tokens is not None:
+        request_payload["max_tokens"] = max_tokens
+    response = await _create_chat_completion_with_retries(
+        label=_label,
+        model=model,
+        route=route,
+        request_payload=request_payload,
+        validate_response=_validate_text_completion_response,
+    )
+    choice = response.choices[0]
+    answer = choice.message.content
+    logger.debug("[LLM] %s response:\n%s", _label, answer)
+    if answer is None:
+        raise ValueError("No answer returned from LLM")
+    # A response cut off at the output cap is non-empty and well-formed, so
+    # nothing downstream can tell it from a complete answer. An EMPTY response
+    # with finish_reason=length is already fatal upstream (_empty_content_problem);
+    # this is the partial case. Always say so; raise only for callers whose
+    # output is meaningless when partial.
+    if str(getattr(choice, "finish_reason", "") or "").lower() == "length":
+        logger.warning(
+            "[LLM] %s | response TRUNCATED at the output cap (max_tokens=%s, %d chars). "
+            "Raise the cap or shrink the input.",
+            _label, max_tokens, len(answer),
         )
-        answer = response.choices[0].message.content
-        logger.debug("[LLM] %s response:\n%s", _label, answer)
-        if answer is None:
-            raise ValueError("No answer returned from LLM")
-        transcript_parts += [
-            "## Assistant Final Response",
-            answer,
-        ]
-        return finish(answer)
-
-    # Agentic tool-use loop (max 10 iterations)
-    messages: list[dict] = [_user_message(prompt, cache_static_prefix)]
-    for iteration in range(10):
-        response = await _create_chat_completion_with_retries(
-            client,
-            label=f"{_label}/tool-loop-{iteration + 1}",
-            model=model,
-            request_payload={
-                "messages": messages,
-                "temperature": temperature,
-                "stream": False,
-                "tools": [RUN_PYTHON_CODE_TOOL],
-                "tool_choice": "auto",
-            },
-            validate_response=_validate_tool_loop_response,
-        )
-        choice = response.choices[0]
-
-        if choice.finish_reason != "tool_calls":
-            answer = choice.message.content
-            if answer is None:
-                raise ValueError("No answer returned from LLM")
-            logger.debug("[LLM] %s response:\n%s", _label, answer)
-            transcript_parts += [
-                f"## Assistant Turn {iteration + 1}: Final Response",
-                answer,
-            ]
-            return finish(answer)
-
-        tool_calls = choice.message.tool_calls or []
-        transcript_parts += [
-            f"## Assistant Turn {iteration + 1}: Tool Calls",
-            choice.message.content or "(no assistant content)",
-        ]
-        messages.append({
-            "role": "assistant",
-            "content": choice.message.content,
-            "tool_calls": [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments,
-                    },
-                }
-                for tc in tool_calls
-            ],
-        })
-
-        for tool_index, tc in enumerate(tool_calls, 1):
-            raw_arguments = tc.function.arguments
-            transcript_parts += [
-                f"### Tool Call {tool_index}: {tc.function.name}",
-                "Arguments:",
-                f"```json\n{raw_arguments}\n```",
-            ]
-            if tc.function.name == "run_python_code":
-                args = json.loads(raw_arguments)
-                code = args.get("code", "")
-                reasoning = args.get("reasoning", "")
-                if reasoning:
-                    logger.info("[tool] run_python_code — %s", reasoning)
-                logger.debug("[tool] executing:\n%s", code)
-                result = await asyncio.to_thread(execute_python_code, code)
-                logger.debug("[tool] result:\n%s", result)
-                if reasoning:
-                    transcript_parts += [
-                        "Reasoning:",
-                        reasoning,
-                    ]
-                transcript_parts += [
-                    "Python code:",
-                    f"```python\n{code}\n```",
-                    "Tool result:",
-                    f"```text\n{result}\n```",
-                ]
-            else:
-                result = f"[error] Unknown tool: {tc.function.name}"
-                transcript_parts += [
-                    "Tool result:",
-                    f"```text\n{result}\n```",
-                ]
-
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tc.id,
-                "content": result,
-            })
-
-    raise ValueError("call_llm: reached maximum tool-use iterations (10) without a final response")
+        if raise_on_truncation:
+            raise ResponseTruncatedError(
+                f"{_label}: finish_reason=length at max_tokens={max_tokens} "
+                f"after {len(answer)} chars"
+            )
+    transcript_parts += [
+        "## Assistant Final Response",
+        answer,
+    ]
+    return finish(answer)

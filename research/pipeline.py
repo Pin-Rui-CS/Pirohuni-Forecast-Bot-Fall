@@ -1121,7 +1121,6 @@ async def verify_required_artifact(
             prompt,
             model=model,
             temperature=0.1,
-            use_tools=False,
             _label="artifact-check",
         )
         parsed = _extract_json_object(response)

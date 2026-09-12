@@ -57,15 +57,14 @@ NUM_RUNS_PER_QUESTION = 3
 # capability ladder (sol + terra) rather than a lineage mix. This is the
 # accepted cost of a single-vendor setup: it is weaker decorrelation than the
 # cross-lineage pool above, so watch for all three runs sharing one error.
-DEFAULT_FORECASTER_MODEL = (
-    "gpt-5.6-sol" if llm_provider.is_openai() else "anthropic/claude-opus-5"
-)
-FORECASTER_MODELS = _env_list(
-    "FORECASTER_MODELS",
-    ["gpt-5.6-sol", "gpt-5.6-terra"]
-    if llm_provider.is_openai()
-    else [DEFAULT_FORECASTER_MODEL, "openai/gpt-5.6-sol"],
-)
+# The pool is data owned by the routing profile rather than an if/else on a
+# provider boolean here: adding an endpoint should not mean editing config.py,
+# and three independent is_openai() branches could drift apart. See
+# llm_provider._openrouter_profile / _openai_profile, where each pool now sits
+# next to the routes it names.
+_profile = llm_provider.active_profile()
+DEFAULT_FORECASTER_MODEL = _profile.default_forecaster
+FORECASTER_MODELS = _env_list("FORECASTER_MODELS", list(_profile.forecaster_pool))
 # The tiebreaker / synthesis judge is a single fixed strong model so the final
 # call doesn't inherit whichever ensemble member happened to run last.
 FORECASTER_TIEBREAKER_MODEL = os.getenv(
@@ -83,9 +82,26 @@ FORECASTER_TIEBREAKER_MODEL = os.getenv(
 # rate offsets the larger raw input); it does not add one.
 HETEROGENEOUS_RUN_ENABLED = _env_bool("HETEROGENEOUS_RUN_ENABLED", True)
 HETEROGENEOUS_RUN_MODEL = os.getenv(
-    "HETEROGENEOUS_RUN_MODEL",
-    "gpt-5.6-terra" if llm_provider.is_openai() else "anthropic/claude-sonnet-5",
+    "HETEROGENEOUS_RUN_MODEL", _profile.heterogeneous_model
 )
+# --- Forecast output cap -----------------------------------------------------
+# Ceiling on VISIBLE output tokens for a forecast run and for the binary
+# tiebreaker. Until now these were the only Tier-1 calls in the repo sending no
+# cap at all, which was harmless on Opus-5 ($25/1M out) and is not on a
+# reasoning model priced at $50/1M with a 128K completion limit: one run could
+# bill more than a whole question is budgeted for.
+#
+# Sized from measured output on the two audited runs -- 9,800 / 11,124 / 12,307
+# / 12,587 / 15,437 / 16,569 tokens -- so 20K is roughly 1.2x the worst
+# observed, not a target. It is a ceiling; routes that need room for internal
+# reasoning on top of the visible answer get it added by the route's own
+# reasoning_headroom_tokens in build_kwargs.
+#
+# If a run hits this, call_llm now logs a TRUNCATED warning naming the cap, and
+# the run will usually fail its validator (these prompts put the answer last)
+# and take its one repair retry. Raise the cap rather than letting that recur.
+FORECAST_MAX_OUTPUT_TOKENS = int(os.getenv("FORECAST_MAX_OUTPUT_TOKENS", "20000"))
+
 SKIP_PREVIOUSLY_FORECASTED_QUESTIONS = True
 METACULUS_MAX_CONCURRENT_REQUESTS = int(os.getenv("METACULUS_MAX_CONCURRENT_REQUESTS", "1"))
 METACULUS_API_RATE_LIMITER = asyncio.Semaphore(METACULUS_MAX_CONCURRENT_REQUESTS)
@@ -97,10 +113,6 @@ ASKNEWS_SECRET = os.getenv("ASKNEWS_SECRET")
 ASKNEWS_API_KEY = os.getenv("ASKNEWS_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-# The key for whichever provider LLM_PROVIDER selects. Prefer this over the
-# two above wherever a call is about to be made; the provider-specific names
-# stay for env validation and for the OpenRouter-only credit endpoint.
-LLM_API_KEY = llm_provider.api_key()
 SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
 FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
@@ -109,8 +121,8 @@ OPENROUTER_COST_HARD_LIMIT_USD = float(os.getenv("OPENROUTER_COST_HARD_LIMIT_USD
 # Central research provider toggles.
 ENABLE_ASKNEWS_RESEARCH = _env_bool("ENABLE_ASKNEWS_RESEARCH", True)
 ENABLE_RESOLUTION_SOURCE_RESEARCH = _env_bool("ENABLE_RESOLUTION_SOURCE_RESEARCH", True)
-# Search providers run as a priority fallback chain (SerpAPI -> Firecrawl ->
-# Tavily): the bot uses the first enabled provider that returns results and
+# Search providers run as a priority fallback chain (SerpAPI -> Tavily ->
+# Firecrawl): the bot uses the first enabled provider that returns results and
 # skips the rest, so enabling all three conserves credits rather than spending
 # them in parallel.
 ENABLE_SERPAPI_RESEARCH = _env_bool("ENABLE_SERPAPI_RESEARCH", True)

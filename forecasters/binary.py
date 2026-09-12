@@ -6,7 +6,7 @@ import re
 
 import numpy as np
 
-from config import FORECASTER_TIEBREAKER_MODEL
+from config import FORECAST_MAX_OUTPUT_TOKENS, FORECASTER_TIEBREAKER_MODEL
 from forecasters.base import (
     RAW_RESEARCH_NOTE,
     ForecastResult,
@@ -354,6 +354,7 @@ async def get_binary_gpt_prediction(
             model=FORECASTER_TIEBREAKER_MODEL,
             _label="binary-tiebreaker",
             cache_static_prefix=True,
+            max_tokens=FORECAST_MAX_OUTPUT_TOKENS,
         )
         final_probability = extract_probability_from_response_as_percentage_not_decimal(
             final_rationale

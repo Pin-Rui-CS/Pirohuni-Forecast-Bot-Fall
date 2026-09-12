@@ -21,7 +21,6 @@ import sys
 from pathlib import Path
 
 import httpx
-from openai import OpenAI
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
@@ -30,7 +29,6 @@ if str(_REPO_ROOT) not in sys.path:
 import llm_provider
 from monetary_cost_manager import (
     HardLimitExceededError,
-    MonetaryCostManager,
 )
 
 # ---------------------------------------------------------------------------
@@ -38,7 +36,9 @@ from monetary_cost_manager import (
 # ---------------------------------------------------------------------------
 
 # Cheap/fast model for relevance scoring only
-_MANIFOLD_SCORING_MODEL = llm_provider.resolve_model("anthropic/claude-sonnet-5")
+# The INTERNAL role name. Resolving it here used to bind the concrete
+# model at import time, before routing could know where it should go.
+_MANIFOLD_SCORING_MODEL = "anthropic/claude-sonnet-5"
 
 _MANIFOLD_API_BASE = "https://api.manifold.markets/v0"
 _MAX_RESULTS = 3              # max markets included in final output
@@ -87,18 +87,11 @@ def _generate_search_queries(question: str) -> list[str]:
     )
     try:
         messages = [{"role": "user", "content": prompt}]
-        usage_handle = MonetaryCostManager.start_openrouter_call(
+        response = llm_provider.sync_chat(
             "manifold/search-query-generation",
             _MANIFOLD_SCORING_MODEL,
-            {"messages": messages},
+            {"messages": messages, "temperature": 0},
         )
-        response = _get_openai_client().chat.completions.create(
-            **llm_provider.chat_kwargs(
-                _MANIFOLD_SCORING_MODEL,
-                {"messages": messages, "temperature": 0},
-            )
-        )
-        usage_handle.record_response(response)
         content = response.choices[0].message.content.strip()
         match = re.search(r"\[.*?\]", content, re.DOTALL)
         if match:
@@ -232,16 +225,6 @@ def _parse_market(raw: dict) -> dict | None:
 # Relevance scoring
 # ---------------------------------------------------------------------------
 
-_openai_client: OpenAI | None = None
-
-
-def _get_openai_client() -> OpenAI:
-    global _openai_client
-    if _openai_client is None:
-        _openai_client = llm_provider.make_sync_client()
-    return _openai_client
-
-
 def _score_markets(question: str, markets: list[dict]) -> list[float]:
     """Single LLM call that rates all candidate markets 0–10 for relevance."""
     if not markets:
@@ -263,18 +246,11 @@ def _score_markets(question: str, markets: list[dict]) -> list[float]:
         "Example: [8.5, 3.0, 6.0]"
     )
     messages = [{"role": "user", "content": prompt}]
-    usage_handle = MonetaryCostManager.start_openrouter_call(
+    response = llm_provider.sync_chat(
         "manifold/relevance-scoring",
         _MANIFOLD_SCORING_MODEL,
-        {"messages": messages},
+        {"messages": messages, "temperature": 0},
     )
-    response = _get_openai_client().chat.completions.create(
-        **llm_provider.chat_kwargs(
-            _MANIFOLD_SCORING_MODEL,
-            {"messages": messages, "temperature": 0},
-        )
-    )
-    usage_handle.record_response(response)
     content = response.choices[0].message.content.strip()
     match = re.search(r"\[[\d\s.,]+\]", content)
     if not match:

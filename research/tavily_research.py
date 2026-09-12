@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import datetime
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -251,7 +251,6 @@ async def rank_tavily_urls(
         prompt,
         model=model,
         temperature=0.1,
-        use_tools=False,
         _label="tavily-url-ranking",
     )
     parsed = _extract_json_value(response)
@@ -345,17 +344,6 @@ Raw Tavily search results considered:
 {chr(10).join(raw_lines).strip() if raw_lines else "No search results found."}
 ======================================================================
 """.strip()
-
-
-def tavily_research_to_dict(result: TavilyResearchResult) -> dict[str, Any]:
-    return {
-        "queries": result.queries,
-        "search_depth": result.search_depth,
-        "search_results": [asdict(item) for item in result.search_results],
-        "ranked_url_groups": [asdict(item) for item in result.ranked_url_groups],
-        "cycles": [asdict(item) for item in result.cycles],
-        "report": result.report,
-    }
 
 
 async def _gather_tavily_queries(

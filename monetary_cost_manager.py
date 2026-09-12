@@ -7,7 +7,7 @@ import os
 import threading
 import time
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Final
 
 import httpx
@@ -113,6 +113,19 @@ class OpenRouterUsageRecord:
     # (the provider bill when the key is BYOK, as this project's is).
     # OpenAI: computed from llm_provider.PRICES (no per-request cost is served).
     cost_usd: float = 0.0
+    # Which endpoint actually served this call, and how its cost was derived.
+    # Without these a $0.000000 row is ambiguous three ways: a free route, a
+    # model missing from PRICES, or a call that failed before billing. It is
+    # also the only per-row evidence that a call went where it was supposed to
+    # -- when runtime fallback lands, a rerouted call shows up here as an
+    # endpoint that does not match its route.
+    endpoint: str = ""
+    cost_source: str = ""       # native | price_table | quota
+    # Free in money, not free in budget. SoCLaaS-style gateways meter in
+    # microdollars against a daily/monthly allowance, so a run that costs $0
+    # can still be stopped dead by quota. Tracked separately from cost_usd so
+    # neither can be mistaken for the other.
+    quota_microdollars: float = 0.0
 
 
 class OpenRouterUsageHandle:
@@ -123,10 +136,12 @@ class OpenRouterUsageHandle:
         records: list[OpenRouterUsageRecord],
         name_of_task: str = "",
         model: str = "",
+        route: Any = None,
     ) -> None:
         self._records = records
         self._name_of_task = name_of_task
         self._model = model
+        self._route = route
         self._finished = False
         self._started_at = time.monotonic()
 
@@ -140,7 +155,9 @@ class OpenRouterUsageHandle:
 
     def record_response(self, response: Any) -> None:
         reasoning_tokens = count_openrouter_reasoning_tokens(response)
-        native = extract_openrouter_native_usage(response, self._model)
+        native = extract_openrouter_native_usage(
+            response, self._model, getattr(self, "_route", None)
+        )
         if not self._finished:
             for record in self._records:
                 record.reasoning_tokens = reasoning_tokens
@@ -149,17 +166,24 @@ class OpenRouterUsageHandle:
                 record.cached_input_tokens = native["cached_tokens"]
                 record.cache_write_tokens = native["cache_write_tokens"]
                 record.cost_usd = native["cost_usd"]
+                record.cost_source = native["cost_source"]
+                record.quota_microdollars = native["quota_microdollars"]
             logger.info(
-                "[usage] %s | model=%s | native in/out=%d/%d | reasoning=%d | "
-                "cached=%d | cache-write=%d | cost=$%.6f",
+                "[usage] %s | model=%s | endpoint=%s | native in/out=%d/%d | "
+                "reasoning=%d | cached=%d | cache-write=%d | cost=$%.6f (%s)%s",
                 self._name_of_task,
                 self._model,
+                getattr(getattr(self, "_route", None), "endpoint", None)
+                and self._route.endpoint.label or "?",
                 native["prompt_tokens"],
                 native["completion_tokens"],
                 reasoning_tokens,
                 native["cached_tokens"],
                 native["cache_write_tokens"],
                 native["cost_usd"],
+                native["cost_source"],
+                f" | quota={native['quota_microdollars']:.1f}ud"
+                if native["quota_microdollars"] else "",
             )
         self.record_output_characters(count_openrouter_output_characters(response))
 
@@ -277,6 +301,41 @@ class MonetaryCostManager:
             return sum(record.native_output_tokens for record in self._records)
 
     @property
+    def total_quota_microdollars(self) -> float:
+        """Metered spend on free-in-money routes. Not dollars; an allowance."""
+        with self._lock:
+            return sum(record.quota_microdollars for record in self._records)
+
+    @property
+    def total_paid_input_tokens(self) -> int:
+        """Native input tokens on routes that actually bill money.
+
+        The plain total mixes paid and free traffic, which stops being a
+        useful number the moment a free endpoint carries most of the volume.
+        """
+        with self._lock:
+            return sum(
+                record.native_input_tokens
+                for record in self._records
+                if record.cost_source != "quota"
+            )
+
+    @property
+    def total_paid_output_tokens(self) -> int:
+        with self._lock:
+            return sum(
+                record.native_output_tokens
+                for record in self._records
+                if record.cost_source != "quota"
+            )
+
+    @property
+    def endpoints_used(self) -> list[str]:
+        with self._lock:
+            seen = {r.endpoint for r in self._records if r.endpoint}
+        return sorted(seen)
+
+    @property
     def total_cached_input_tokens(self) -> int:
         with self._lock:
             return sum(record.cached_input_tokens for record in self._records)
@@ -307,26 +366,16 @@ class MonetaryCostManager:
         self._active_managers.set(managers)
 
     def get_usage_records(self) -> list[OpenRouterUsageRecord]:
+        """Snapshot copies, so callers cannot mutate the live ledger.
+
+        ``replace`` rather than a hand-written field list: the previous version
+        enumerated every field, so any field added to OpenRouterUsageRecord was
+        silently dropped from the copy while the totals -- which read
+        ``self._records`` directly -- still saw it. That is invisible until a
+        column renders empty next to a correct total.
+        """
         with self._lock:
-            return [
-                OpenRouterUsageRecord(
-                    no=record.no,
-                    name_of_task=record.name_of_task,
-                    input_characters=record.input_characters,
-                    input_tokens=record.input_tokens,
-                    output_characters=record.output_characters,
-                    output_tokens=record.output_tokens,
-                    model_used=record.model_used,
-                    duration_seconds=record.duration_seconds,
-                    reasoning_tokens=record.reasoning_tokens,
-                    native_input_tokens=record.native_input_tokens,
-                    native_output_tokens=record.native_output_tokens,
-                    cached_input_tokens=record.cached_input_tokens,
-                    cache_write_tokens=record.cache_write_tokens,
-                    cost_usd=record.cost_usd,
-                )
-                for record in self._records
-            ]
+            return [replace(record) for record in self._records]
 
     def format_usage_yaml_table(self, key: str = "openrouter_llm_usage") -> str:
         records = self.get_usage_records()
@@ -339,12 +388,16 @@ class MonetaryCostManager:
             f"  total_output_characters: {self.total_output_characters}",
             f"  total_output_tokens: {self.total_output_tokens}",
             f"  total_reasoning_tokens: {self.total_reasoning_tokens}  # provider-reported; included in output billing, not in the char-based estimates above",
-            f"  total_native_input_tokens: {self.total_native_input_tokens}  # {llm_provider.provider_name()}-reported; ground truth vs the char-based estimates",
+            f"  total_native_input_tokens: {self.total_native_input_tokens}  # {llm_provider.active_profile().name}-routed, provider-reported; ground truth vs the char-based estimates",
             f"  total_native_output_tokens: {self.total_native_output_tokens}",
             f"  total_cached_input_tokens: {self.total_cached_input_tokens}  # served from prompt cache (billed at the cache-read rate)",
             f"  total_cache_write_tokens: {self.total_cache_write_tokens}  # written to prompt cache (GPT-5.6+ bills these at 1.25x input)",
             f"  llm_provider: {llm_provider.LLM_PROVIDER}",
-            f"  total_cost_usd: {self.total_cost_usd:.6f}  # {_cost_provenance()}",
+            f"  total_cost_usd: {self.total_cost_usd:.6f}  # {_cost_provenance(records)}",
+            f"  total_paid_input_tokens: {self.total_paid_input_tokens}  # excludes free/quota routes",
+            f"  total_paid_output_tokens: {self.total_paid_output_tokens}",
+            f"  total_quota_microdollars: {self.total_quota_microdollars:.1f}  # metered allowance spent on free routes; NOT dollars",
+            f"  endpoints_used: {self.endpoints_used}",
             f"  output_token_hard_limit: {self.output_token_hard_limit}",
             f"  total_tokens: {self.total_tokens}",
             f"  total_token_hard_limit: {self.hard_limit}",
@@ -428,6 +481,15 @@ class MonetaryCostManager:
         input_tokens = estimate_tokens_from_characters(input_characters)
         cls.raise_error_if_limit_would_be_reached(input_tokens)
 
+        # Resolve the same route llm_client will use, so the ledger records
+        # where the call actually went rather than where the default profile
+        # would have sent it. route_for never raises; a name no profile claims
+        # still yields a usable route.
+        try:
+            route = llm_provider.route_for(model, label=name_of_task)
+        except Exception:  # noqa: BLE001 - accounting must never sink a call
+            route = None
+
         records: list[OpenRouterUsageRecord] = []
         for manager in cls._active_managers.get():
             with manager._lock:
@@ -439,6 +501,8 @@ class MonetaryCostManager:
                     output_characters=0,
                     output_tokens=0,
                     model_used=model,
+                    endpoint=getattr(getattr(route, "endpoint", None), "label", ""),
+                    cost_source=getattr(route, "cost_source", "") or "",
                 )
                 manager._records.append(record)
                 records.append(record)
@@ -453,7 +517,9 @@ class MonetaryCostManager:
                         input_characters,
                         input_tokens,
                     )
-        return OpenRouterUsageHandle(records, name_of_task=name_of_task, model=model)
+        return OpenRouterUsageHandle(
+            records, name_of_task=name_of_task, model=model, route=route
+        )
 
     @classmethod
     def _check_active_limits_after_usage_update(cls) -> None:
@@ -513,7 +579,9 @@ def _coerce_float(value: Any) -> float:
         return 0.0
 
 
-def extract_openrouter_native_usage(response: Any, model: str = "") -> dict[str, Any]:
+def extract_openrouter_native_usage(
+    response: Any, model: str = "", route: Any = None
+) -> dict[str, Any]:
     """Provider-reported usage: native token counts and USD cost.
 
     On OpenRouter ``cost_usd`` sums OpenRouter credits (``usage.cost``,
@@ -528,6 +596,15 @@ def extract_openrouter_native_usage(response: Any, model: str = "") -> dict[str,
     table against the token counts OpenAI does return. ``model`` is used for
     that lookup and falls back to the model echoed in the response.
 
+    ``route`` selects HOW cost is derived, and should always be supplied now
+    that one run can span several endpoints. Falling back to the global
+    ``is_openai()`` when it is absent is a compatibility shim, and a wrong one
+    under a mixed profile: it would price an OpenRouter-served call with the
+    local table, or read a cost field off a response that never carried one,
+    purely because of a process-wide flag. That is the same order-of-operations
+    error the Route table exists to remove -- the policy has to come from the
+    route that served the call, not from the process.
+
     Missing fields read as 0, so a provider that omits the breakdown degrades
     gracefully.
     """
@@ -540,7 +617,13 @@ def extract_openrouter_native_usage(response: Any, model: str = "") -> dict[str,
     cached_tokens = _coerce_int(_get_field(prompt_details, "cached_tokens"))
     cache_write_tokens = _coerce_int(_get_field(prompt_details, "cache_write_tokens"))
 
-    if llm_provider.is_openai():
+    cost_source = getattr(route, "cost_source", None) or (
+        "price_table" if llm_provider.is_openai() else "native"
+    )
+
+    cost_usd = 0.0
+    quota_microdollars = 0.0
+    if cost_source == "price_table":
         cost_usd = llm_provider.compute_cost_usd(
             model or str(_get_field(response, "model") or ""),
             prompt_tokens=prompt_tokens,
@@ -548,7 +631,17 @@ def extract_openrouter_native_usage(response: Any, model: str = "") -> dict[str,
             cached_tokens=cached_tokens,
             cache_write_tokens=cache_write_tokens,
         )
-    else:
+    elif cost_source == "quota":
+        # No money changes hands, so cost_usd stays 0.0 -- but the call still
+        # spends a metered allowance, and the rates are per 1M tokens exactly
+        # like PRICES.
+        rates = getattr(route, "quota_rate_microdollars", None)
+        if rates:
+            in_rate, out_rate = rates
+            quota_microdollars = (
+                prompt_tokens * in_rate + completion_tokens * out_rate
+            ) / 1_000_000
+    else:  # native
         cost_usd = _coerce_float(_get_field(usage, "cost")) + _coerce_float(
             _get_field(cost_details, "upstream_inference_cost")
         )
@@ -559,6 +652,8 @@ def extract_openrouter_native_usage(response: Any, model: str = "") -> dict[str,
         "cached_tokens": cached_tokens,
         "cache_write_tokens": cache_write_tokens,
         "cost_usd": cost_usd,
+        "cost_source": cost_source,
+        "quota_microdollars": quota_microdollars,
     }
 
 
@@ -597,19 +692,37 @@ def count_openrouter_output_characters(response: Any) -> int:
     return count_serialized_characters(response)
 
 
-def _cost_provenance() -> str:
-    if llm_provider.is_openai():
-        return (
-            "computed from llm_provider.PRICES (the OpenAI API serves no "
-            "per-request cost)"
-        )
-    return "OpenRouter-reported actual cost (credits + BYOK upstream)"
+_COST_SOURCE_BLURB: Final = {
+    "native": "provider-reported actual cost (credits + BYOK upstream)",
+    "price_table": "computed from llm_provider.PRICES (no per-request cost served)",
+    "quota": "free in money; metered against a request/token allowance instead",
+}
+
+
+def _cost_provenance(records: list[OpenRouterUsageRecord] | None = None) -> str:
+    """How the dollar figures in this ledger were arrived at.
+
+    Derived from the rows rather than from a process-wide provider flag: once
+    one run can span several endpoints, a single global answer is wrong for
+    some of the rows it claims to describe. Falls back to the old global
+    reading only for an empty ledger.
+    """
+    sources = sorted({r.cost_source for r in (records or []) if r.cost_source})
+    if not sources:
+        if llm_provider.is_openai():
+            return _COST_SOURCE_BLURB["price_table"]
+        return _COST_SOURCE_BLURB["native"]
+    if len(sources) == 1:
+        return _COST_SOURCE_BLURB.get(sources[0], sources[0])
+    return "mixed: " + "; ".join(
+        f"{s} = {_COST_SOURCE_BLURB.get(s, s)}" for s in sources
+    )
 
 
 def _format_usage_markdown_table(records: list[OpenRouterUsageRecord]) -> str:
     lines = [
-        "| no. | name of task | input characters | input tokens | output characters | output tokens | reasoning tokens | native in | native out | cached in | cache write | cost usd | seconds | model used |",
-        "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| no. | name of task | input characters | input tokens | output characters | output tokens | reasoning tokens | native in | native out | cached in | cache write | cost usd | quota ud | seconds | endpoint | model used |",
+        "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
     ]
     for record in records:
         lines.append(
@@ -626,7 +739,9 @@ def _format_usage_markdown_table(records: list[OpenRouterUsageRecord]) -> str:
             f"{record.cached_input_tokens} | "
             f"{record.cache_write_tokens} | "
             f"{record.cost_usd:.6f} | "
+            f"{record.quota_microdollars:.1f} | "
             f"{record.duration_seconds:.1f} | "
+            f"{_table_cell(record.endpoint or '?')} | "
             f"{_table_cell(record.model_used)} |"
         )
     return "\n".join(lines)

@@ -193,92 +193,11 @@ async def _generate_query_plan_uncached(
         prompt,
         model=model,
         temperature=temperature,
-        use_tools=False,
         _label="google-query-generation",
     )
     parsed = _extract_json_value(response)
     queries = _parse_query_plan(parsed)
     return _dedupe_and_cap_queries(queries, max_queries)
-
-
-async def generate_google_search_queries(
-    title: str,
-    resolution_criteria: str = "",
-    background: str = "",
-    fine_print: str = "",
-    asknews_research: str = "",
-    options: list[str] | None = None,
-    max_queries: int = DEFAULT_QUERY_COUNT,
-    model: str = DEFAULT_QUERY_GENERATION_MODEL,
-    temperature: float = 0.2,
-) -> list[str]:
-    """Return plain query strings suitable for SerpAPI."""
-    query_plan = await generate_google_search_query_plan(
-        title=title,
-        resolution_criteria=resolution_criteria,
-        background=background,
-        fine_print=fine_print,
-        asknews_research=asknews_research,
-        options=options,
-        max_queries=max_queries,
-        model=model,
-        temperature=temperature,
-    )
-    return [item.query for item in query_plan]
-
-
-async def generate_google_search_query_plan_from_question_details(
-    question_details: dict[str, Any],
-    asknews_research: str = "",
-    max_queries: int = DEFAULT_QUERY_COUNT,
-    model: str = DEFAULT_QUERY_GENERATION_MODEL,
-    temperature: float = 0.2,
-) -> list[GoogleSearchQuery]:
-    """Build a rich query plan from the Metaculus question_details dict."""
-    fields = _extract_question_fields(question_details)
-    return await generate_google_search_query_plan(
-        title=fields["title"],
-        resolution_criteria=fields["resolution_criteria"],
-        background=fields["background"],
-        fine_print=fields["fine_print"],
-        asknews_research=asknews_research,
-        options=fields["options"],
-        max_queries=max_queries,
-        model=model,
-        temperature=temperature,
-    )
-
-
-async def generate_google_search_queries_from_question_details(
-    question_details: dict[str, Any],
-    asknews_research: str = "",
-    max_queries: int = DEFAULT_QUERY_COUNT,
-    model: str = DEFAULT_QUERY_GENERATION_MODEL,
-    temperature: float = 0.2,
-) -> list[str]:
-    """Build plain SerpAPI-ready query strings from the Metaculus question_details dict."""
-    query_plan = await generate_google_search_query_plan_from_question_details(
-        question_details=question_details,
-        asknews_research=asknews_research,
-        max_queries=max_queries,
-        model=model,
-        temperature=temperature,
-    )
-    return [item.query for item in query_plan]
-
-
-def _extract_question_fields(question_details: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "title": str(question_details.get("title", "")).strip(),
-        "resolution_criteria": str(question_details.get("resolution_criteria", "")).strip(),
-        "background": str(
-            question_details.get("description")
-            or question_details.get("background")
-            or ""
-        ).strip(),
-        "fine_print": str(question_details.get("fine_print", "")).strip(),
-        "options": question_details.get("options"),
-    }
 
 
 def _clean_prompt_field(value: str | None) -> str:

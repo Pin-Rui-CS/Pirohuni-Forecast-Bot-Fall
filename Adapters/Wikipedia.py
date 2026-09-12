@@ -171,7 +171,6 @@ Wikipedia page markdown:
         prompt,
         model=DEFAULT_EXTRACT_MODEL,
         temperature=0.1,
-        use_tools=False,
         _label="wikipedia-adapter-extract",
     )
 

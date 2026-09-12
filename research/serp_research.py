@@ -4,7 +4,7 @@ import datetime
 import json
 import logging
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any, Iterable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -492,7 +492,6 @@ async def rank_serp_urls(
         prompt,
         model=model,
         temperature=0.1,
-        use_tools=False,
         _label="serp-url-ranking",
     )
     parsed = _extract_json_value(response)
@@ -723,7 +722,6 @@ async def extract_serp_research(
         prompt,
         model=model,
         temperature=0.1,
-        use_tools=False,
         _label="serp-scrape-extract",
     )
     delta, raw_lack = _parse_extract_response(response)
@@ -875,16 +873,6 @@ Raw SerpAPI organic results considered:
 {chr(10).join(raw_lines).strip() if raw_lines else "No organic results found."}
 ======================================================================
 """.strip()
-
-
-def serp_research_to_dict(result: SerpResearchResult) -> dict[str, Any]:
-    return {
-        "queries": result.queries,
-        "organic_results": [asdict(item) for item in result.organic_results],
-        "ranked_url_groups": [asdict(item) for item in result.ranked_url_groups],
-        "cycles": [asdict(item) for item in result.cycles],
-        "report": result.report,
-    }
 
 
 async def _gather_serpapi_queries(
