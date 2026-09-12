@@ -92,12 +92,6 @@ def validate_runtime_configuration() -> None:
     missing_env_vars = []
     if not METACULUS_TOKEN:
         missing_env_vars.append("METACULUS_TOKEN")
-    # Every endpoint this routing profile can reach needs its key, including
-    # any fallback target. A mixed profile spans more than one, and a missing
-    # key must fail here rather than forty calls into the first question.
-    for endpoint in llm_provider.required_endpoints():
-        if not llm_provider.api_key_for(endpoint):
-            missing_env_vars.append(endpoint.api_key_env)
 
     has_asknews_oauth = bool(ASKNEWS_CLIENT_ID and ASKNEWS_SECRET)
     has_asknews_api_key = bool(ASKNEWS_API_KEY)
@@ -108,6 +102,17 @@ def validate_runtime_configuration() -> None:
             "Missing required environment variable(s): "
             f"{', '.join(missing_env_vars)}. "
             "Set them in your environment or .env before running the bot."
+        )
+
+    # Whether the active routing profile can actually run: every role has a
+    # route, every endpoint it can reach has its key (fallback targets
+    # included), and no fallback loops back onto the endpoint that failed.
+    # A mixed profile spans more than one endpoint, so this must fail here
+    # rather than forty calls into the first question.
+    routing_problems = llm_provider.preflight()
+    if routing_problems:
+        raise RuntimeError(
+            f"Routing profile {llm_provider.active_profile().name!r} cannot run: " + "; ".join(routing_problems)
         )
     if has_partial_asknews_oauth:
         raise RuntimeError(

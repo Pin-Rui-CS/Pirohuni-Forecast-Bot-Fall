@@ -89,7 +89,13 @@ logger = logging.getLogger(__name__)
 
 PROVIDER_OPENROUTER: Final = "openrouter"
 PROVIDER_OPENAI: Final = "openai"
-_VALID_PROVIDERS: Final = frozenset({PROVIDER_OPENROUTER, PROVIDER_OPENAI})
+# Two endpoints in one run: paid Tier 1 on OpenRouter, free Tier 2 on the NUS
+# SoC gateway. This is the mode the Route table was built for -- a single
+# global "which provider" flag cannot express it.
+PROVIDER_MIXED: Final = "mixed"
+_VALID_PROVIDERS: Final = frozenset(
+    {PROVIDER_OPENROUTER, PROVIDER_OPENAI, PROVIDER_MIXED}
+)
 
 
 def _read_provider() -> str:
@@ -485,6 +491,29 @@ ENDPOINT_OPENAI: Final = Endpoint(
     "openai", "OpenAI", OPENAI_BASE_URL, "OPENAI_API_KEY",
 )
 
+# NUS SoC LLM-as-a-Service: OpenAI-compatible, open-weight models, free in
+# money. Two measured facts shape this entry.
+#
+# RATE. The docs advertise 90 requests/minute; a real key measured 30. Tier 2
+# is ~20-40 calls per question and the gate is process-wide, so this is the
+# binding constraint on a run, not the token budget. 24/min leaves headroom
+# for the retries that a 429 would otherwise turn into a storm.
+#
+# REACHABILITY. Measured 2026-09-12 from off-campus: the API host resolves to
+# a PUBLIC address (137.132.84.188) and answers, while the portal and DocHub
+# hosts are RFC1918 (172.18.x) and time out. So this endpoint works from
+# GitHub Actions, and the portal budget endpoint the plan wanted to poll at
+# run start does not -- quota has to come from the local ledger instead.
+ENDPOINT_SOCLAAS: Final = Endpoint(
+    "soclaas",
+    "SoCLaaS",
+    (os.getenv("SOCLAAS_BASE_URL") or "https://soclaas-api.comp.nus.edu.sg/v1").rstrip("/"),
+    "SOCLAAS_API_KEY",
+    requests_per_minute=24.0,
+    timeout_seconds=180.0,
+    probe_on_start=True,
+)
+
 
 @dataclass(frozen=True)
 class Route:
@@ -548,6 +577,30 @@ INTERNAL_MODEL_NAMES: Final[tuple[str, ...]] = (
 )
 
 
+# Tier 1 (compiler, forecasters, tiebreaker). Non-pro deliberately: pro is the
+# same underlying model with reasoning.mode=pro at an IDENTICAL sticker price,
+# so its whole premium lands on extra reasoning tokens billed as output at
+# $50/1M -- against prompts that already force their reasoning into visible
+# output and already emit 10-17k tokens.
+MIXED_TIER1_MODEL: Final = "openai/gpt-6-astra"
+
+# Tier 2 (every research and utility call). Confirmed present in GET /v1/models
+# on 2026-09-12 with a 262144-token context, which clears the largest Tier-2
+# input in the repo (_MAX_EXTRACT_INPUT_CHARS = 180_000 chars, ~56k tokens).
+MIXED_TIER2_MODEL: Final = "qwen3.8:27b"
+
+# Microdollars per 1M tokens (input, output), from the gateway's own model
+# table. No real money is charged, but the allowance is real -- measured
+# $50/day against documented $80 -- so it is tracked as `quota`, never as cost.
+MIXED_TIER2_QUOTA_RATES: Final = (195_000.0, 900_000.0)
+
+# Where a SoCLaaS route goes when the gateway is down. An internal NAME, so the
+# fallback arrives with its own policy. It must resolve to a route on a
+# DIFFERENT endpoint or the fallback is circular, which is why
+# openai/gpt-5.6-terra stays on OpenRouter below.
+_MIXED_TIER2_FALLBACK: Final = "openai/gpt-5.6-terra"
+
+
 def _openrouter_route(model: str) -> Route:
     """OpenRouter serves every vendor behind one URL and reports real cost."""
     return Route(
@@ -582,6 +635,81 @@ def _openai_route(internal_name: str) -> Route:
     )
 
 
+def _astra_route() -> Route:
+    """Tier 1 on OpenRouter.
+
+    ``supports_cache_control=False`` is load-bearing rather than cosmetic.
+    OpenRouter forwards Anthropic-style cache_control breakpoints, and the
+    binary tiebreaker is the one call site that still sets
+    cache_static_prefix=True. Against an OpenAI-family model those breakpoints
+    buy nothing, and a cache WRITE on Astra bills at 1.25x input ($12.50/1M) --
+    a premium on a prompt that is unique to one question and can never be read
+    back.
+
+    ``reasoning_headroom_tokens`` exists because max_tokens on a reasoning
+    model caps visible output AND hidden reasoning together. Without it the
+    20k forecast cap could be consumed entirely by reasoning, returning an
+    empty message with finish_reason=length.
+    """
+    return Route(
+        endpoint=ENDPOINT_OPENROUTER,
+        model_id=MIXED_TIER1_MODEL,
+        accepts_temperature=True,      # measured live: 5/5 distinct completions
+        uses_max_completion_tokens=False,
+        reasoning_headroom_tokens=24_000,
+        supports_cache_control=False,
+        sends_usage_accounting=True,
+        cost_source="native",
+    )
+
+
+def _qwen_route() -> Route:
+    """Tier 2 on SoCLaaS: free in money, metered in quota, rate-limited."""
+    return Route(
+        endpoint=ENDPOINT_SOCLAAS,
+        model_id=MIXED_TIER2_MODEL,
+        accepts_temperature=True,      # open-weight model; verified accepted
+        uses_max_completion_tokens=False,
+        supports_cache_control=False,
+        # The gateway is OpenAI-compatible and has no OpenRouter usage
+        # extension; sending one would be an unrecognised body argument.
+        sends_usage_accounting=False,
+        cost_source="quota",
+        quota_rate_microdollars=MIXED_TIER2_QUOTA_RATES,
+        fallback=_MIXED_TIER2_FALLBACK,
+    )
+
+
+def _mixed_profile() -> Profile:
+    """Paid Tier 1 on OpenRouter, free Tier 2 on SoCLaaS.
+
+    The ensemble is Astra(brief) + qwen3.8(brief) + qwen3.8(raw). Two Astra
+    runs on one brief was the alternative; sampling there is genuinely live
+    (measured), but they would still share a lineage AND an input, and the
+    44620 post-mortem is explicit that input diversity cannot decorrelate
+    shared reasoning fallacies. Two lineages over three inputs costs less and
+    decorrelates more.
+    """
+    return Profile(
+        name=PROVIDER_MIXED,
+        routes={
+            # Tier 1 -- both role names mean "the strong model".
+            "anthropic/claude-opus-5": _astra_route(),
+            "openai/gpt-5.6-sol": _astra_route(),
+            # Tier 2 -- every research and utility call.
+            "anthropic/claude-sonnet-5": _qwen_route(),
+            "openai/gpt-5.6-luna": _qwen_route(),
+            # The designated PAID Tier-2 route, and the fallback target above.
+            # Deliberately NOT on SoCLaaS: a fallback pointing at the endpoint
+            # that just failed is not a fallback.
+            "openai/gpt-5.6-terra": _openrouter_route("anthropic/claude-sonnet-5"),
+        },
+        default_forecaster="anthropic/claude-opus-5",
+        forecaster_pool=("anthropic/claude-opus-5", "anthropic/claude-sonnet-5"),
+        heterogeneous_model="anthropic/claude-sonnet-5",
+    )
+
+
 def _openrouter_profile() -> Profile:
     return Profile(
         name=PROVIDER_OPENROUTER,
@@ -610,6 +738,7 @@ def _openai_profile() -> Profile:
 _PROFILE_BUILDERS: Final[dict[str, Any]] = {
     PROVIDER_OPENROUTER: _openrouter_profile,
     PROVIDER_OPENAI: _openai_profile,
+    PROVIDER_MIXED: _mixed_profile,
 }
 
 _PROFILE: Profile | None = None
@@ -722,6 +851,54 @@ def required_endpoints() -> list[Endpoint]:
             if target is not None:
                 seen.setdefault(target.endpoint.name, target.endpoint)
     return list(seen.values())
+
+
+def preflight() -> list[str]:
+    """Problems that would break the active profile, found before question 1.
+
+    Key presence and table consistency only -- deliberately no network. A
+    startup probe would add a failure mode of its own (a transient blip
+    refusing to start a run that would have succeeded), and unreachability is
+    already handled at request time by the fallback route.
+
+    Returns a list of human-readable problems; empty means good to go.
+    """
+    problems: list[str] = []
+    profile = active_profile()
+
+    # 1. Every role the bot names must have somewhere to go. A missing route
+    #    would otherwise surface as a 404 partway through a question.
+    for name in INTERNAL_MODEL_NAMES:
+        if name not in profile.routes:
+            problems.append(
+                f"routing profile {profile.name!r} has no route for {name!r}"
+            )
+
+    # 2. Every endpoint it can reach -- including fallback targets -- needs its
+    #    credential. Checking here turns forty confusing 401s into one message.
+    for endpoint in required_endpoints():
+        if not api_key_for(endpoint):
+            problems.append(
+                f"{endpoint.label} is routed to but {endpoint.api_key_env} is not set"
+            )
+
+    # 3. A fallback that lands on the endpoint that just failed is not a
+    #    fallback. Cheap to assert, and the mistake is easy to make because
+    #    the fallback is written as a role name rather than an endpoint.
+    for name, route in profile.routes.items():
+        if not route.fallback:
+            continue
+        target = profile.routes.get(route.fallback)
+        if target is None:
+            problems.append(
+                f"{name!r} falls back to {route.fallback!r}, which has no route"
+            )
+        elif target.endpoint.name == route.endpoint.name:
+            problems.append(
+                f"{name!r} falls back to {route.fallback!r}, but both are on "
+                f"{route.endpoint.label} -- a fallback must cross endpoints"
+            )
+    return problems
 
 
 def build_kwargs(route: Route, payload: dict[str, Any]) -> dict[str, Any]:
