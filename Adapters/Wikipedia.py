@@ -15,7 +15,7 @@ from utils import _truncate_text
 
 USER_AGENT = (
     "Pirohuni-Forecast-Bot/0.1 "
-    "(https://github.com/Pirohuni/Pirohuni-Forecast-Bot-Fall; forecasting research)"
+    "(https://github.com/Pin-Rui-CS/Pirohuni-Forecast-Bot-Fall; forecasting research)"
 )
 DEFAULT_EXTRACT_MODEL = "anthropic/claude-sonnet-5"
 MAX_WIKIPEDIA_SOURCE_CHARS = 80_000

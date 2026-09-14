@@ -72,7 +72,7 @@ if (metaculusToken) process.env.METACULUS_API_TOKEN = metaculusToken;
  * needs to be distinguished from another.
  */
 process.env.APIAGENT_UA_PRODUCT ||= "Pirohuni-Forecast-Bot/1.0";
-process.env.APIAGENT_UA_URL ||= "https://github.com/Pirohuni/Pirohuni-Forecast-Bot-Fall";
+process.env.APIAGENT_UA_URL ||= "https://github.com/Pin-Rui-CS/Pirohuni-Forecast-Bot-Fall";
 
 const DEFAULT_TIMEOUT_MS = 45_000;
 
