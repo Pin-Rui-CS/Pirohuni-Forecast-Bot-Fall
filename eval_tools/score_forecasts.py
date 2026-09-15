@@ -99,6 +99,34 @@ def score_numeric(record: dict, resolution: str) -> float | None:
     return float(np.trapezoid((cdf_array - indicator) ** 2, locations))
 
 
+# Resolutions that exist but carry no scorable outcome.
+UNSCORABLE_RESOLUTIONS = frozenset({"annulled", "ambiguous", "None"})
+
+
+def score_record(record: dict, resolution: str) -> tuple[str, float] | None:
+    """(metric, score) for one forecast.json record, or None if unscorable.
+
+    Shared by this script and eval_tools/score_outcomes.py so the offline
+    report and the forecast library can never score the same forecast
+    differently.
+    """
+    if resolution in UNSCORABLE_RESOLUTIONS:
+        return None
+    question_type = record.get("question_type")
+    forecast = record.get("final_forecast")
+    if forecast is None:
+        return None  # abstained
+    if question_type == "binary":
+        score, metric = score_binary(float(forecast), resolution), "brier"
+    elif question_type == "multiple_choice":
+        score, metric = score_multiple_choice(forecast, resolution), "brier"
+    elif question_type in ("numeric", "discrete"):
+        score, metric = score_numeric(record, resolution), "crps"
+    else:
+        return None
+    return None if score is None else (metric, score)
+
+
 async def main(roots: list[str]) -> None:
     files = find_forecast_files(roots)
     if not files:
@@ -123,27 +151,13 @@ async def main(roots: list[str]) -> None:
             skipped += 1
             continue
         resolution = str(resolution_info["resolution"])
-        if resolution in {"annulled", "ambiguous", "None"}:
+        scored = score_record(record, resolution)
+        if scored is None:
+            if resolution not in UNSCORABLE_RESOLUTIONS:
+                print(f"skip {path}: could not score resolution {resolution!r}")
             skipped += 1
             continue
-
-        if question_type == "binary":
-            score = score_binary(float(record["final_forecast"]), resolution)
-            metric = "brier"
-        elif question_type == "multiple_choice":
-            score = score_multiple_choice(record["final_forecast"], resolution)
-            metric = "brier"
-        elif question_type in ("numeric", "discrete"):
-            score = score_numeric(record, resolution)
-            metric = "crps"
-        else:
-            score = None
-            metric = "?"
-
-        if score is None:
-            print(f"skip {path}: could not score resolution {resolution!r}")
-            skipped += 1
-            continue
+        metric, score = scored
 
         rows.append(
             {

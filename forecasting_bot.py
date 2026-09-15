@@ -17,6 +17,7 @@ from config import (
     TOURNAMENT_MAPPING,
 )
 import llm_provider
+import provenance
 from artifacts import run_log_file_path
 from metaculus_client import get_open_question_ids_from_tournament
 from orchestrator import forecast_questions
@@ -193,6 +194,13 @@ if __name__ == "__main__":
     print(f"Using {args.num_runs} runs per question")
     print(f"OpenRouter per-question estimated-token hard limit: {args.cost_limit:.0f}" if args.cost_limit else "OpenRouter usage hard limit: disabled")
     print(f"Skip previously forecasted: {SKIP_PREVIOUSLY_FORECASTED_QUESTIONS}\n")
+
+    provenance.set_cli_context(
+        mode=args.mode,
+        tournaments=[str(t) for t in tournament_ids] if args.mode == "tournament" else [],
+        num_runs=args.num_runs,
+        submit=submit_prediction,
+    )
 
     asyncio.run(
         forecast_questions(

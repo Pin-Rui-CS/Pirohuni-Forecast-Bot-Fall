@@ -142,6 +142,16 @@ jobs:
           ENABLE_PREDICTION_MARKET_RESEARCH: ${{ vars.ENABLE_PREDICTION_MARKET_RESEARCH || 'true' }}
           FIRECRAWL_SEARCH_TBS: ${{ vars.FIRECRAWL_SEARCH_TBS || '' }}
 
+      - name: Publish run to the forecast library
+        # Never fails or blocks forecasting: a no-op until the SUPABASE_*
+        # secrets exist, and a database outage marks only this step.
+        if: always()
+        continue-on-error: true
+        run: poetry run python eval_tools/publish_runs.py docs/runs
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+
       - name: Upload bot log as artifact
         if: always()
         uses: actions/upload-artifact@v4

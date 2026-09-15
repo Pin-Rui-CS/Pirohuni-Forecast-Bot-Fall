@@ -122,12 +122,16 @@ class QuestionArtifacts:
         return self._write("audit.md", "\n".join(lines))
 
     def save_forecast_json(self, data: dict[str, Any]) -> str:
+        import provenance
+
         record = {
+            "schema_version": provenance.SCHEMA_VERSION,
             "question_id": self.question_id,
             "post_id": self.post_id,
             "title": self.title,
             "question_type": self.question_type,
             "run_timestamp": _RUN_TIMESTAMP,
+            "provenance": provenance.run_provenance(_RUN_TIMESTAMP),
             **data,
         }
         path = os.path.join(self.dir, "forecast.json")

@@ -1,0 +1,56 @@
+name: Score resolved forecasts in the library
+
+# Daily: check unresolved questions against Metaculus, record outcomes, and
+# score every forecast on a resolved question. Also keeps the free Supabase
+# project from pausing between tournaments.
+
+"on":
+  workflow_dispatch:
+    inputs:
+      max_checks:
+        description: "Most questions to check against Metaculus this run"
+        required: false
+        default: "150"
+        type: string
+  schedule:
+    - cron: "17 3 * * *" # daily, 03:17 UTC
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  score_outcomes:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+          installer-parallel: true
+
+      - name: Load cached venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('**/poetry.lock') }}
+
+      - name: Install Python dependencies (Poetry)
+        run: poetry install --no-interaction --no-root
+
+      - name: Record outcomes and scores
+        run: poetry run python eval_tools/score_outcomes.py --max-checks "${{ inputs.max_checks || '150' }}"
+        env:
+          PYTHONUNBUFFERED: "1"
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}

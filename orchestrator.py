@@ -5,6 +5,7 @@ import logging
 import os
 import time
 import traceback
+from dataclasses import asdict
 
 from artifacts import QuestionArtifacts
 import llm_provider
@@ -243,6 +244,10 @@ async def forecast_individual_question(
         total_seconds = time.monotonic() - question_started
         estimated_tokens = question_cost_manager.total_tokens
         usage_yaml_table = question_cost_manager.format_usage_yaml_table()
+        # The same ledger as rows, so the forecast library can query cost per
+        # call without parsing the rendered table above.
+        llm_calls = [asdict(record) for record in question_cost_manager.get_usage_records()]
+        total_cost_usd = question_cost_manager.total_cost_usd
 
     timings = {
         "research_seconds": round(research_seconds, 1),
@@ -318,8 +323,11 @@ async def forecast_individual_question(
             "forecast_payload": forecast_payload,
             "extra": result.extra,
             "estimated_tokens": estimated_tokens,
+            "total_cost_usd": total_cost_usd,
             "timings": timings,
             "usage_yaml_table": usage_yaml_table,
+            "llm_calls": llm_calls,
+            "abstained": abstained,
             "submitted": submit_prediction and not abstained,
         }
     )

@@ -40,12 +40,15 @@ Adapters/                   - per-host extractors (Metaculus, Wikipedia, PDF, Go
                               Sheets, Google Trends, Yahoo Quotes, Wayback)
 Crawl4AI/crawl.py           - headless-browser markdown fallback + scrape dedupe registry
 artifacts.py                - per-question run folder writer
+provenance.py               - stamps each forecast.json with run id, commit, models, schema version
 source_ledger.py            - URL event ledger behind audit.md
 research_trace.py           - step-by-step research trace behind evolution.md
 run_logging.py / utils.py   - logging setup, shared helpers
 
-tests/                      - test_route_equivalence.py: request-shaping golden test
+tests/                      - offline tests: request shaping, library publishing, outcome scoring
 eval_tools/                 - offline dry-run, replay, compile-replay, scoring
+eval_tools/publish_runs.py / score_outcomes.py / supabase_rest.py - the forecast library
+db/migrations/              - the forecast library's database schema
 prompts/                    - every prompt template, extracted verbatim from source
 SOCLAAS.md                  - reference for the NUS SoC LLM gateway
 ```
@@ -238,6 +241,61 @@ figures computed over the full range (exact counts, period high/low).
 
 **Status:** the bridge works, but the research pipeline does not call it yet.
 
+## Forecast library
+
+Every run is also published to a private Supabase project, so past forecasts
+outlive GitHub's 14-day artifact retention and can be browsed and analysed from
+a separate website repo.
+
+- **What is stored.** One row per question per run, one row per LLM call, and
+  later an outcome and a score. The question's files (`forecast.json`, the
+  markdown files gzipped, `trace/` as a tarball) go to a private storage bucket
+  under `runs/<run_id>/<question_id>/`. Tournament submissions, dry runs and
+  manual tests are all recorded, told apart by `workflow` and `submitted`.
+- **Provenance.** Each `forecast.json` now records its run id, commit, workflow,
+  the resolved models and a `schema_version` (`provenance.py`). That is what
+  makes accuracy comparable across code versions; it cannot be added to old
+  runs afterwards.
+- **Changing `forecast.json`.** The database stores each file verbatim in a
+  `raw` JSON column and promotes only stable fields to columns. Adding a field
+  needs nothing. Renaming or restructuring one means bumping `SCHEMA_VERSION` in
+  `provenance.py` and teaching `eval_tools/publish_runs.py` and the views in
+  `db/migrations/` to read both shapes; stored rows are never rewritten. Records
+  from before provenance existed are published as `schema_version` 1, with
+  per-call costs recovered from the rendered usage table.
+- **Publishing.** Every workflow runs `eval_tools/publish_runs.py` after the bot.
+  It is idempotent and can never fail a forecast run: it does nothing without
+  credentials, and a database error marks only that step.
+- **Scoring.** `score-outcomes.yaml` runs daily, checks unresolved questions
+  against Metaculus, and scores forecasts once they resolve (Brier for binary
+  and multiple choice, CRPS for numeric) using the same code as
+  `eval_tools/score_forecasts.py`.
+- **Access.** Row-level security lets only a signed-in user read anything; the
+  anon key alone reads nothing. `SUPABASE_SERVICE_KEY` has full write access and
+  belongs only in GitHub secrets and your local `.env`.
+
+Views ready for analysis: `forecast_library` (forecasts with outcomes and
+scores), `accuracy_by_model`, `cost_by_week`.
+
+### Setting it up
+
+1. Create a Supabase project and note its URL and service-role (secret) key.
+2. In the SQL editor, run `db/migrations/001_schema.sql`, then
+   `002_supabase_security.sql`. Both are safe to re-run. The second creates the
+   private `forecast-runs` bucket.
+3. Under Authentication, create your own user, then turn off new sign-ups so
+   that user is the only one who can read the library.
+4. Add `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` as GitHub repository secrets
+   (and to `.env` to publish local runs).
+5. Dispatch **Backfill the forecast library from saved artifacts** once, to
+   publish the result artifacts GitHub still holds before they expire.
+
+To check a runs folder without writing anything:
+
+```bash
+poetry run python eval_tools/publish_runs.py docs/runs --dry-run
+```
+
 ## Setup
 
 ```bash
@@ -266,6 +324,7 @@ working default.
 | `OPENROUTER_COST_HARD_LIMIT_USD` | optional | Per-question estimated-token limit; `0` tracks only |
 | `QUESTION_CONCURRENCY` | optional | Questions forecast in parallel; `0` (default) runs all at once |
 | `ENABLE_*_RESEARCH` | optional | Per-provider toggles, all `true` by default |
+| `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` | optional | Publish runs to the forecast library |
 
 `preflight()` reports any key the chosen models need but can't find, so a
 missing credential fails at startup rather than partway through a question.
@@ -281,7 +340,8 @@ workflow references never reaches the bot.
 
 - **Secrets:** `METACULUS_TOKEN`, `OPENROUTER_API_KEY`, `ASKNEWS_CLIENT_ID`,
   `ASKNEWS_SECRET`, `SERPAPI_API_KEY`, `TAVILY_API_KEY`, `FIRECRAWL_API_KEY`,
-  `SOCLAAS_API_KEY`.
+  `SOCLAAS_API_KEY`, and for the forecast library `SUPABASE_URL` and
+  `SUPABASE_SERVICE_KEY`.
 - **Variables:** `LLM_ROUTING`, `TIER1_MODEL`, `TIER2_MODEL`, and optionally
   `OPENROUTER_COST_HARD_LIMIT_USD` and the `ENABLE_*_RESEARCH` toggles.
 
@@ -363,12 +423,18 @@ poetry run python forecasting_bot.py --mode tournament --tournament fall-2026-ai
 
 ```bash
 python tests/test_route_equivalence.py
+python tests/test_publish_runs.py
+python tests/test_score_outcomes.py
 ```
 
-Checks that request shaping for the `openrouter` and `openai` presets still
-matches 550 saved request snapshots. Run it after any change to
-`llm_provider.py`; regenerate the snapshots (`--regenerate`) only when a change
-to the requests is intended.
+`test_route_equivalence.py` checks that request shaping for the `openrouter`
+and `openai` presets still matches 550 saved request snapshots. Run it after any
+change to `llm_provider.py`; regenerate the snapshots (`--regenerate`) only when
+a change to the requests is intended.
+
+The other two exercise the forecast library offline, with no network or
+database: what the publisher sends for current and legacy records, and that
+daily scoring neither skips nor repeats forecasts.
 
 ## Before submitting for real
 

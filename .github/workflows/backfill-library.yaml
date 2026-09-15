@@ -1,0 +1,85 @@
+name: Backfill the forecast library from saved artifacts
+
+# One-off (safe to repeat): publish every result artifact GitHub still holds.
+# Result artifacts expire after 14 days, so run this soon after the library is
+# set up. Records written before provenance existed get their run id, commit
+# and workflow from the artifact's own run; newer records keep their own.
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+          installer-parallel: true
+
+      - name: Load cached venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('**/poetry.lock') }}
+
+      - name: Install Python dependencies (Poetry)
+        run: poetry install --no-interaction --no-root
+
+      - name: Download and publish unexpired result artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SERVER: ${{ github.server_url }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          set -uo pipefail
+          if [ -z "${SUPABASE_URL}" ] || [ -z "${SUPABASE_SERVICE_KEY}" ]; then
+            echo "::error::SUPABASE_URL / SUPABASE_SERVICE_KEY secrets are not set."
+            exit 1
+          fi
+
+          gh api --paginate "repos/${REPO}/actions/artifacts?per_page=100" \
+            --jq '.artifacts[]
+                  | select(.expired == false and (.name | test("llm-results")))
+                  | [.name, (.workflow_run.id|tostring), .workflow_run.head_sha]
+                  | @tsv' > artifacts.tsv
+          echo "Found $(wc -l < artifacts.tsv) unexpired result artifact(s)."
+
+          failed=0
+          while IFS=$'\t' read -r name run_id sha; do
+            dir="backfill/${name}"
+            if ! gh run download "${run_id}" -R "${REPO}" -n "${name}" -D "${dir}"; then
+              echo "::warning::could not download ${name}"
+              failed=$((failed + 1)); continue
+            fi
+            meta=$(gh api "repos/${REPO}/actions/runs/${run_id}" --jq '[.name, (.run_attempt|tostring)] | @tsv')
+            workflow=$(printf '%s' "${meta}" | cut -f1)
+            attempt=$(printf '%s' "${meta}" | cut -f2)
+            if ! poetry run python eval_tools/publish_runs.py "${dir}" \
+                --run-id "gh-${run_id}-${attempt}" \
+                --code-sha "${sha}" \
+                --workflow "${workflow}" \
+                --run-url "${SERVER}/${REPO}/actions/runs/${run_id}"; then
+              echo "::warning::publish reported failures for ${name}"
+              failed=$((failed + 1))
+            fi
+          done < artifacts.tsv
+
+          echo "Backfill finished with ${failed} artifact(s) needing attention."
+          [ "${failed}" -eq 0 ]
