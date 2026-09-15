@@ -1,17 +1,17 @@
 # Pirohuni Forecast Bot Fall
 
-It fetches open tournament questions, asks an LLM for forecasts, aggregates repeated runs, saves the LLM outputs locally, and optionally submits forecasts plus private rationale comments to Metaculus.
+It fetches open tournament questions, researches each one, asks an ensemble of LLMs for forecasts, aggregates the runs, saves every intermediate output locally, and optionally submits forecasts plus private rationale comments to Metaculus.
 
 ## Current project structure
 
 ```text
-forecasting_bot.py          - CLI entry point, arg parsing, env validation
+forecasting_bot.py          - CLI entry point, arg parsing, startup validation
 orchestrator.py             - per-question flow: research -> forecast -> artifacts -> submit
 config.py                   - env vars, constants, tournament aliases, ensemble pool
-llm_provider.py             - the ONLY place OpenRouter and OpenAI differ (urls, models,
-                              request params, pricing). Switch with LLM_PROVIDER
-llm_client.py               - shared async LLM client, retries, transcripts
-monetary_cost_manager.py    - per-call token/cost ledger and hard-limit enforcement
+llm_provider.py             - every endpoint the bot can reach (OpenRouter, OpenAI, SoCLaaS):
+                              the route table, request shaping, rate gates, pricing, preflight
+llm_client.py               - shared async LLM client, retries, truncation detection, transcripts
+monetary_cost_manager.py    - per-call token / cost / quota ledger and hard-limit enforcement
 metaculus_client.py         - Metaculus API: list posts, fetch details, submit, comment
 
 research/pipeline.py        - the six-stage research pipeline (see Research below)
@@ -32,6 +32,10 @@ forecasters/binary.py       - binary prompt, parser, median + tiebreaker
 forecasters/numeric.py      - numeric/discrete: mixtures, guardrails, CDF standardisation
 forecasters/multiple_choice.py - multiple-choice prompt, parser, aggregation
 
+apiagent_bridge.py          - Python access to apiagent-kit's 24 public data APIs
+apiagent-kit/               - TypeScript library (Node >= 22.6) wrapping those APIs;
+                              cli.ts is the JSON shim the bridge drives
+
 Adapters/                   - per-host extractors (Metaculus, Wikipedia, PDF, Google
                               Sheets, Google Trends, Yahoo Quotes, Wayback)
 Crawl4AI/crawl.py           - headless-browser markdown fallback + scrape dedupe registry
@@ -40,19 +44,22 @@ source_ledger.py            - URL event ledger behind audit.md
 research_trace.py           - step-by-step research trace behind evolution.md
 run_logging.py / utils.py   - logging setup, shared helpers
 
+tests/                      - test_route_equivalence.py: request-shaping golden test
 eval_tools/                 - offline dry-run, replay, compile-replay, scoring
 prompts/                    - every prompt template, extracted verbatim from source
+SOCLAAS.md                  - reference for the NUS SoC LLM gateway
 ```
 
 ## Runtime flow
 
-1. Parse CLI args.
+1. Parse CLI args and validate the configuration. `llm_provider.preflight()`
+   fails the run before the first question if any model has no route, any
+   endpoint it can reach is missing its key, or a fallback points back at the
+   endpoint it is meant to replace.
 2. Build a list of `(question_id, post_id)` pairs from either example questions or tournament questions.
 3. For each question:
    - Fetch post details from Metaculus.
    - Skip if `SKIP_PREVIOUSLY_FORECASTED_QUESTIONS` is enabled and a prior forecast exists.
-   - Dispatch to the forecaster for the question type.
-   - Run the LLM `--num-runs` times.
    - Run the research pipeline, then compile it into one evidence brief.
    - Run the forecast `--num-runs` times across the model ensemble. With the
      heterogeneous run enabled, the **last** run reads the raw (uncompiled)
@@ -73,6 +80,63 @@ fall back to 0.5 / uniform, which *are* submitted.
 
 Any per-question failure is reported and then causes the process to exit with a nonzero status.
 
+## Choosing models
+
+Every LLM call names a **role**, not a vendor: `anthropic/claude-opus-5` means
+"the strong model" (compiler, forecaster, tiebreaker) and
+`anthropic/claude-sonnet-5` means "the utility model" (every research call).
+Two variables decide which concrete model fills each role:
+
+```bash
+TIER1_MODEL=openai/gpt-6-astra      # compiler, forecaster, tiebreaker
+TIER2_MODEL=qwen3.8:27b             # every research and utility call
+```
+
+The endpoint follows the model: an id in the SoC gateway's `family:size` form
+goes to SoCLaaS, anything else to OpenRouter. Setting `TIER2_MODEL` also sets
+the ensemble to one model of each tier, with the raw-research run on the Tier 2
+model, so the pairing above forecasts as:
+
+| Run | Model | Endpoint | Reads |
+|---|---|---|---|
+| 1 | `openai/gpt-6-astra` | OpenRouter | compiled brief |
+| 2 | `qwen3.8:27b` | SoCLaaS | compiled brief |
+| 3 | `qwen3.8:27b` | SoCLaaS | raw research |
+
+The ensemble only takes that shape at `--num-runs 3`; with one run, only the
+Tier 1 model forecasts.
+
+Leave both unset and `LLM_ROUTING` picks a preset instead: `openrouter`
+(default: Opus 5 and GPT-5.6 Sol on OpenRouter) or `openai` (GPT-5.6 on the
+direct OpenAI API). `LLM_PROVIDER` is still accepted as the old name for
+`LLM_ROUTING`. `FORECASTER_MODELS` and `HETEROGENEOUS_RUN_MODEL` override the
+ensemble when you want something unusual.
+
+What is **not** configurable is how a request is shaped. Whether a model
+accepts `temperature`, needs extra room for hidden reasoning under
+`max_tokens`, understands `cache_control` breakpoints, or reports its own cost
+are facts about a model and endpoint, so they live in `llm_provider.py` rather
+than in config. Getting one wrong costs money or returns an empty completion.
+
+### SoCLaaS
+
+The NUS SoC LLM gateway serves open-weight models (including `qwen3.8:27b`)
+with no charge in money, but it is metered and rate-limited. Details are in
+`SOCLAAS.md`; the parts that shape this bot:
+
+- The bot spaces requests to **24 per minute** against a measured limit of 30,
+  process-wide. Tier 2 makes most of a question's calls, so this can add real
+  wall-clock time to a run.
+- Usage counts against a daily and monthly allowance, recorded in `audit.md` as
+  `quota ud` (microdollars, not money).
+- There is **no automatic fallback yet**. Each SoCLaaS route declares a paid
+  OpenRouter route to fall back to, and startup checks that its key is set,
+  but nothing switches to it at runtime. If the gateway is down, Tier 2 calls
+  fail after their retries: research providers degrade, the compiler uses its
+  heuristic brief, and Qwen forecast runs drop out of the ensemble.
+- The API host is reachable from off-campus, including GitHub Actions. The
+  portal's budget endpoint is not, so the bot does not poll it.
+
 ## Artifacts
 
 Each question writes `docs/runs/<timestamp>/<question_id>_<slug>/`:
@@ -81,52 +145,43 @@ Each question writes `docs/runs/<timestamp>/<question_id>_<slug>/`:
 |---|---|
 | `research.md` | evidence plan, every provider's raw output, the compiled brief |
 | `runs.md` | the forecast prompt once, then each ensemble run's transcript |
-| `audit.md` | per-call token/cost table plus a URL ledger with per-tool rollups |
+| `audit.md` | per-call token / cost / quota table plus a URL ledger with per-tool rollups |
 | `forecast.json` | machine-readable record for scoring and replay |
 | `evolution.md` + `trace/` | how the research changed, step by step |
 
 The shared `docs/runs/<timestamp>/run.log` holds the whole run. `docs/` is
 gitignored; the GitHub Actions workflows upload it as a build artifact instead.
 
-## Monetary Cost Manager
+## Cost and usage tracking
 
-The bot tracks LLM usage by character count instead of trusting response
-billing fields. Before each call it records the task name, model, and
-serialized input character count; after the response it records output
-characters. Tokens are estimated with `CHARACTERS_PER_TOKEN = 3.2`
-(`monetary_cost_manager.py`), and every budget constant in that file is
-denominated in those units.
+`MonetaryCostManager` records every LLM call. Before the call it estimates input
+tokens from the serialized request (`CHARACTERS_PER_TOKEN = 3.2`; every budget
+constant in `monetary_cost_manager.py` is in those units) and refuses the call
+if it would breach the per-question hard limit. After the call it records what
+the endpoint reported.
 
-Under `LLM_PROVIDER=openai` there is no per-call cost field in the response, so
-dollar figures are computed from the local price table in `llm_provider.PRICES`.
-Keep that table in sync with OpenAI's published pricing.
+How cost is worked out depends on the route that served the call:
 
-On OpenRouter the bot also checks the active key's remaining spend before and
-after each run through `GET https://openrouter.ai/api/v1/key` (the OpenAI API
-has no per-key credit endpoint). The important field for this is
-`data.limit_remaining`, because it reflects the current API key's remaining
-credit limit. This is useful as a billing-side comparison only; local run logs
-use the character/token ledger.
+| `cost_source` | Used by | Cost figure |
+|---|---|---|
+| `native` | OpenRouter | the cost the response reports |
+| `price_table` | OpenAI direct | computed from `llm_provider.PRICES` (keep it in sync with OpenAI's pricing) |
+| `quota` | SoCLaaS | `$0`, with usage recorded separately as quota microdollars |
 
-`monetary_cost_manager.py` provides `MonetaryCostManager`, which exposes:
+`audit.md`'s table carries `endpoint`, `cost usd` and `quota ud` columns for
+every call, so a `$0.000000` row can be told apart as a free route, a model
+missing from the price table, or a call that never billed. The summary also
+reports `total_paid_input_tokens` (excluding free routes),
+`total_quota_microdollars` and `endpoints_used`.
 
-| Property | Meaning |
-|---|---|
-| `current_usage` | Backward-compatible numeric usage value: total estimated tokens |
-| `total_input_characters` / `total_output_characters` | Raw character totals |
-| `total_input_tokens` / `total_output_tokens` | Token estimates using 3.2 chars/token |
-| `format_usage_yaml_table()` | YAML-compatible log block containing the requested usage table |
+On OpenRouter the bot also logs the key's remaining credit before and after each
+run via `GET https://openrouter.ai/api/v1/key`, as a billing-side comparison.
 
-The orchestrator wraps each forecast in a per-question `MonetaryCostManager()`
-and wraps the whole run in a parent manager used only as a pooled ledger.
-Forecast summaries include per-question token usage, and the final run summary
-includes a YAML-compatible table with columns for no., task name, input/output
-characters, input/output tokens, and model used.
-
-A hard limit can be set with either `OPENROUTER_COST_HARD_LIMIT_USD` or the
-`--token-limit` / `--cost-limit` CLI flag. The old env var name is kept for
-compatibility, but the value is now interpreted as estimated tokens per
-question. A value of `0` disables enforcement while still tracking usage.
+A per-question hard limit can be set with `OPENROUTER_COST_HARD_LIMIT_USD` or
+`--token-limit` / `--cost-limit`. Despite the name, the value is **estimated
+tokens**; `0` tracks usage without enforcing a limit. Forecast runs and the
+binary tiebreaker are also capped at `FORECAST_MAX_OUTPUT_TOKENS` (20000) of
+visible output.
 
 ## Research
 
@@ -159,6 +214,30 @@ regexed out of the page's own JS bundles. Anything found is reduced at the point
 of retrieval (`series_reduce.py`) to a ~2 KB table of levels, period means and
 empirical ahead-ratio quantiles. No LLM calls, no Firecrawl credits, no browser.
 
+## apiagent-kit
+
+`apiagent-kit/` wraps 24 public data APIs (FRED, World Bank, CISA KEV, FDIC,
+USGS, Cboe VIX, Wikipedia pageviews, SEC EDGAR, Kalshi, Polymarket, Metaculus
+and others), each tagged with a provenance tier. 22 need no key; `fred` needs
+`FRED_API_KEY`, and `metaculus` reuses `METACULUS_TOKEN`.
+
+It is TypeScript, so `apiagent_bridge.py` runs `apiagent-kit/cli.ts` under Node
+for each call and reads JSON back. It never raises into the pipeline: a missing
+Node install, a timeout or an API error comes back as a result with
+`ok=False`.
+
+```python
+import apiagent_bridge as ab
+
+await ab.find_apis("How many CVEs will CISA add in August?")   # -> cisa_kev, ... (offline, free)
+await ab.call_api("cisa_kev", {"addedSince": "2026-08-01"})   # -> rows + an exact matched count
+```
+
+Results are capped at 25 rows; where it matters, the adapter's `note` carries
+figures computed over the full range (exact counts, period high/low).
+
+**Status:** the bridge works, but the research pipeline does not call it yet.
+
 ## Setup
 
 ```bash
@@ -166,34 +245,52 @@ poetry install
 cp .env.example .env
 ```
 
-Required environment variables:
+For apiagent-kit, install Node 22.6 or later, then `cd apiagent-kit && npm ci`.
 
-| Variable | Required | Purpose |
-|---|---:|---|
-| `METACULUS_TOKEN` | Yes | Fetch authenticated question details and submit forecasts |
-| `OPENROUTER_API_KEY` **or** `OPENAI_API_KEY` | Yes | Whichever `LLM_PROVIDER` selects; only that one is required |
-| `ASKNEWS_CLIENT_ID` + `ASKNEWS_SECRET` | Yes | AskNews OAuth credentials for research |
+There is **one** `.env`, at the repository root. apiagent-kit inherits it from
+the Python process, so don't create `apiagent-kit/.env`. `.env.example`
+documents every variable the code reads; anything not listed below has a
+working default.
 
-Instead of `ASKNEWS_CLIENT_ID` + `ASKNEWS_SECRET`, you can set `ASKNEWS_API_KEY`. Do not set both authentication methods at the same time.
+| Variable | When needed | Purpose |
+|---|---|---|
+| `METACULUS_TOKEN` | always | Fetch question details and submit forecasts |
+| `ASKNEWS_CLIENT_ID` + `ASKNEWS_SECRET` | always | AskNews OAuth credentials (or `ASKNEWS_API_KEY` instead, never both) |
+| `OPENROUTER_API_KEY` | any model on OpenRouter (the default) | LLM calls |
+| `OPENAI_API_KEY` | `LLM_ROUTING=openai` | LLM calls on the direct OpenAI API |
+| `SOCLAAS_API_KEY` | a Tier model on the SoC gateway | LLM calls on SoCLaaS |
+| `SERPAPI_API_KEY` / `TAVILY_API_KEY` / `FIRECRAWL_API_KEY` | recommended | Web search and scraping |
+| `FRED_API_KEY` | optional | apiagent-kit's FRED adapter |
+| `TIER1_MODEL` / `TIER2_MODEL` | optional | Which models fill each role (see Choosing models) |
+| `LLM_ROUTING` | optional | Preset when the tier models are unset: `openrouter` (default) or `openai` |
+| `OPENROUTER_COST_HARD_LIMIT_USD` | optional | Per-question estimated-token limit; `0` tracks only |
+| `QUESTION_CONCURRENCY` | optional | Questions forecast in parallel; `0` (default) runs all at once |
+| `ENABLE_*_RESEARCH` | optional | Per-provider toggles, all `true` by default |
 
-Optional environment variables:
-
-| Variable | Default | Purpose |
-|---|---:|---|
-| `METACULUS_MAX_CONCURRENT_REQUESTS` | `1` | Semaphore limit for Metaculus API calls |
-| `METACULUS_REQUEST_INTERVAL` | `3.0` | Delay before each Metaculus request |
-| `INITIAL_API_GET_RETRY_WAIT_SECONDS` | `3.0` | Initial retry delay |
-| `ASKNEWS_CACHE_MODE` | `no_cache` | AskNews cache behavior: `use_cache`, `use_cache_with_fallback`, or `no_cache` |
-| `OPENROUTER_COST_HARD_LIMIT_USD` | `0` | Optional per-question estimated-**token** hard limit; the old USD name is kept for compatibility |
-| `LLM_PROVIDER` | `openrouter` | `openrouter` or `openai`. Also swaps the model pool, drops `temperature`, and prices calls locally - see `llm_provider.py` |
-| `OPENAI_REASONING_EFFORT[_<MODEL>]` | per-model | OpenAI only. Defaults: `high` on the forecaster/compiler/tiebreaker model, `low` on research utilities |
-| `OPENAI_PROMPT_CACHE` | `explicit` | OpenAI only. `explicit` means no cache writes, avoiding a 1.25x premium on prompts that are unique per question |
-| `FORECASTER_MODELS` | provider-dependent | Comma-separated ensemble pool, mapped onto runs in order |
-| `HETEROGENEOUS_RUN_ENABLED` / `HETEROGENEOUS_RUN_MODEL` | `true` | Whether the last run reads raw research, and on which model |
-| `ENABLE_*_RESEARCH` | `true` | Per-provider toggles; see `.env.example` for the full list |
-| `QUESTION_TIMEOUT_SECONDS` | `1200` | Per-question wall clock |
+`preflight()` reports any key the chosen models need but can't find, so a
+missing credential fails at startup rather than partway through a question.
 
 Never commit `.env`.
+
+### GitHub Actions
+
+Workflows read credentials from **repository secrets** and settings from
+**repository variables** (Settings → Secrets and variables → Actions). Each
+workflow lists the names it passes through, so a secret or variable that no
+workflow references never reaches the bot.
+
+- **Secrets:** `METACULUS_TOKEN`, `OPENROUTER_API_KEY`, `ASKNEWS_CLIENT_ID`,
+  `ASKNEWS_SECRET`, `SERPAPI_API_KEY`, `TAVILY_API_KEY`, `FIRECRAWL_API_KEY`,
+  `SOCLAAS_API_KEY`.
+- **Variables:** `LLM_ROUTING`, `TIER1_MODEL`, `TIER2_MODEL`, and optionally
+  `OPENROUTER_COST_HARD_LIMIT_USD` and the `ENABLE_*_RESEARCH` toggles.
+
+Repository variables apply to **every** workflow, including the scheduled runs
+in `main.yaml` and `main_ec2.yml` (at :04, :24 and :44 past each hour). Setting
+`TIER1_MODEL` / `TIER2_MODEL` therefore switches the tournament runs too, not
+just a manual test.
+
+The workflows do not install Node yet, so apiagent-kit does not run in CI.
 
 ## Usage
 
@@ -215,6 +312,13 @@ Dry run on specific tournaments:
 poetry run python forecasting_bot.py --mode tournament --tournament fall-2026-ai minibench --no-submit
 ```
 
+Dry run with Astra and Qwen:
+
+```bash
+TIER1_MODEL=openai/gpt-6-astra TIER2_MODEL=qwen3.8:27b \
+  poetry run python forecasting_bot.py --mode tournament --no-submit
+```
+
 Submit forecasts:
 
 ```bash
@@ -234,8 +338,8 @@ poetry run python forecasting_bot.py --mode tournament --tournament fall-2026-ai
 | `--mode` | `tournament` | `tournament` or `examples` |
 | `--tournament` | `fall-2026-ai` (Fall FutureEval 2026) | One or more tournament aliases or raw integer IDs |
 | `--no-submit` | off | Dry run; no forecasts or comments are posted |
-| `--num-runs` | `3` | Number of LLM runs per question; must be at least 1 |
-| `--token-limit`, `--cost-limit` | `OPENROUTER_COST_HARD_LIMIT_USD` | Optional OpenRouter estimated-token hard limit per question; `0` tracks only |
+| `--num-runs` | `3` | Number of forecast runs per question; must be at least 1 |
+| `--token-limit`, `--cost-limit` | `OPENROUTER_COST_HARD_LIMIT_USD` | Optional estimated-token hard limit per question; `0` tracks only |
 
 ## Tournament aliases
 
@@ -255,9 +359,20 @@ poetry run python forecasting_bot.py --mode tournament --tournament fall-2026-ai
 | `axc-2025` | AXC 2025 |
 | `ai-2027` | AI 2027 |
 
+## Testing
+
+```bash
+python tests/test_route_equivalence.py
+```
+
+Checks that request shaping for the `openrouter` and `openai` presets still
+matches 550 saved request snapshots. Run it after any change to
+`llm_provider.py`; regenerate the snapshots (`--regenerate`) only when a change
+to the requests is intended.
+
 ## Before submitting for real
 
 1. Run with `--no-submit`.
-2. Inspect the generated run folder under `docs/runs/`.
-3. Confirm `METACULUS_TOKEN`, the API key for your `LLM_PROVIDER`, and AskNews credentials are set.
-4. Use `--num-runs 1` while debugging to reduce cost.
+2. Inspect the generated run folder under `docs/runs/`, including `audit.md` for cost.
+3. Confirm the startup check passes: `METACULUS_TOKEN`, AskNews credentials, and a key for every endpoint your chosen models use.
+4. Use `--num-runs 1` while debugging to reduce cost (keeping in mind a single run skips the ensemble).
