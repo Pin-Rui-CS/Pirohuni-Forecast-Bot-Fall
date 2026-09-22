@@ -13,11 +13,19 @@ sent, and ``Authorization`` only for a JWT-shaped key.
 from __future__ import annotations
 
 import os
-from typing import Any, Iterable
+import time
+from typing import Any, Callable, Iterable
 
 import httpx
 
 _UPSERT_BATCH = 500
+# Every operation here is idempotent (uploads overwrite with x-upsert, upserts
+# merge on their conflict key, reads are reads), so a failed request can simply
+# be sent again. A single dropped connection used to fail the whole question
+# ("[Errno 104] Connection reset by peer", run 35721920713, 2026-09-22).
+_ATTEMPTS = 3
+_RETRY_BASE_SECONDS = 2.0
+_RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
 
 
 class SupabaseError(RuntimeError):
@@ -32,8 +40,10 @@ class SupabaseREST:
         *,
         transport: httpx.BaseTransport | None = None,
         timeout: float = 60.0,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.url = url.rstrip("/")
+        self._sleep = sleep
         headers = {"apikey": key}
         if key.startswith("eyJ"):  # legacy JWT service-role key
             headers["Authorization"] = f"Bearer {key}"
@@ -71,6 +81,23 @@ class SupabaseREST:
             )
         return response
 
+    def _request(self, method: str, url: str, what: str, **kwargs: Any) -> httpx.Response:
+        """Send one request, retrying dropped connections and transient HTTP errors."""
+        for attempt in range(1, _ATTEMPTS + 1):
+            try:
+                response = self._client.request(method, url, **kwargs)
+            except httpx.TransportError as exc:
+                if attempt == _ATTEMPTS:
+                    raise SupabaseError(
+                        f"{what} failed after {_ATTEMPTS} attempts: "
+                        f"{type(exc).__name__}: {exc}"
+                    ) from exc
+            else:
+                if response.status_code not in _RETRY_STATUS or attempt == _ATTEMPTS:
+                    return self._check(response, what)
+            self._sleep(_RETRY_BASE_SECONDS * 2 ** (attempt - 1))
+        raise AssertionError("unreachable")
+
     def upsert(self, table: str, rows: Iterable[dict], on_conflict: str) -> int:
         """Insert-or-update rows keyed on ``on_conflict``. Returns rows sent.
 
@@ -89,24 +116,27 @@ class SupabaseREST:
         return sent
 
     def _upsert_batch(self, table: str, rows: list[dict], on_conflict: str) -> int:
-        response = self._client.post(
+        self._request(
+            "POST",
             f"/rest/v1/{table}",
+            f"upsert of {len(rows)} rows into {table}",
             params={"on_conflict": on_conflict},
             json=rows,
             headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
         )
-        self._check(response, f"upsert into {table}")
         return len(rows)
 
     def select(self, relation: str, params: dict[str, Any]) -> list[dict]:
-        response = self._client.get(f"/rest/v1/{relation}", params=params)
-        return self._check(response, f"select from {relation}").json()
+        return self._request(
+            "GET", f"/rest/v1/{relation}", f"select from {relation}", params=params
+        ).json()
 
     def upload(self, bucket: str, path: str, data: bytes, content_type: str) -> None:
         """Write one file, replacing any existing object at ``path``."""
-        response = self._client.post(
+        self._request(
+            "POST",
             f"/storage/v1/object/{bucket}/{path}",
+            f"upload {bucket}/{path} ({len(data):,} bytes)",
             content=data,
             headers={"Content-Type": content_type, "x-upsert": "true"},
         )
-        self._check(response, f"upload {bucket}/{path}")

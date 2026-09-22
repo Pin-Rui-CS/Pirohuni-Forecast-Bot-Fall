@@ -12,14 +12,19 @@ name: Test Metaculus Cup questions
           - "repo default"
           - "openrouter"
           - "openai"
-      research_routing:
-        description: "Research models. paid = current Sonnet/Opus. qwen = tested research tasks on free SoCLaaS Qwen (XHigh, Medium on failure), evidence plan kept on Sonnet, brief prompt v3; research takes ~45-70 min. Forecasters are unchanged either way."
+      research_models:
+        description: "SETTING 1 - research (everything before the forecast). original = paid Sonnet/Opus, no Qwen. qwen = the tested Qwen setup (free; evidence plan stays on Sonnet; ~45-70 min)."
         required: true
-        default: "paid"
+        default: "original"
         type: choice
         options:
-          - "paid"
+          - "original"
           - "qwen"
+      forecasters:
+        description: "SETTING 2 - forecast models, comma-separated, one forecast run per model in this order. The LAST one reads the raw research instead of the brief. e.g. openai/gpt-6-astra, anthropic/claude-opus-5, openai/gpt-5.6-sol, anthropic/claude-sonnet-5, qwen3.8:27b (free)"
+        required: true
+        default: "anthropic/claude-opus-5, openai/gpt-5.6-sol, anthropic/claude-sonnet-5"
+        type: string
       question_id:
         description: "Optional Metaculus question ID. Leave blank to test eligible open Metaculus Cup questions."
         required: false
@@ -33,15 +38,6 @@ name: Test Metaculus Cup questions
         required: true
         default: true
         type: boolean
-      num_runs:
-        description: "LLM runs for this test question"
-        required: true
-        default: "1"
-        type: choice
-        options:
-          - "1"
-          - "2"
-          - "3"
       skip_previously_forecasted:
         description: "Skip if this account has already forecasted the question"
         required: true
@@ -107,6 +103,15 @@ jobs:
       - name: Run Metaculus Cup test
         run: |
           set -o pipefail
+          # Setting 2: one forecast run per listed model; the last listed model
+          # is the raw-research run, the first is the binary tiebreaker.
+          FORECASTER_MODELS="$(echo "$FORECASTERS" | tr -d ' ' | sed 's/,,*/,/g; s/^,//; s/,$//')"
+          if [ -z "$FORECASTER_MODELS" ]; then echo "forecasters input is empty" >&2; exit 1; fi
+          export FORECASTER_MODELS
+          export NUM_RUNS="$(echo "$FORECASTER_MODELS" | awk -F, '{print NF}')"
+          export HETEROGENEOUS_RUN_MODEL="${FORECASTER_MODELS##*,}"
+          export FORECASTER_TIEBREAKER_MODEL="${FORECASTER_MODELS%%,*}"
+          echo "Research models: $RESEARCH_MODELS | forecasters ($NUM_RUNS runs): $FORECASTER_MODELS | raw-research run: $HETEROGENEOUS_RUN_MODEL"
           poetry run python - <<'PY' 2>&1 | tee bot_run.log
           import asyncio
           import os
@@ -270,7 +275,8 @@ jobs:
           QUESTION_ID: ${{ inputs.question_id }}
           POST_ID: ${{ inputs.post_id }}
           SUBMIT_PREDICTION: ${{ inputs.submit }}
-          NUM_RUNS: ${{ inputs.num_runs }}
+          FORECASTERS: ${{ inputs.forecasters }}
+          RESEARCH_MODELS: ${{ inputs.research_models }}
           SKIP_PREVIOUSLY_FORECASTED: ${{ inputs.skip_previously_forecasted }}
           MAX_QUESTIONS: ${{ inputs.max_questions }}
           QUESTION_TYPE: ${{ inputs.question_type }}
@@ -278,8 +284,9 @@ jobs:
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           SOCLAAS_API_KEY: ${{ secrets.SOCLAAS_API_KEY }}
-          TIER1_MODEL: ${{ vars.TIER1_MODEL }}
-          TIER2_MODEL: ${{ vars.TIER2_MODEL }}
+          # TIER1_MODEL / TIER2_MODEL are deliberately NOT passed: they move research
+          # and forecasters together. Here SETTING 1 picks research and SETTING 2
+          # picks forecasters, independently of the repo variables.
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           # Selects which API every LLM call goes to. Precedence:
           # this run's dropdown -> LLM_PROVIDER repo variable -> openrouter.
@@ -303,20 +310,19 @@ jobs:
           ENABLE_TAVILY_RESEARCH: ${{ vars.ENABLE_TAVILY_RESEARCH || 'true' }}
           ENABLE_PREDICTION_MARKET_RESEARCH: ${{ vars.ENABLE_PREDICTION_MARKET_RESEARCH || 'true' }}
           FIRECRAWL_SEARCH_TBS: ${{ vars.FIRECRAWL_SEARCH_TBS || '' }}
-          # research_routing=qwen. On a paid run each is off or the code default
+          # SETTING 1 = qwen. On an original run each is off or the code default
           # (never empty: the timeouts are parsed with int()/float()).
-          # Matches the qwen arm of eval_tools/research_ab.py; see .env.example.
-          QWEN_RESEARCH_LABELS: ${{ inputs.research_routing == 'qwen' && 'recommended' || '' }}
-          QWEN_LADDER: ${{ inputs.research_routing == 'qwen' && '1' || '' }}
-          QWEN_START_EFFORT: ${{ inputs.research_routing == 'qwen' && 'serp-scrape-extract=medium,asknews-filter=medium' || '' }}
-          QWEN_BRIEF_PROMPT: ${{ inputs.research_routing == 'qwen' && 'v3' || '' }}
-          SOCLAAS_PRECOMPRESS_MODE: ${{ inputs.research_routing == 'qwen' && 'experimental' || 'off' }}
-          SOCLAAS_PRECOMPRESS_OVERFLOW: ${{ inputs.research_routing == 'qwen' && 'truncate' || 'pause' }}
-          SOCLAAS_PRECOMPRESS_CHECKS: ${{ inputs.research_routing == 'qwen' && 'advisory' || 'strict' }}
+          QWEN_RESEARCH_LABELS: ${{ inputs.research_models == 'qwen' && 'recommended' || '' }}
+          QWEN_LADDER: ${{ inputs.research_models == 'qwen' && '1' || '' }}
+          QWEN_START_EFFORT: ${{ inputs.research_models == 'qwen' && 'serp-scrape-extract=medium,asknews-filter=medium' || '' }}
+          QWEN_BRIEF_PROMPT: ${{ inputs.research_models == 'qwen' && 'v3' || '' }}
+          SOCLAAS_PRECOMPRESS_MODE: ${{ inputs.research_models == 'qwen' && 'experimental' || 'off' }}
+          SOCLAAS_PRECOMPRESS_OVERFLOW: ${{ inputs.research_models == 'qwen' && 'truncate' || 'pause' }}
+          SOCLAAS_PRECOMPRESS_CHECKS: ${{ inputs.research_models == 'qwen' && 'advisory' || 'strict' }}
           # Qwen research measured 44-67 min per question; the default per-question
           # limit is 20 min (1200). Paid runs keep the defaults.
-          QUESTION_TIMEOUT_SECONDS: ${{ inputs.research_routing == 'qwen' && '10800' || '1200' }}
-          ARTIFACT_RETRY_TIMEOUT_SECONDS: ${{ inputs.research_routing == 'qwen' && '3600' || '150' }}
+          QUESTION_TIMEOUT_SECONDS: ${{ inputs.research_models == 'qwen' && '10800' || '1200' }}
+          ARTIFACT_RETRY_TIMEOUT_SECONDS: ${{ inputs.research_models == 'qwen' && '3600' || '150' }}
 
       - name: Publish run to the forecast library
         # Never fails or blocks forecasting: a no-op until the SUPABASE_*
