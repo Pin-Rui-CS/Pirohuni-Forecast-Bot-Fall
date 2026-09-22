@@ -95,7 +95,7 @@ def _generate_search_queries(question: str) -> list[str]:
             _KALSHI_SCORING_MODEL,
             {"messages": messages, "temperature": 0},
         )
-        content = response.choices[0].message.content.strip()
+        content = (response.choices[0].message.content or "").strip()
         match = re.search(r"\[.*?\]", content, re.DOTALL)
         if match:
             queries = json.loads(match.group())
@@ -343,7 +343,7 @@ def _score_markets(question: str, markets: list[dict]) -> list[float]:
         _KALSHI_SCORING_MODEL,
         {"messages": messages, "temperature": 0},
     )
-    content = response.choices[0].message.content.strip()
+    content = (response.choices[0].message.content or "").strip()
     match = re.search(r"\[[\d\s.,]+\]", content)
     if not match:
         raise ValueError(f"Could not parse scores from model response:\n{content}")

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import datetime
 import logging
+import os
 import re
 from dataclasses import dataclass
 from typing import Iterable
@@ -415,10 +417,58 @@ Section content:
 """.strip()
 
 
+async def review_qwen_precompression(
+    name: str, content: str, target_chars: int, **experiment_options,
+):
+    """Replay the actual compiler prompt on SoCLaaS, without invoking the compiler.
+
+    Does not call Sonnet/Opus, submit forecasts, or accept semantic equivalence.
+    The returned artifacts can be compared with an existing saved baseline.
+    """
+    from qwen_precompression import PrecompressionPaused, generate_candidate
+
+    prompt = _PRECOMPRESS_PROMPT.format(name=name, target_chars=target_chars, content=content)
+    try:
+        candidate = await generate_candidate(
+            name=name, source=content, messages=[{"role": "user", "content": prompt}],
+            **experiment_options,
+        )
+    except HardLimitExceededError as exc:
+        # Avoid the outer compiler's deterministic-brief fallback for this
+        # quality-first experiment; a budget refusal must pause the experiment.
+        raise PrecompressionPaused("Qwen precompression refused by usage budget") from exc
+    research_trace.emit(
+        "precompress", name, candidate.answer or "", status="experimental",
+        meta={"artifact_dir": str(candidate.artifact_dir), "effort": candidate.selected_effort,
+              "semantic_review": "pending", "input_chars": len(content)},
+    )
+    return candidate
+
+
 async def _compress_section_text(name: str, content: str, target_chars: int) -> str | None:
-    """One reader-aware compression call. Returns None on failure so the caller
-    can fall back to a visible (never silent) truncation."""
+    """Compress one section using the selected opt-in policy.
+
+    None keeps the original in the Qwen experiment; the legacy path permits
+    visible truncation. Review mode raises after saving the candidate.
+    """
     from llm_client import call_llm
+    from qwen_precompression import PrecompressionPaused, mode
+
+    qwen_mode = mode()
+    if qwen_mode != "off":
+        candidate = await review_qwen_precompression(name, content, target_chars)
+        if qwen_mode == "review":
+            raise PrecompressionPaused(
+                f"Qwen precompression saved for semantic review: {candidate.artifact_dir}"
+            )
+        if candidate.answer is None:
+            # Keep the original until the complete section budget is checked.
+            # The experimental branch never substitutes a truncation or paid call.
+            return None
+        return (
+            "[Experimental Qwen condensation; mechanical checks passed, "
+            f"semantic fidelity is not certified.]\n{candidate.answer}"
+        )
 
     max_tokens = max(2_000, min(16_000, target_chars // 3))
     try:
@@ -476,9 +526,8 @@ async def _compress_section_text(name: str, content: str, target_chars: int) -> 
         meta={"target_chars": target_chars, "input_chars": len(content)},
     )
     return (
-        f"[Section condensed by a lossless-compression pass from "
-        f"{len(content):,} to {len(compressed):,} chars — duplicates and "
-        f"boilerplate removed; all distinct claims retained.]\n{compressed}"
+        f"[Section condensed from {len(content):,} to {len(compressed):,} chars; "
+        f"preservation of all distinct claims has not been verified.]\n{compressed}"
     )
 
 
@@ -520,6 +569,9 @@ async def _fit_sections_to_budget(
     afterwards is anything cut — and then with a loud in-band marker, never
     silently.
     """
+    from qwen_precompression import PrecompressionPaused, mode
+
+    qwen_mode = mode()
     total = sum(len(content) for _, content in sections)
     if total <= budget:
         return sections
@@ -539,12 +591,20 @@ async def _fit_sections_to_budget(
         key=lambda i: len(fitted[i][1]),
         reverse=True,
     ) + sorted(
-        (i for i in range(len(fitted)) if _is_resolution(i)),
+        (i for i in range(len(fitted)) if _is_resolution(i) and qwen_mode == "off"),
         key=lambda i: len(fitted[i][1]),
         reverse=True,
     )
 
-    calls_left = _MAX_PRECOMPRESS_CALLS
+    # Qwen XHigh finished article-sized inputs (A1 screen, median 235 s) but
+    # timed out on the 80-89k-character production chunks, so the Qwen modes
+    # compress smaller chunks. They are free in money, hence the larger call
+    # allowance, and run concurrently (the SoCLaaS rate gate still applies).
+    if qwen_mode == "off":
+        chunk_chars, calls_left = _PRECOMPRESS_CHUNK_CHARS, _MAX_PRECOMPRESS_CALLS
+    else:
+        chunk_chars = int(os.getenv("SOCLAAS_PRECOMPRESS_CHUNK_CHARS", "25000"))
+        calls_left = int(os.getenv("SOCLAAS_PRECOMPRESS_MAX_CALLS", "12"))
     for index in candidates:
         if _total() <= budget or calls_left <= 0:
             break
@@ -560,29 +620,57 @@ async def _fit_sections_to_budget(
         # A section larger than one compression input is split into chunks;
         # each chunk is its own call against the call budget.
         chunks = [
-            content[i: i + _PRECOMPRESS_CHUNK_CHARS]
-            for i in range(0, len(content), _PRECOMPRESS_CHUNK_CHARS)
+            content[i: i + chunk_chars]
+            for i in range(0, len(content), chunk_chars)
         ]
         per_chunk_target = max(_PRECOMPRESS_MIN_TARGET_CHARS // 2, target // len(chunks))
-        new_parts: list[str] = []
+        new_parts: list[str | None] = [None] * len(chunks)
+        jobs: dict[int, str] = {}
         for idx, chunk in enumerate(chunks):
             if calls_left <= 0 or len(chunk) <= per_chunk_target:
-                new_parts.append(chunk)  # kept raw; final marker pass may cut it
+                new_parts[idx] = chunk  # kept raw; final marker pass may cut it
                 continue
             calls_left -= 1
-            label = name if len(chunks) == 1 else f"{name} (part {idx + 1}/{len(chunks)})"
-            compressed = await _compress_section_text(label, chunk, per_chunk_target)
+            jobs[idx] = name if len(chunks) == 1 else f"{name} (part {idx + 1}/{len(chunks)})"
+        if qwen_mode == "off":
+            results = [await _compress_section_text(label, chunks[idx], per_chunk_target)
+                       for idx, label in jobs.items()]
+        else:
+            # The gateway answered a fifth simultaneous stream with 429 while
+            # four others were streaming (45707 A/B run, 2026-09-21).
+            limit = asyncio.Semaphore(int(os.getenv("SOCLAAS_PRECOMPRESS_CONCURRENCY", "3")))
+
+            async def bounded(label: str, chunk: str) -> str | None:
+                async with limit:
+                    return await _compress_section_text(label, chunk, per_chunk_target)
+
+            results = await asyncio.gather(*(
+                bounded(label, chunks[idx]) for idx, label in jobs.items()
+            ))
+        for (idx, label), compressed in zip(jobs.items(), results):
             if compressed is None:
-                new_parts.append(_visible_truncate(label, chunk, per_chunk_target))
+                new_parts[idx] = (chunks[idx] if qwen_mode != "off"
+                                  else _visible_truncate(label, chunks[idx], per_chunk_target))
             else:
-                new_parts.append(compressed)
-        fitted[index][1] = "\n\n".join(new_parts)
+                new_parts[idx] = compressed
+        fitted[index][1] = "\n\n".join(part for part in new_parts if part is not None)
         logger.info(
             "compiler precompress: section %r %d -> %d chars",
             name, len(content), len(fitted[index][1]),
         )
 
     if _total() > budget:
+        if qwen_mode != "off" and os.getenv("SOCLAAS_PRECOMPRESS_OVERFLOW", "pause").strip().lower() != "truncate":
+            raise PrecompressionPaused(
+                "Experimental Qwen precompression did not fit the compiler budget; "
+                "originals retained. No truncation or paid recovery was attempted."
+            )
+        if qwen_mode != "off":
+            logger.warning(
+                "Qwen precompression left the sections %d chars over budget; "
+                "SOCLAAS_PRECOMPRESS_OVERFLOW=truncate, so the largest research "
+                "section is cut VISIBLY instead of pausing.", _total() - budget,
+            )
         # Still over after the compression budget: cut the largest research
         # section visibly. Resolution sections are never cut here.
         research_indexes = [i for i in range(len(fitted)) if not _is_resolution(i)]
@@ -644,6 +732,8 @@ async def _try_llm_compile(
         cleaned_sections=cleaned_sections,
         artifact_check=artifact_check,
     )
+    if route.endpoint.name == llm_provider.ENDPOINT_SOCLAAS.name:
+        prompt = apply_brief_variant(prompt, os.getenv("QWEN_BRIEF_PROMPT", "").strip() or "base")
 
     client = llm_provider.async_client_for(route)
     messages = [
@@ -735,6 +825,104 @@ async def _try_llm_compile(
     except Exception as exc:
         logger.warning("Research compiler LLM pass failed: %s: %s", type(exc).__name__, exc)
         return None
+
+
+# Qwen-only additions to the brief prompt (QWEN_BRIEF_PROMPT=v2; the Opus path
+# never sees them). Each rule targets a judgment failure seen in the 2026-09-21/22
+# research A/B, written as a general rule: dropping a dated primary value as
+# "conflicting", leaving out evidence present in the input, "no bound" on markets
+# whose condition is entailed, one-sided or unreasoned Balance Checks, and
+# missing named-institution projections toward the resolution date.
+_QWEN_BRIEF_RULES = """
+Additional selection rules (these refine the rules above; where they conflict, these win):
+1. INVENTORY BEFORE SELECTING. Before writing, go through the whole input and note every
+   candidate item that bears on the resolution value: the latest reading of the target
+   and its date; readings of the same series at other dates; rules, schedules and
+   mechanisms; projections or estimates by named institutions for dates at or near the
+   resolution date; market prices; precedents from prior comparable cycles; base rates.
+   Every candidate must end up either as an [E#] item or named, with its URL and a reason,
+   under "Decision-relevant items EXCLUDED" in the Balance Check. Nothing decision-relevant
+   may disappear silently.
+2. A CONFLICT IS NOT A REASON TO EXCLUDE. When dated values of the same measure disagree
+   or look inconsistent (for example an earlier value higher than a later one), keep them
+   as separate items with their own dates and sources and state the discrepancy — movement
+   in both directions is itself evidence about how the series behaves. Exclude a value only
+   when its source is unreliable (unsourced, mislabeled, or contradicted by the
+   authoritative source for the SAME date), and say which.
+3. FORWARD-LOOKING ANCHORS. If the input contains dated projections, milestone forecasts,
+   schedules or issuance/borrowing plans from named institutions that bear on the value at
+   the resolution date, include the most relevant as items, with each projection's date and
+   basis.
+4. PRECEDENTS. If the input describes how the same event, market or series behaved in a
+   prior comparable cycle, include the most relevant such precedent as an item even when it
+   carries no number.
+5. MARKET BOUNDS — CHECK BOTH DIRECTIONS. For each market whose condition differs from this
+   question's, write one line of entailment before the verdict: if this question's outcome
+   implies the market's event, the market price is a CEILING on that outcome's probability;
+   if the market's event implies the outcome, it is a FLOOR. Example: question "Will team T
+   win the final?", market "Will team T reach the final?" — winning requires reaching, so
+   the market price is a ceiling on P(T wins). Write "no bound" only after checking both
+   directions and finding neither holds.
+6. BALANCE CHECK WITH REASONS. After each [E#] in the Balance Check, add a short clause
+   saying why it points that way. An item may appear on only one side; if it cuts both
+   ways, place it where it weighs most and say so.
+""".rstrip()
+
+# v3 = v2 with the wording that leaned on the questions v2 was developed on made
+# neutral, so it can be tested on questions it has not seen: rule 1 no longer
+# frames evidence as a numeric time series, rule 2's example is not the 45412
+# month-end debt value, and rule 3 says "announced plans" instead of the fiscal
+# "issuance/borrowing plans". Rules 4-6 are unchanged. v2 stays for comparison
+# with the 2026-09-22 brief prompt A/B (data/brief-prompt-ab/results.md).
+_QWEN_BRIEF_RULES_V3 = """
+Additional selection rules (these refine the rules above; where they conflict, these win):
+1. INVENTORY BEFORE SELECTING. Before writing, go through the whole input and note every
+   candidate item that bears on the resolution: the most recent observed state of whatever
+   the question resolves on, with its date; earlier observed states of the same thing;
+   rules, schedules and mechanisms; projections or expectations by named institutions or
+   experts for dates at or near the resolution date; market prices; precedents from prior
+   comparable cycles; base rates. Every candidate must end up either as an [E#] item or
+   named, with its URL and a reason, under "Decision-relevant items EXCLUDED" in the
+   Balance Check. Nothing decision-relevant may disappear silently.
+2. A CONFLICT IS NOT A REASON TO EXCLUDE. When sources disagree about the same fact —
+   different figures, dates, statuses or outcomes for the same thing — keep each as a
+   separate item with its own date and source and state the discrepancy; how the sources
+   disagree is itself evidence. Exclude an item only when its source is unreliable
+   (unsourced, mislabeled, or contradicted by the authoritative source for the SAME date),
+   and say which.
+3. FORWARD-LOOKING ANCHORS. If the input contains dated projections, forecasts, schedules,
+   announced plans or official timelines from named institutions that bear on the outcome
+   at the resolution date, include the most relevant as items, with each one's date and
+   basis.
+4. PRECEDENTS. If the input describes how the same event, market or series behaved in a
+   prior comparable cycle, include the most relevant such precedent as an item even when it
+   carries no number.
+5. MARKET BOUNDS — CHECK BOTH DIRECTIONS. For each market whose condition differs from this
+   question's, write one line of entailment before the verdict: if this question's outcome
+   implies the market's event, the market price is a CEILING on that outcome's probability;
+   if the market's event implies the outcome, it is a FLOOR. Example: question "Will team T
+   win the final?", market "Will team T reach the final?" — winning requires reaching, so
+   the market price is a ceiling on P(T wins). Write "no bound" only after checking both
+   directions and finding neither holds.
+6. BALANCE CHECK WITH REASONS. After each [E#] in the Balance Check, add a short clause
+   saying why it points that way. An item may appear on only one side; if it cuts both
+   ways, place it where it weighs most and say so.
+""".rstrip()
+
+_BRIEF_VARIANT_RULES = {"v2": _QWEN_BRIEF_RULES, "v3": _QWEN_BRIEF_RULES_V3}
+_BRIEF_OUTPUT_ANCHOR = "\nOutput exactly these Markdown sections:"
+
+
+def apply_brief_variant(prompt: str, variant: str) -> str:
+    """Return the brief prompt for a named variant ("base" leaves it unchanged)."""
+    if variant == "base":
+        return prompt
+    rules = _BRIEF_VARIANT_RULES.get(variant)
+    if rules is None:
+        raise ValueError(f"Unknown QWEN_BRIEF_PROMPT variant {variant!r}")
+    if prompt.count(_BRIEF_OUTPUT_ANCHOR) != 1:
+        raise ValueError("Brief prompt output anchor not found exactly once")
+    return prompt.replace(_BRIEF_OUTPUT_ANCHOR, "\n" + rules + "\n" + _BRIEF_OUTPUT_ANCHOR, 1)
 
 
 def _format_artifact_check(artifact_check: dict | None) -> str:

@@ -12,6 +12,7 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpe
 import llm_provider
 from config import llm_rate_limiter
 from monetary_cost_manager import MonetaryCostManager, count_openrouter_reasoning_tokens
+from qwen_ladder import QwenLadderFailed
 from utils import _get_field, _json_default, _truncate_text
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ async def _create_chat_completion_with_retries(
     request_payload: dict[str, Any],
     validate_response: Callable[[Any], str | None],
     route: Any = None,
+    deliberate: bool = False,
 ) -> Any:
     route = route or llm_provider.route_for(model, label=label)
     client = llm_provider.async_client_for(route)
@@ -69,7 +71,9 @@ async def _create_chat_completion_with_retries(
             )
             try:
                 response = await client.chat.completions.create(
-                    **llm_provider.build_kwargs(route, request_payload)
+                    **llm_provider.build_kwargs(
+                        route, request_payload, deliberate=deliberate
+                    )
                 )
             except (APIConnectionError, APIStatusError, APITimeoutError, RateLimitError) as exc:
                 llm_provider.note_failure(route, exc)
@@ -89,6 +93,12 @@ async def _create_chat_completion_with_retries(
                         f"{provider} request failed for {label}: {problem}"
                     ) from exc
                 retry_after_exception = True
+            except QwenLadderFailed as exc:
+                # The ladder already spent its XHigh and Medium attempts;
+                # resending it from here would triple that. Fail the call.
+                usage_handle.record_output(str(exc))
+                logger.warning("[%s] %s Qwen ladder failed: %s", provider, label, exc)
+                raise
 
         if retry_after_exception:
             await asyncio.sleep(_retry_delay_seconds(attempt))
@@ -288,6 +298,7 @@ async def call_llm(
     cache_static_prefix: bool = False,
     max_tokens: int | None = None,
     raise_on_truncation: bool = False,
+    deliberate: bool = False,
 ) -> str | tuple[str, str]:
     """Call the LLM via the provider selected by ``LLM_PROVIDER``.
 
@@ -297,6 +308,10 @@ async def call_llm(
     compiler's pre-compression); when None the provider default applies. Under
     OpenAI the cap is grown to cover reasoning tokens -- see
     ``llm_provider.max_completion_tokens_for``.
+
+    ``deliberate=True`` marks a call whose answer is the reasoning itself (the
+    forecast runs and the tiebreaker). On a model that thinks by default, only
+    these calls keep thinking; see ``llm_provider._soclaas_route``.
 
     ``model`` is given in the bot's internal namespace (e.g.
     ``anthropic/claude-opus-5``, which names the *role* as much as the model)
@@ -333,6 +348,7 @@ async def call_llm(
         route=route,
         request_payload=request_payload,
         validate_response=_validate_text_completion_response,
+        deliberate=deliberate,
     )
     choice = response.choices[0]
     answer = choice.message.content

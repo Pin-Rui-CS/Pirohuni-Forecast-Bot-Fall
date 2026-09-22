@@ -368,7 +368,7 @@ async def _summarize_snapshot_history(
         )
     usage_handle.record_response(response)
     _log_openrouter_call("resolution-scraper/wayback-history", model, route)
-    return response.choices[0].message.content.strip()
+    return (response.choices[0].message.content or "").strip()
 
 
 async def _build_wayback_history_section(
@@ -452,7 +452,13 @@ async def _llm_summarize(
         )
     usage_handle.record_response(response)
     _log_openrouter_call("resolution-scraper/page-summary", model, route)
-    return response.choices[0].message.content.strip()
+    content = (response.choices[0].message.content or "").strip()
+    if not content:
+        # Raised rather than returned, so the caller's heuristic fallback
+        # names the cause instead of "'NoneType' object has no attribute".
+        finish = response.choices[0].finish_reason
+        raise ValueError(f"page-summary returned no content (finish_reason={finish})")
+    return content
 
 
 # ===========================================================================

@@ -504,7 +504,14 @@ ENDPOINT_SOCLAAS: Final = Endpoint(
     (os.getenv("SOCLAAS_BASE_URL") or "https://soclaas-api.comp.nus.edu.sg/v1").rstrip("/"),
     "SOCLAAS_API_KEY",
     requests_per_minute=24.0,
-    timeout_seconds=180.0,
+    # Deliberately ABOVE the gateway's own cut-off, not below it. The gateway
+    # ends any request at ~300 s with a 502 (measured 2026-09-15: long xhigh
+    # completions failed at 300.4 s). A client timeout under that -- this was
+    # 180 s -- abandons calls that were still generating and would have
+    # finished; each abandoned call was then resent from scratch (run
+    # 2026-09-15_03-10 lost ~9 minutes that way). Above it, our timeout only
+    # fires on a dead connection, and the gateway's 502 names the real limit.
+    timeout_seconds=330.0,
     probe_on_start=True,
 )
 
@@ -527,6 +534,12 @@ class Route:
     uses_max_completion_tokens: bool = False
     reasoning_effort: str | None = None
     reasoning_effort_env_aware: bool = False
+    # For models that THINK BY DEFAULT and whose thinking is not accounted as
+    # reasoning (Qwen3.8 on SoCLaaS returns it in `message.reasoning`). Such a
+    # model thinks through every call unless told not to, so the default here
+    # is off and only calls that ask to deliberate keep it -- see build_kwargs.
+    thinks_unless_disabled: bool = False
+    deliberate_headroom_tokens: int = 0
     reasoning_headroom_tokens: int = 0
     max_output_tokens_ceiling: int = MAX_COMPLETION_TOKENS_CEILING
     supports_cache_control: bool = False
@@ -678,12 +691,26 @@ def _gpt6_openrouter_route(model_id: str) -> Route:
 
 
 def _soclaas_route(model_id: str) -> Route:
-    """An open-weight model on the gateway: free in money, metered in quota."""
+    """An open-weight model on the gateway: free in money, metered in quota.
+
+    THINKING IS OFF UNLESS A CALL DELIBERATES. Qwen3.8 thinks by default, at
+    ~70 tok/s on the gateway. Run 2026-09-15_03-10 (Q45707) never left
+    research: tavily-url-ranking spent 124 s producing 8,815 tokens for a JSON
+    list, three calls hit the 180 s timeout and were retried from scratch, and
+    page-summary spent its whole 3,500-token cap thinking and returned no
+    content. The question hit the 20-minute limit. Measured on the same
+    ranking prompt with `reasoning_effort: "none"`: 14.6 s, 896 tokens, valid
+    JSON -- though it selected 8 URLs where thinking selected 17, all 8 among
+    the 17. Research plumbing takes that trade; forecasts do not, so forecast
+    and tiebreaker calls pass deliberate=True and keep thinking.
+    """
     return Route(
         endpoint=ENDPOINT_SOCLAAS,
         model_id=model_id,
         accepts_temperature=True,      # open-weight model; verified accepted
         uses_max_completion_tokens=False,
+        thinks_unless_disabled=True,
+        deliberate_headroom_tokens=16_000,
         supports_cache_control=False,
         # The gateway is OpenAI-compatible and has no OpenRouter usage
         # extension; sending one would be an unrecognised body argument.
@@ -867,6 +894,64 @@ def _fallback_route(model: str) -> Route:
     return route
 
 
+# --- Research tasks on Qwen: one env var, by call-site label ----------------
+# QWEN_RESEARCH_LABELS moves individual research call sites to SoCLaaS Qwen
+# without touching TIER2_MODEL, which would also move the forecaster ensemble.
+# A comma list of labels; an entry ending in "/" matches every label under it
+# ("kalshi/"). "tested" names every research task the SoCLaaS quality
+# investigation evaluated (docs/diagnostics, consolidated report section 5.3);
+# "recommended" is the same minus the evidence plan (see below).
+# The Wikipedia adapter is the one research task it never tested, so it is
+# deliberately absent. Unset means routing is unchanged.
+QWEN_RESEARCH_MODEL: Final = "qwen3.8:27b"
+QWEN_TESTED_RESEARCH_LABELS: Final[tuple[str, ...]] = (
+    "asknews-filter",
+    "evidence-plan",
+    "artifact-check",
+    "google-query-generation",
+    "serp-url-ranking",
+    "tavily-url-ranking",
+    "firecrawl-url-ranking",
+    "serp-scrape-extract",
+    "kalshi/",
+    "manifold/",
+    "polymarket/",
+    "resolution-scraper/page-summary",
+    "resolution-scraper/wayback-history",
+    "compiler/precompress",
+    "compiler/research-brief",
+)
+
+
+# "recommended" keeps the evidence plan on its paid model. In the 2026-09-21
+# research A/B, Qwen's plan made a background example the research target
+# (45707) and every later search followed it; the plan costs ~$0.04 a question.
+QWEN_RECOMMENDED_RESEARCH_LABELS: Final[tuple[str, ...]] = tuple(
+    label for label in QWEN_TESTED_RESEARCH_LABELS if label != "evidence-plan"
+)
+
+
+def qwen_research_labels() -> tuple[str, ...]:
+    """The label patterns QWEN_RESEARCH_LABELS selects. Read live."""
+    raw = (os.getenv("QWEN_RESEARCH_LABELS") or "").strip()
+    if not raw:
+        return ()
+    if raw.lower() == "tested":
+        return QWEN_TESTED_RESEARCH_LABELS
+    if raw.lower() == "recommended":
+        return QWEN_RECOMMENDED_RESEARCH_LABELS
+    return tuple(entry.strip() for entry in raw.split(",") if entry.strip())
+
+
+def _qwen_label_override(label: str | None) -> str | None:
+    if not label:
+        return None
+    for pattern in qwen_research_labels():
+        if label == pattern or (pattern.endswith("/") and label.startswith(pattern)):
+            return QWEN_RESEARCH_MODEL
+    return None
+
+
 def route_for(model: str, *, label: str | None = None) -> Route:
     """Internal role name (or a concrete id) -> Route. Never raises.
 
@@ -880,7 +965,11 @@ def route_for(model: str, *, label: str | None = None) -> Route:
     if hit is not None:
         return hit
     profile = active_profile()
-    name = profile.label_overrides.get(label or "", model)
+    name = (
+        profile.label_overrides.get(label or "")
+        or _qwen_label_override(label)
+        or model
+    )
     route = (
         profile.routes.get(name)
         or _reverse_index(profile).get(name)
@@ -960,10 +1049,15 @@ def preflight() -> list[str]:
     return problems
 
 
-def build_kwargs(route: Route, payload: dict[str, Any]) -> dict[str, Any]:
+def build_kwargs(
+    route: Route, payload: dict[str, Any], *, deliberate: bool = False
+) -> dict[str, Any]:
     """Complete kwargs for ``chat.completions.create``, shaped for one Route.
 
     Supersedes :func:`chat_kwargs`, which could only ask "is this OpenAI?".
+    ``deliberate`` marks a call whose answer IS the reasoning (a forecast), as
+    opposed to plumbing (ranking, extraction, summaries). It only changes
+    anything on a route with ``thinks_unless_disabled``.
     """
     kwargs: dict[str, Any] = {"model": route.model_id, **payload}
 
@@ -994,12 +1088,21 @@ def build_kwargs(route: Route, payload: dict[str, Any]) -> dict[str, Any]:
         effort = route.reasoning_effort
     if effort:
         kwargs["reasoning_effort"] = effort
+    if route.thinks_unless_disabled and not deliberate:
+        kwargs["reasoning_effort"] = "none"
 
     visible = kwargs.pop("max_tokens", None)
     if visible is not None:
         if route.reasoning_effort_env_aware:
             grown = max_completion_tokens_for(
                 int(visible), effort or DEFAULT_REASONING_EFFORT
+            )
+        elif deliberate and route.thinks_unless_disabled:
+            # max_tokens caps thinking and answer together, so a thinking
+            # call needs the same headroom a reasoning model gets.
+            grown = min(
+                route.max_output_tokens_ceiling,
+                max(1, int(visible)) + route.deliberate_headroom_tokens,
             )
         elif route.reasoning_headroom_tokens or route.uses_max_completion_tokens:
             grown = min(
@@ -1035,10 +1138,24 @@ _sync_clients: dict[str, Any] = {}
 _client_lock = threading.Lock()
 
 
+def _ladder_client(route: Route, sync: bool):
+    """The XHigh-then-Medium client, when QWEN_LADDER=1 and the route is SoCLaaS."""
+    if route.endpoint.name != ENDPOINT_SOCLAAS.name:
+        return None
+    import qwen_ladder  # local import: qwen_ladder imports this module
+
+    if not qwen_ladder.enabled():
+        return None
+    return qwen_ladder.SyncLadderClient(route) if sync else qwen_ladder.AsyncLadderClient(route)
+
+
 def async_client_for(route: Route):
     """Cached AsyncOpenAI for this route's endpoint."""
     from openai import AsyncOpenAI  # local import: keeps openai an optional dep
 
+    ladder = _ladder_client(route, sync=False)
+    if ladder is not None:
+        return ladder
     endpoint = route.endpoint
     # Keyed by event loop as well: an AsyncOpenAI binds its httpx pool to the
     # loop that created it. Production runs one asyncio.run(), but eval_tools
@@ -1068,6 +1185,9 @@ def sync_client_for(route: Route):
     """
     from openai import OpenAI
 
+    ladder = _ladder_client(route, sync=True)
+    if ladder is not None:
+        return ladder
     endpoint = route.endpoint
     with _client_lock:
         client = _sync_clients.get(endpoint.name)

@@ -46,11 +46,26 @@ bot_run.log
 # (standalone package; nothing in the main pipeline imports it)
 feedback_loop/
 
-# Scratch test scripts at the repo root (tests/ itself is committed)
+# Scratch test scripts at the repo root
 test_serp_research.py
 test_adapter.py
 test_manifold_market_api.py
 prompt_preview.py
+
+# Not part of the bot: tests, evaluation tools and working documentation stay local.
+tests/
+# eval_tools/ is local except the scripts the workflows run (publish_runs.py in
+# every forecast workflow, score_outcomes.py in score-outcomes.yaml) and the two
+# modules they import.
+eval_tools/*
+!eval_tools/publish_runs.py
+!eval_tools/score_outcomes.py
+!eval_tools/score_forecasts.py
+!eval_tools/supabase_rest.py
+CAPABILITIES.md
+INCIDENTS.md
+SOCLAAS.md
+task-breakdown-44879-44880.md
 
 # Claude Code local config
 .claude/

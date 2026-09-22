@@ -258,8 +258,23 @@ class MonetaryCostManager:
 
     @property
     def current_usage(self) -> float:
-        """Backward-compatible numeric usage value: total estimated tokens."""
-        return float(self.total_tokens)
+        """Estimated tokens that count against the hard limits (paid calls only)."""
+        return float(self.budgeted_input_tokens + self.budgeted_output_tokens)
+
+    # The hard limits and the compile/forecast reserve exist to bound PAID
+    # spend. A free quota route (SoCLaaS Qwen) spends allowance, not money, so
+    # its calls stay in the ledger and the totals but not in the budget. The
+    # 45572 A/B run lost its focused artifact retry because free Qwen
+    # extraction cycles had used up a reserve meant for paid calls.
+    @property
+    def budgeted_input_tokens(self) -> int:
+        with self._lock:
+            return sum(r.input_tokens for r in self._records if r.cost_source != "quota")
+
+    @property
+    def budgeted_output_tokens(self) -> int:
+        with self._lock:
+            return sum(r.output_tokens for r in self._records if r.cost_source != "quota")
 
     @property
     def amount_left(self) -> float:
@@ -400,6 +415,7 @@ class MonetaryCostManager:
             f"  endpoints_used: {self.endpoints_used}",
             f"  output_token_hard_limit: {self.output_token_hard_limit}",
             f"  total_tokens: {self.total_tokens}",
+            f"  budgeted_tokens: {int(self.current_usage)}  # paid routes only; what the hard limits count",
             f"  total_token_hard_limit: {self.hard_limit}",
             f"  total_llm_call_seconds: {sum(r.duration_seconds for r in records):.1f}  # sum of per-call durations; parallel calls overlap in wall time",
             "  table: |",
@@ -431,7 +447,7 @@ class MonetaryCostManager:
             research_budget = (
                 manager.input_token_hard_limit - manager.reserved_input_tokens
             )
-            if manager.total_input_tokens + estimated_input_tokens > research_budget:
+            if manager.budgeted_input_tokens + estimated_input_tokens > research_budget:
                 return True
         return False
 
@@ -444,7 +460,7 @@ class MonetaryCostManager:
             raise ValueError("amount_to_check_room_for must be positive or zero")
         for manager in cls._active_managers.get():
             next_total_input_tokens = (
-                manager.total_input_tokens + amount_to_check_room_for
+                manager.budgeted_input_tokens + amount_to_check_room_for
             )
             if (
                 manager.input_token_hard_limit
@@ -479,8 +495,6 @@ class MonetaryCostManager:
     ) -> OpenRouterUsageHandle:
         input_characters = count_serialized_characters(input_payload)
         input_tokens = estimate_tokens_from_characters(input_characters)
-        cls.raise_error_if_limit_would_be_reached(input_tokens)
-
         # Resolve the same route llm_client will use, so the ledger records
         # where the call actually went rather than where the default profile
         # would have sent it. route_for never raises; a name no profile claims
@@ -489,6 +503,13 @@ class MonetaryCostManager:
             route = llm_provider.route_for(model, label=name_of_task)
         except Exception:  # noqa: BLE001 - accounting must never sink a call
             route = None
+        if getattr(route, "cost_source", None) != "quota":
+            cls.raise_error_if_limit_would_be_reached(input_tokens)
+        # Every call site starts its ledger row immediately before create();
+        # the Qwen ladder reads this to know which task it is serving.
+        import qwen_ladder
+
+        qwen_ladder.current_label.set(name_of_task)
 
         records: list[OpenRouterUsageRecord] = []
         for manager in cls._active_managers.get():
@@ -526,10 +547,10 @@ class MonetaryCostManager:
         for manager in cls._active_managers.get():
             if (
                 manager.output_token_hard_limit
-                and manager.total_output_tokens > manager.output_token_hard_limit
+                and manager.budgeted_output_tokens > manager.output_token_hard_limit
             ):
                 raise HardLimitExceededError(
-                    f"Estimated output token usage reached {manager.total_output_tokens}, "
+                    f"Estimated output token usage reached {manager.budgeted_output_tokens}, "
                     f"exceeding the output token hard limit of "
                     f"{manager.output_token_hard_limit}"
                 )

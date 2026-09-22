@@ -170,6 +170,7 @@ async def gather_forecast_runs(
             _label=sublabel,
             return_transcript=True,
             max_tokens=FORECAST_MAX_OUTPUT_TOKENS,
+            deliberate=True,
         )
 
     def _short_error(exc: Exception) -> str:

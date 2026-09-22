@@ -355,6 +355,7 @@ async def get_binary_gpt_prediction(
             _label="binary-tiebreaker",
             cache_static_prefix=True,
             max_tokens=FORECAST_MAX_OUTPUT_TOKENS,
+            deliberate=True,
         )
         final_probability = extract_probability_from_response_as_percentage_not_decimal(
             final_rationale
