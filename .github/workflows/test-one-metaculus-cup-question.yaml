@@ -20,33 +20,46 @@ name: Test Metaculus Cup questions
         options:
           - "original"
           - "qwen"
-      # SETTING 2 - forecasters. One forecast run per ticked model, in this order;
-      # the LAST ticked model reads the raw research instead of the brief.
+      # SETTING 2 - forecasters. Each ticked model makes one forecast from the
+      # compiled brief; raw_research_forecaster adds one run on the raw research.
+      # Defaults reproduce the original ensemble: Opus + Sol (brief), Sonnet (raw).
       forecaster_gpt6_astra:
-        description: "SETTING 2 - forecasters (tick any; one run each, in this order; the last ticked reads the raw research). GPT-6 Astra"
+        description: "Forecaster (reads the brief): GPT-6 Astra (~5x Opus per token)"
         required: true
         default: false
         type: boolean
       forecaster_claude_opus:
-        description: "Claude Opus 5"
+        description: "Forecaster (reads the brief): Claude Opus 5"
         required: true
         default: true
         type: boolean
       forecaster_gpt56_sol:
-        description: "GPT-5.6 Sol"
+        description: "Forecaster (reads the brief): GPT-5.6 Sol"
         required: true
         default: true
         type: boolean
       forecaster_claude_sonnet:
-        description: "Claude Sonnet 5"
-        required: true
-        default: true
-        type: boolean
-      forecaster_qwen:
-        description: "Qwen 3.8 27B (free)"
+        description: "Forecaster (reads the brief): Claude Sonnet 5"
         required: true
         default: false
         type: boolean
+      forecaster_qwen:
+        description: "Forecaster (reads the brief): Qwen 3.8 27B (free)"
+        required: true
+        default: false
+        type: boolean
+      raw_research_forecaster:
+        description: "Raw-research forecaster: one extra run that reads the raw research instead of the brief (catches evidence the brief dropped)"
+        required: true
+        default: "Claude Sonnet 5"
+        type: choice
+        options:
+          - "Claude Sonnet 5"
+          - "Claude Opus 5"
+          - "GPT-5.6 Sol"
+          - "GPT-6 Astra"
+          - "Qwen 3.8 27B (free)"
+          - "none"
       question_id:
         description: "Optional Metaculus question ID. Leave blank to test eligible open Metaculus Cup questions."
         required: false
@@ -125,21 +138,37 @@ jobs:
       - name: Run Metaculus Cup test
         run: |
           set -o pipefail
-          # Setting 2: one forecast run per ticked model, in checkbox order; the
-          # last ticked model is the raw-research run, the first the binary tiebreaker.
+          # Setting 2: one brief run per ticked model, in checkbox order (the first
+          # is also the binary tiebreaker), plus one raw-research run on the dropdown
+          # model. forecasters.base.heterogeneous_run_setup swaps the LAST run onto
+          # HETEROGENEOUS_RUN_MODEL with the raw research, so that run is added as
+          # run N+1 rather than replacing a ticked model.
           MODELS=()
           [ "$FC_GPT6_ASTRA" = "true" ] && MODELS+=("openai/gpt-6-astra")
           [ "$FC_CLAUDE_OPUS" = "true" ] && MODELS+=("anthropic/claude-opus-5")
           [ "$FC_GPT56_SOL" = "true" ] && MODELS+=("openai/gpt-5.6-sol")
           [ "$FC_CLAUDE_SONNET" = "true" ] && MODELS+=("anthropic/claude-sonnet-5")
           [ "$FC_QWEN" = "true" ] && MODELS+=("qwen3.8:27b")
-          if [ "${#MODELS[@]}" -eq 0 ]; then echo "Tick at least one forecaster model." >&2; exit 1; fi
-          FORECASTER_MODELS="$(IFS=,; echo "${MODELS[*]}")"
-          export FORECASTER_MODELS
-          export NUM_RUNS="$(echo "$FORECASTER_MODELS" | awk -F, '{print NF}')"
-          export HETEROGENEOUS_RUN_MODEL="${FORECASTER_MODELS##*,}"
-          export FORECASTER_TIEBREAKER_MODEL="${FORECASTER_MODELS%%,*}"
-          echo "Research models: $RESEARCH_MODELS | forecasters ($NUM_RUNS runs): $FORECASTER_MODELS | raw-research run: $HETEROGENEOUS_RUN_MODEL"
+          if [ "${#MODELS[@]}" -eq 0 ]; then echo "Tick at least one brief forecaster." >&2; exit 1; fi
+          case "$RAW_FORECASTER" in
+            "Claude Sonnet 5") RAW_MODEL="anthropic/claude-sonnet-5" ;;
+            "Claude Opus 5") RAW_MODEL="anthropic/claude-opus-5" ;;
+            "GPT-5.6 Sol") RAW_MODEL="openai/gpt-5.6-sol" ;;
+            "GPT-6 Astra") RAW_MODEL="openai/gpt-6-astra" ;;
+            "Qwen 3.8 27B (free)") RAW_MODEL="qwen3.8:27b" ;;
+            "none") RAW_MODEL="" ;;
+            *) echo "Unknown raw_research_forecaster: $RAW_FORECASTER" >&2; exit 1 ;;
+          esac
+          export FORECASTER_MODELS="$(IFS=,; echo "${MODELS[*]}")"
+          export FORECASTER_TIEBREAKER_MODEL="${MODELS[0]}"
+          if [ -n "$RAW_MODEL" ]; then
+            export HETEROGENEOUS_RUN_ENABLED=true HETEROGENEOUS_RUN_MODEL="$RAW_MODEL"
+            export NUM_RUNS=$(( ${#MODELS[@]} + 1 ))
+          else
+            export HETEROGENEOUS_RUN_ENABLED=false
+            export NUM_RUNS=${#MODELS[@]}
+          fi
+          echo "Research models: $RESEARCH_MODELS | brief forecasters: $FORECASTER_MODELS | raw research: ${RAW_MODEL:-none} | $NUM_RUNS runs"
           poetry run python - <<'PY' 2>&1 | tee bot_run.log
           import asyncio
           import os
@@ -308,6 +337,7 @@ jobs:
           FC_GPT56_SOL: ${{ inputs.forecaster_gpt56_sol }}
           FC_CLAUDE_SONNET: ${{ inputs.forecaster_claude_sonnet }}
           FC_QWEN: ${{ inputs.forecaster_qwen }}
+          RAW_FORECASTER: ${{ inputs.raw_research_forecaster }}
           RESEARCH_MODELS: ${{ inputs.research_models }}
           SKIP_PREVIOUSLY_FORECASTED: ${{ inputs.skip_previously_forecasted }}
           MAX_QUESTIONS: ${{ inputs.max_questions }}
