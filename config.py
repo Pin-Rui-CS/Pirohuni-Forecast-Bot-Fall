@@ -50,7 +50,7 @@ NUM_RUNS_PER_QUESTION = 3
 #
 # --- Under LLM_PROVIDER=openai ------------------------------------------------
 # The pool below cannot simply be translated model-by-model: llm_provider maps
-# BOTH anthropic/claude-opus-5 and openai/gpt-5.6-sol onto gpt-5.6-sol, which
+# BOTH anthropic/claude-opus-5.5 and openai/gpt-5.6-sol onto gpt-5.6-sol, which
 # would make runs 1 and 2 the same model on the same brief. That is not an
 # ensemble -- and because the GPT-5 models reject `temperature`, the two runs
 # could not even be decorrelated by sampling. The OpenAI pool is therefore a
@@ -87,7 +87,7 @@ HETEROGENEOUS_RUN_MODEL = os.getenv(
 # --- Forecast output cap -----------------------------------------------------
 # Ceiling on VISIBLE output tokens for a forecast run and for the binary
 # tiebreaker. Until now these were the only Tier-1 calls in the repo sending no
-# cap at all, which was harmless on Opus-5 ($25/1M out) and is not on a
+# cap at all, which was harmless on Opus-5/5.5 ($25 and $20/1M out) and is not on a
 # reasoning model priced at $50/1M with a 128K completion limit: one run could
 # bill more than a whole question is budgeted for.
 #

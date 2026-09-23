@@ -85,7 +85,7 @@ Any per-question failure is reported and then causes the process to exit with a 
 
 ## Choosing models
 
-Every LLM call names a **role**, not a vendor: `anthropic/claude-opus-5` means
+Every LLM call names a **role**, not a vendor: `anthropic/claude-opus-5.5` means
 "the strong model" (compiler, forecaster, tiebreaker) and
 `anthropic/claude-sonnet-5` means "the utility model" (every research call).
 Two variables decide which concrete model fills each role:

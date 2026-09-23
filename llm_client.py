@@ -291,7 +291,7 @@ def _user_message(prompt: str, cache_static_prefix: bool, route: Any) -> dict:
 
 async def call_llm(
     prompt: str,
-    model: str = "anthropic/claude-opus-5",
+    model: str = "anthropic/claude-opus-5.5",
     temperature: float = 0.3,
     _label: str = "forecast",
     return_transcript: bool = False,
@@ -314,7 +314,7 @@ async def call_llm(
     these calls keep thinking; see ``llm_provider._soclaas_route``.
 
     ``model`` is given in the bot's internal namespace (e.g.
-    ``anthropic/claude-opus-5``, which names the *role* as much as the model)
+    ``anthropic/claude-opus-5.5``, which names the *role* as much as the model)
     and is translated to the active provider's namespace here, so logs, the
     transcript, and the usage ledger all record what actually ran.
     """

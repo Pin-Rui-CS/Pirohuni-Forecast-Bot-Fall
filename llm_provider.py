@@ -14,7 +14,7 @@ Select a routing mode with one env var::
 existing .env files and CI variables keep working unchanged.
 
 Why a translation layer instead of editing every call site: the bot names its
-models in 18 places across 13 files (``anthropic/claude-opus-5`` for the
+models in 18 places across 13 files (``anthropic/claude-opus-5.5`` for the
 forecaster/compiler/tiebreaker roles, ``anthropic/claude-sonnet-5`` for the
 research utilities). Those names carry the *role*, not a vendor commitment.
 ``route_for`` maps them onto a concrete endpoint and id at the client boundary,
@@ -154,9 +154,11 @@ def base_url() -> str:
 # OpenAI model that plays that role. Chosen on measured cost parity -- the
 # ledger for question 44875 solves exactly to $2/$10 for claude-sonnet-5 and
 # $5/$25 for claude-opus-5, so sol ($5/$30) and terra ($2/$12) are near-swaps
-# rather than a step change in spend.
+# rather than a step change in spend. The Tier-1 role moved to
+# claude-opus-5.5 ($4/$20) on 2026-09-23, so sol is now the pricier side of
+# that swap on output; it stays the closest OpenAI equivalent.
 MODEL_TRANSLATION: Final[dict[str, str]] = {
-    "anthropic/claude-opus-5": "gpt-5.6-sol",
+    "anthropic/claude-opus-5.5": "gpt-5.6-sol",
     "anthropic/claude-sonnet-5": "gpt-5.6-terra",
     # Already-OpenAI names: strip the OpenRouter vendor prefix.
     "openai/gpt-5.6-sol": "gpt-5.6-sol",
@@ -312,7 +314,8 @@ PRICES: Final[dict[str, tuple[float, float, float]]] = {
     # what a wrong-key lookup would hide.
     #
     # Output is 5x the input rate here, inverting the assumption the rest of
-    # this repo was tuned under (Opus-5 at $5/$25, where input dominated).
+    # this repo was tuned under (Opus-5 at $5/$25, now Opus-5.5 at $4/$20,
+    # where input dominated).
     # Output caps, not input budgets, are the cost control for these models.
     #
     # Routing to the OpenAI Flex endpoint halves both rates to $5/$25. That is
@@ -576,7 +579,7 @@ class Profile:
 # Internal role-carrying names the bot uses. Every profile must answer for all
 # of them, so a missing route is a build-time error rather than a 404 mid-run.
 INTERNAL_MODEL_NAMES: Final[tuple[str, ...]] = (
-    "anthropic/claude-opus-5",
+    "anthropic/claude-opus-5.5",
     "anthropic/claude-sonnet-5",
     "openai/gpt-5.6-sol",
     "openai/gpt-5.6-terra",
@@ -602,7 +605,7 @@ INTERNAL_MODEL_NAMES: Final[tuple[str, ...]] = (
 #
 # Unset means unchanged: LLM_ROUTING still selects a legacy preset, and each
 # role name keeps routing to itself. The overrides are a layer on top.
-TIER1_ROLE: Final = "anthropic/claude-opus-5"
+TIER1_ROLE: Final = "anthropic/claude-opus-5.5"
 TIER2_ROLE: Final = "anthropic/claude-sonnet-5"
 TIER1_ROLE_NAMES: Final[frozenset[str]] = frozenset(
     {TIER1_ROLE, "openai/gpt-5.6-sol"}
@@ -794,15 +797,15 @@ def _openrouter_profile() -> Profile:
     return _apply_tier_choice(Profile(
         name=PROVIDER_OPENROUTER,
         routes={name: _openrouter_route(name) for name in INTERNAL_MODEL_NAMES},
-        default_forecaster="anthropic/claude-opus-5",
-        forecaster_pool=("anthropic/claude-opus-5", "openai/gpt-5.6-sol"),
+        default_forecaster="anthropic/claude-opus-5.5",
+        forecaster_pool=("anthropic/claude-opus-5.5", "openai/gpt-5.6-sol"),
         heterogeneous_model="anthropic/claude-sonnet-5",
     ))
 
 
 def _openai_profile() -> Profile:
     # The pool is a capability ladder, not a lineage mix: MODEL_TRANSLATION
-    # maps BOTH anthropic/claude-opus-5 and openai/gpt-5.6-sol onto
+    # maps BOTH anthropic/claude-opus-5.5 and openai/gpt-5.6-sol onto
     # gpt-5.6-sol, so a lineage pool would make runs 1 and 2 the same model on
     # the same brief -- and temperature is dropped here, so they could not even
     # be decorrelated by sampling. Accepted cost of a single-vendor setup.
@@ -854,7 +857,7 @@ def _reverse_index(profile: Profile) -> dict[str, Route]:
     """Concrete ``model_id`` -> Route, for callers that resolved early.
 
     Several internal names can share one concrete id (under the OpenAI profile
-    both ``anthropic/claude-opus-5`` and ``openai/gpt-5.6-sol`` become
+    both ``anthropic/claude-opus-5.5`` and ``openai/gpt-5.6-sol`` become
     ``gpt-5.6-sol``). That is fine while they share a policy; it is a genuine
     ambiguity if they ever do not, so say so loudly rather than picking one.
     """
