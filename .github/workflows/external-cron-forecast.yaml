@@ -59,9 +59,9 @@ name: Forecast via external cron
         default: false
         type: boolean
       raw_research_forecaster:
-        description: "Raw-research forecaster: one extra run that reads the raw research instead of the brief (catches evidence the brief dropped)"
+        description: "Raw-research forecaster: one extra run that reads the raw research instead of the brief (catches evidence the brief dropped). Qwen is free."
         required: false
-        default: "Claude Sonnet 5"
+        default: "Qwen 3.8 27B (free)"
         type: choice
         options:
           - "Claude Sonnet 5"
@@ -181,7 +181,7 @@ jobs:
           # Fallbacks = the input defaults, in case a cron call arrives without them.
           FC_GPT6_ASTRA="${FC_GPT6_ASTRA:-true}"; FC_CLAUDE_OPUS="${FC_CLAUDE_OPUS:-true}"
           FC_GPT56_SOL="${FC_GPT56_SOL:-true}"; FC_CLAUDE_SONNET="${FC_CLAUDE_SONNET:-false}"
-          FC_QWEN="${FC_QWEN:-false}"
+          FC_QWEN="${FC_QWEN:-false}"; RAW_FORECASTER="${RAW_FORECASTER:-Qwen 3.8 27B (free)}"
           MODELS=()
           [ "$FC_GPT6_ASTRA" = "true" ] && MODELS+=("openai/gpt-6-astra")
           [ "$FC_CLAUDE_OPUS" = "true" ] && MODELS+=("anthropic/claude-opus-5.5")
@@ -259,13 +259,19 @@ jobs:
           DISPATCH_NUM_RUNS: ${{ inputs.num_runs }}
           DISPATCH_COST_LIMIT: ${{ inputs.cost_limit }}
           DISPATCH_NO_SUBMIT: ${{ inputs.no_submit && 'true' || 'false' }}
+          # How many questions run at once. Unset in code means unbounded, which
+          # with Qwen research (~1 h/question behind a 24 req/min gate) leaves later
+          # questions queueing until their own timeout fires. 2 fits ~12 questions
+          # in GitHub's 6 h job limit; the next cron run picks up the rest, because
+          # already-forecast questions are skipped.
+          QUESTION_CONCURRENCY: ${{ vars.QUESTION_CONCURRENCY || '2' }}
           # SETTING 2 (inputs a cron call omits take their defaults).
           FC_GPT6_ASTRA: ${{ inputs.forecaster_gpt6_astra }}
           FC_CLAUDE_OPUS: ${{ inputs.forecaster_claude_opus }}
           FC_GPT56_SOL: ${{ inputs.forecaster_gpt56_sol }}
           FC_CLAUDE_SONNET: ${{ inputs.forecaster_claude_sonnet }}
           FC_QWEN: ${{ inputs.forecaster_qwen }}
-          RAW_FORECASTER: ${{ inputs.raw_research_forecaster || 'Claude Sonnet 5' }}
+          RAW_FORECASTER: ${{ inputs.raw_research_forecaster || 'Qwen 3.8 27B (free)' }}
           RESEARCH_MODELS: ${{ inputs.research_models || 'qwen' }}
           # SETTING 1 = qwen. On an original run each is off or the code default
           # (never empty: the timeouts are parsed with int()/float()).
