@@ -798,7 +798,7 @@ def _openrouter_profile() -> Profile:
         name=PROVIDER_OPENROUTER,
         routes={name: _openrouter_route(name) for name in INTERNAL_MODEL_NAMES},
         default_forecaster="anthropic/claude-opus-5.5",
-        forecaster_pool=("anthropic/claude-opus-5.5", "openai/gpt-5.6-sol"),
+        forecaster_pool=("anthropic/claude-opus-5.5", "openai/gpt-6-sol"),
         heterogeneous_model="anthropic/claude-sonnet-5",
     ))
 

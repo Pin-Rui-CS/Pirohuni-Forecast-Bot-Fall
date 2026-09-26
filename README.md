@@ -110,7 +110,7 @@ The ensemble only takes that shape at `--num-runs 3`; with one run, only the
 Tier 1 model forecasts.
 
 Leave both unset and `LLM_ROUTING` picks a preset instead: `openrouter`
-(default: Opus 5 and GPT-5.6 Sol on OpenRouter) or `openai` (GPT-5.6 on the
+(default: Opus 5.5 and GPT-6 Sol on OpenRouter) or `openai` (GPT-5.6 on the
 direct OpenAI API). `LLM_PROVIDER` is still accepted as the old name for
 `LLM_ROUTING`. `FORECASTER_MODELS` and `HETEROGENEOUS_RUN_MODEL` override the
 ensemble when you want something unusual.

@@ -44,7 +44,7 @@ name: Forecast via external cron
         default: true
         type: boolean
       forecaster_gpt56_sol:
-        description: "Forecaster (reads the brief): GPT-5.6 Sol"
+        description: "Forecaster (reads the brief): GPT-6 Sol"
         required: false
         default: true
         type: boolean
@@ -66,7 +66,7 @@ name: Forecast via external cron
         options:
           - "Claude Sonnet 5"
           - "Claude Opus 5.5"
-          - "GPT-5.6 Sol"
+          - "GPT-6 Sol"
           - "GPT-6 Astra"
           - "Qwen 3.8 27B (free)"
           - "none"
@@ -200,14 +200,14 @@ jobs:
           MODELS=()
           [ "$FC_GPT6_ASTRA" = "true" ] && MODELS+=("openai/gpt-6-astra")
           [ "$FC_CLAUDE_OPUS" = "true" ] && MODELS+=("anthropic/claude-opus-5.5")
-          [ "$FC_GPT56_SOL" = "true" ] && MODELS+=("openai/gpt-5.6-sol")
+          [ "$FC_GPT56_SOL" = "true" ] && MODELS+=("openai/gpt-6-sol")
           [ "$FC_CLAUDE_SONNET" = "true" ] && MODELS+=("anthropic/claude-sonnet-5")
           [ "$FC_QWEN" = "true" ] && MODELS+=("qwen3.8:27b")
           if [ "${#MODELS[@]}" -eq 0 ]; then echo "Tick at least one brief forecaster." >&2; exit 1; fi
           case "$RAW_FORECASTER" in
             "Claude Sonnet 5") RAW_MODEL="anthropic/claude-sonnet-5" ;;
             "Claude Opus 5.5") RAW_MODEL="anthropic/claude-opus-5.5" ;;
-            "GPT-5.6 Sol") RAW_MODEL="openai/gpt-5.6-sol" ;;
+            "GPT-6 Sol") RAW_MODEL="openai/gpt-6-sol" ;;
             "GPT-6 Astra") RAW_MODEL="openai/gpt-6-astra" ;;
             "Qwen 3.8 27B (free)") RAW_MODEL="qwen3.8:27b" ;;
             "none") RAW_MODEL="" ;;
