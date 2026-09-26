@@ -46,6 +46,21 @@ jobs:
       - name: Install Python dependencies with Poetry
         run: poetry install --no-interaction --no-root
 
+      # apiagent-kit (public data APIs) runs under Node. Optional: if either
+      # step fails the bridge reports "unavailable" and research falls back to
+      # scraping, so neither may fail the forecast.
+      - name: Set up Node for apiagent-kit
+        continue-on-error: true
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apiagent-kit/package-lock.json
+
+      - name: Install apiagent-kit
+        continue-on-error: true
+        run: npm ci --prefix apiagent-kit --no-audit --no-fund
+
       # IMPORTANT:
       # On EC2, install Playwright system dependencies once manually with apt.
       # Then this workflow only installs the Chromium browser files.
@@ -114,6 +129,7 @@ jobs:
           PYTHONUNBUFFERED: "1"
           PYTHONFAULTHANDLER: "1"
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           SOCLAAS_API_KEY: ${{ secrets.SOCLAAS_API_KEY }}
           TIER1_MODEL: ${{ vars.TIER1_MODEL }}

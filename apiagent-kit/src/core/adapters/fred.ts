@@ -67,6 +67,9 @@ const params = z.object({
     .regex(/^\d{4}-\d{2}-\d{2}$/)
     .optional()
     .describe("Latest observation date, YYYY-MM-DD."),
+  // Not from upstream: lets a program (the bot's measured-series path) take a
+  // whole series. Agent callers omit it and keep the 25-row default.
+  limit: z.number().int().min(1).max(100_000).optional(),
 });
 
 type Params = z.infer<typeof params>;
@@ -325,7 +328,7 @@ async function runObservations(input: Params, signal: AbortSignal) {
   const query: Record<string, string> = {
     series_id: input.seriesId,
     sort_order: "desc",
-    limit: "60",
+    limit: String(input.limit ?? 60),
   };
   if (input.from) query.observation_start = input.from;
   if (input.to) query.observation_end = input.to;
@@ -355,7 +358,7 @@ async function runObservations(input: Params, signal: AbortSignal) {
   );
   const missing = all.length - points.length;
 
-  const { rows, truncated } = capRows(points);
+  const { rows, truncated } = capRows(points, input.limit);
 
   return {
     tier: "A" as const,

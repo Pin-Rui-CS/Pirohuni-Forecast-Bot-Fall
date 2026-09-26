@@ -270,3 +270,34 @@ async def find_apis(
 async def list_adapters(*, timeout: float = 30.0) -> dict[str, Any]:
     """Every reachable adapter, plus the ids gated off by a missing key."""
     return await _run_cli({"op": "list"}, timeout)
+
+
+# ---------------------------------------------------------------------------
+# Agent support. The loop itself lives in research/apiagent_research.py; the
+# kit supplies the tool schemas, the prompts and the tool execution.
+# ---------------------------------------------------------------------------
+
+
+async def agent_spec(today: str, *, timeout: float = 30.0) -> dict[str, Any]:
+    """Tool definitions, system prompt and last-step prompt, dated ``today``.
+
+    ``{"ok": False, "error": ...}`` when the kit is unavailable.
+    """
+    return await _run_cli({"op": "spec", "today": today}, timeout)
+
+
+async def dispatch_tools(
+    calls: list[dict[str, Any]],
+    chars_spent: int,
+    *,
+    timeout: float = 180.0,
+) -> dict[str, Any]:
+    """Run one agent step's tool calls through the kit's toolkit.
+
+    ``calls`` is ``[{"id", "name", "args"}]``. Returns ``{"ok", "results":
+    [{"id", "output"}], "charsReturned", "usage"}``; a failed tool is a result
+    with an ``error`` key, never an exception. The whole step failing (timeout,
+    no Node) comes back as ``{"ok": False, "error": ...}``.
+    """
+    return await _run_cli(
+        {"op": "tools", "calls": calls, "charsSpent": int(chars_spent)}, timeout)

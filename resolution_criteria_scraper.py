@@ -815,6 +815,7 @@ async def scrape_resolution_sources(
     max_urls: int = 10,
     question_type: str = "",
     fine_print: str = "",
+    target_date: str = "",
 ) -> str:
     """Scrape the URLs embedded in the question and summarize them once.
 
@@ -884,6 +885,7 @@ async def scrape_resolution_sources(
             resolution_criteria=resolution_criteria,
             question_type=question_type,
             timeout=timeout,
+            target_date=target_date,
         )
 
     criteria_url_set = set(criteria_urls)
@@ -1009,6 +1011,7 @@ async def _build_measured_series_section(
     resolution_criteria: str,
     question_type: str,
     timeout: int,
+    target_date: str = "",
 ) -> str:
     """Retrieve and reduce the historical series behind the resolution source.
 
@@ -1029,11 +1032,23 @@ async def _build_measured_series_section(
         logger.warning("Series discovery unavailable: %s", exc)
         return ""
 
+    # A documented API first (apiagent-kit): exact and complete where it
+    # applies. The scraping ladder is the fallback for everything else.
+    artifact = None
     try:
-        artifact = await discover_series(primary_url, timeout=timeout)
-    except Exception as exc:
-        logger.warning("Series discovery failed for %s: %s", primary_url, exc)
-        return ""
+        from known_series import fetch_known_series
+
+        artifact = await fetch_known_series(
+            primary_url, metric_hint=f"{question_text}\n{resolution_criteria}")
+    except Exception as exc:  # noqa: BLE001 - optional enrichment
+        logger.warning("Known-API series lookup failed for %s: %s", primary_url, exc)
+
+    if artifact is None:
+        try:
+            artifact = await discover_series(primary_url, timeout=timeout)
+        except Exception as exc:
+            logger.warning("Series discovery failed for %s: %s", primary_url, exc)
+            return ""
 
     if artifact is None:
         logger.info("No historical series found behind %s; no rung satisfied the gate.",
@@ -1049,6 +1064,7 @@ async def _build_measured_series_section(
             artifact.table,
             endpoint=artifact.endpoint,
             metric_hint=f"{question_text}\n{resolution_criteria}",
+            target_date=target_date,
         )
     except Exception as exc:
         logger.warning("Series reduction failed for %s: %s", artifact.endpoint, exc)

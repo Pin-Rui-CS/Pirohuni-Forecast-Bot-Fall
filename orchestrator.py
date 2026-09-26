@@ -207,6 +207,8 @@ async def forecast_individual_question(
             background=question_details["description"],
             fine_print=question_details["fine_print"],
             question_type=question_type or "",
+            # Enables the same-calendar-window block in a measured series.
+            target_date=question_details.get("scheduled_resolve_time") or "",
         )
         research_seconds = time.monotonic() - question_started
         artifacts.save_research(

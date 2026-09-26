@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import asyncio
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 import logging
@@ -87,6 +87,9 @@ class StreamState:
     done: bool = False
     usage: dict | None = None
     model: str | None = None
+    # Streamed tool calls, keyed by the delta's index: the id and name arrive
+    # in the first fragment, the JSON arguments in pieces after it.
+    tool_calls: dict[int, dict[str, str]] = field(default_factory=dict)
 
 
 def consume(state: StreamState, raw: str, expected_model: str) -> None:
@@ -115,11 +118,22 @@ def consume(state: StreamState, raw: str, expected_model: str) -> None:
         delta = choice.get("delta") or {}
         state.answer += delta.get("content") or ""
         state.reasoning += delta.get("reasoning_content") or delta.get("reasoning") or ""
+        for fragment in delta.get("tool_calls") or []:
+            call = state.tool_calls.setdefault(
+                int(fragment.get("index") or 0), {"id": "", "name": "", "arguments": ""})
+            call["id"] = call["id"] or fragment.get("id") or ""
+            function = fragment.get("function") or {}
+            call["name"] = call["name"] or function.get("name") or ""
+            call["arguments"] += function.get("arguments") or ""
 
 
 def check_complete(state: StreamState) -> None:
-    if not state.done or state.finish != "stop" or not state.answer.strip():
-        raise AttemptFailed("Incomplete stream, empty answer or non-stop finish")
+    """Complete means [DONE] plus either an answer or at least one named tool call."""
+    called = any(call["name"] for call in state.tool_calls.values())
+    if not state.done or state.finish not in ("stop", "tool_calls"):
+        raise AttemptFailed("Incomplete stream or unexpected finish")
+    if not (state.answer.strip() or called):
+        raise AttemptFailed("Empty answer and no tool call")
 
 
 # A section an answer must contain to count as the requested output. The 45707
@@ -144,13 +158,19 @@ def timeout_seconds() -> float:
     return float(os.getenv("QWEN_LADDER_TIMEOUT_SECONDS", "600"))
 
 
+# Labels whose calls are small decisions, not long reasoning: an API-agent step
+# picks the next tool call, and XHigh would spend minutes on each of six steps.
+# QWEN_START_EFFORT still overrides.
+DEFAULT_START_EFFORT: dict[str, str] = {"apiagent": "medium"}
+
+
 def efforts_for(label: str) -> tuple[str, ...]:
     """The rungs for one label: from its starting effort down the ladder.
 
     QWEN_START_EFFORT="serp-scrape-extract=medium" starts that label at Medium,
     which leaves it a single attempt -- there is no rung below Medium.
     """
-    start = EFFORT_LADDER[0]
+    start = DEFAULT_START_EFFORT.get(label, EFFORT_LADDER[0])
     for entry in os.getenv("QWEN_START_EFFORT", "").split(","):
         name, _, effort = entry.partition("=")
         if name.strip() and name.strip() == label and effort.strip():
@@ -201,6 +221,11 @@ def _refuse_or_retry(route: llm_provider.Route, status: int, response: Any) -> N
 def _completion(state: StreamState, effort: str, usages: list[dict | None]):
     from openai.types.chat import ChatCompletion
 
+    tool_calls = [
+        {"id": call["id"] or f"call_{index}", "type": "function",
+         "function": {"name": call["name"], "arguments": call["arguments"] or "{}"}}
+        for index, call in sorted(state.tool_calls.items()) if call["name"]
+    ]
     known = [usage for usage in usages if usage]
     usage = None
     if known:
@@ -215,9 +240,10 @@ def _completion(state: StreamState, effort: str, usages: list[dict | None]):
         "model": state.model or "",
         "choices": [{
             "index": 0,
-            "finish_reason": "stop",
+            "finish_reason": "tool_calls" if tool_calls else "stop",
             "message": {"role": "assistant", "content": state.answer,
-                        "reasoning": state.reasoning},
+                        "reasoning": state.reasoning,
+                        **({"tool_calls": tool_calls} if tool_calls else {})},
         }],
         "usage": usage,
         "qwen_effort": effort,

@@ -26,6 +26,7 @@ first 8,000 characters keeps 2023 and silently discards every row that matters.
 
 from __future__ import annotations
 
+import bisect
 import datetime as dt
 import statistics
 from dataclasses import dataclass
@@ -64,8 +65,13 @@ def reduce_series(
     endpoint: str,
     metric_hint: str = "",
     max_groups_listed: int = 25,
+    target_date: str = "",
 ) -> ReducedSeries:
-    """Render ``table`` as a small markdown block for the research report."""
+    """Render ``table`` as a small markdown block for the research report.
+
+    ``target_date`` (ISO, the question's resolution date) enables the
+    same-calendar-window block; without it that block is omitted.
+    """
     if table.is_panel:
         return _reduce_panel(table, endpoint, max_groups_listed)
 
@@ -107,6 +113,7 @@ def reduce_series(
     lines.extend(_calendar_block(kept, table.granularity))
     lines.extend(_weekday_block(kept, table.granularity))
     lines.extend(_ahead_block(kept, table.granularity))
+    lines.extend(_same_window_block(kept, table.granularity, target_date))
     lines.extend(_recent_rows(kept))
 
     return ReducedSeries(
@@ -250,6 +257,94 @@ def _ahead_block(pairs: list[tuple[str, float]], granularity: str) -> list[str]:
     return lines
 
 
+def _shift_years(day: dt.date, years: int) -> dt.date:
+    try:
+        return day.replace(year=day.year + years)
+    except ValueError:  # 29 February
+        return day.replace(year=day.year + years, day=28)
+
+
+def _same_window_block(
+    pairs: list[tuple[str, float]], granularity: str, target_date: str
+) -> list[str]:
+    """The same calendar window in prior years -- the seasonal reference class.
+
+    The h-ahead table above pools every window of that length across all
+    seasons, so on a series with a seasonal rhythm its centre is the
+    annual-average drift. On 45412 that drift put the US debt at ~40.80T for
+    Dec 31, while the Sep 23 -> Dec 31 window itself grew 2.5-2.8% in each of
+    the three prior years (~41.15T): fiscal Q1 runs ~50% hotter than the year.
+    """
+    if not target_date or granularity not in (DAY, MONTH) or len(pairs) < 3:
+        return []
+    try:
+        target = dt.date.fromisoformat(target_date[:10])
+        dated = [(dt.date.fromisoformat(p if granularity == DAY else f"{p}-01"), v)
+                 for p, v in pairs]
+    except ValueError:
+        return []
+    start = dated[-1][0]
+    if target <= start:
+        return []
+
+    dates = [d for d, _ in dated]
+    gaps = sorted((b - a).days for a, b in zip(dates, dates[1:]))
+    # An observation counts for a day only if it is recent relative to the
+    # series' own spacing: a daily series must not borrow a value from weeks
+    # earlier, a quarterly one legitimately does.
+    tolerance = max(4, int(gaps[len(gaps) // 2] * 1.5)) if gaps else 4
+
+    def value_at(day: dt.date) -> float | None:
+        i = bisect.bisect_right(dates, day) - 1
+        if i < 0 or (day - dates[i]).days > tolerance:
+            return None
+        return dated[i][1]
+
+    rows: list[tuple[dt.date, dt.date, float, float]] = []
+    for back in range(1, 11):
+        begin, end = _shift_years(start, -back), _shift_years(target, -back)
+        a, b = value_at(begin), value_at(end)
+        if a and b is not None:
+            rows.append((begin, end, a, b))
+    if len(rows) < 2:
+        return []
+
+    rows.reverse()  # oldest first
+    ratios = [b / a for _, _, a, b in rows]
+    latest = dated[-1][1]
+    lines = [
+        f"**Same calendar window in prior years** -- {start.isoformat()} -> "
+        f"{target.isoformat()} ({(target - start).days} days), the seasonal "
+        "reference class. Prefer it over the pooled table above when the two "
+        "centres disagree: that table averages across every season.",
+        "",
+        "| window | start | end | change | ratio |",
+        "| --- | ---: | ---: | ---: | ---: |",
+    ]
+    for (begin, end, a, b), ratio in zip(rows, ratios):
+        lines.append(f"| {begin.isoformat()} -> {end.isoformat()} | {_fmt(a)} | "
+                     f"{_fmt(b)} | {_fmt(b - a)} | {ratio:.4f} |")
+    lines.append("")
+
+    def summary(label: str, sample: list[float]) -> str:
+        mean = statistics.mean(sample)
+        text = f"- {label} ({len(sample)} yrs): mean ratio {mean:.4f}"
+        if len(sample) >= 2:
+            sd = statistics.stdev(sample)
+            text += (f", sd {sd:.4f} -> applied to the latest value {_fmt(latest)}: "
+                     f"{_fmt(latest * mean)} (+/-1 sd {_fmt(latest * (mean - sd))} to "
+                     f"{_fmt(latest * (mean + sd))})")
+        else:
+            text += f" -> {_fmt(latest * mean)}"
+        return text
+
+    lines.append(summary("all years", ratios))
+    if len(ratios) > 3:
+        lines.append(summary("last 3 years", ratios[-3:]))
+    lines.append("")
+    return lines
+
+
 def _recent_rows(pairs: list[tuple[str, float]], count: int = 14) -> list[str]:
     tail = pairs[-count:]
     lines = [f"**Last {len(tail)} observations** (verbatim from the source)", "",
@@ -296,6 +391,14 @@ _BOUND_MARKERS = ("_lo", "_hi", "low", "high", "upper", "lower",
                   "_min", "_max", "err", "ci_", "_ci", "margin")
 
 
+_STOPWORDS = frozenset({
+    "the", "and", "for", "will", "what", "which", "that", "this", "with", "from",
+    "into", "than", "are", "was", "were", "has", "have", "been", "its", "per",
+    "any", "all", "not", "but", "how", "many", "much", "value", "resolve",
+    "resolves", "question", "according", "reported", "published",
+})
+
+
 def _is_bound_column(name: str) -> bool:
     return any(marker in name.lower() for marker in _BOUND_MARKERS)
 
@@ -309,7 +412,10 @@ def _choose_metric(table: SeriesTable, hint: str) -> str:
     """
     names = list(table.columns)
     if hint:
-        tokens = [t for t in _tokenise(hint) if len(t) > 2]
+        # Distinct content words only. Counting repeats let a hint that says
+        # "the" three times pick "Debt Held by the Public" over "Total Public
+        # Debt Outstanding" on 45412.
+        tokens = {t for t in _tokenise(hint) if len(t) > 2 and t not in _STOPWORDS}
         best, best_score = None, 0.0
         for name in names:
             name_tokens = set(_tokenise(name))

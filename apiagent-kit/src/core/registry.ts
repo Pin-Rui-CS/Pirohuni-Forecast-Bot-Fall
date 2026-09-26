@@ -19,6 +19,7 @@ import { pageviews } from "./adapters/pageviews.ts";
 import { polymarket } from "./adapters/polymarket.ts";
 import { portwatch } from "./adapters/portwatch.ts";
 import { secEdgar } from "./adapters/sec-edgar.ts";
+import { treasuryFiscal } from "./adapters/treasury-fiscal.ts";
 import { usgsEarthquakes } from "./adapters/usgs-earthquakes.ts";
 import { who } from "./adapters/who.ts";
 import { wikipedia } from "./adapters/wikipedia.ts";
@@ -62,6 +63,7 @@ export const adapters: ApiAdapter[] = [
   cboeVix,
   fdic,
   fred,
+  treasuryFiscal,
   portwatch,
   wikipedia,
   pageviews,

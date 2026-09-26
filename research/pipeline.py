@@ -9,6 +9,9 @@ import time
 from dataclasses import dataclass, field
 
 from config import (
+    APIAGENT_MAX_STEPS,
+    APIAGENT_TIMEOUT_SECONDS,
+    ENABLE_APIAGENT_RESEARCH,
     ENABLE_ASKNEWS_RESEARCH,
     ENABLE_FIRECRAWL_RESEARCH,
     ENABLE_PREDICTION_MARKET_RESEARCH,
@@ -89,6 +92,7 @@ async def run_research(
     background: str = "",
     fine_print: str = "",
     question_type: str = "",
+    target_date: str = "",
 ) -> ResearchBundle:
     if ENABLE_ASKNEWS_RESEARCH:
         from research.asknews_research import run_asknews_research
@@ -164,6 +168,7 @@ async def run_research(
             # Fine print names backup/fallback resolution sources; they get the
             # criteria content budget, not the reduced background tier (45087).
             fine_print=fine_print,
+            target_date=target_date,
         )
 
     async def serpapi_call(asknews_research: str = "") -> str:
@@ -221,6 +226,31 @@ async def run_research(
             )
         )
         if ENABLE_RESOLUTION_SOURCE_RESEARCH
+        else None
+    )
+
+    # The API agent is independent of every other provider: question fields
+    # in, public-data findings out. It starts now and is collected just before
+    # the artifact check, so both the check and the brief see its data.
+    async def apiagent_call() -> str | None:
+        from research.apiagent_research import run_apiagent_research
+
+        source_ledger.set_source_context("API Agent", "main pass")
+        return await asyncio.wait_for(
+            run_apiagent_research(
+                title=title,
+                resolution_criteria=resolution_criteria,
+                background=background,
+                fine_print=fine_print,
+                target_date=target_date,
+                max_steps=APIAGENT_MAX_STEPS,
+            ),
+            APIAGENT_TIMEOUT_SECONDS,
+        )
+
+    apiagent_task = (
+        asyncio.create_task(run_provider("Public Data APIs", apiagent_call))
+        if ENABLE_APIAGENT_RESEARCH
         else None
     )
 
@@ -327,6 +357,8 @@ async def run_research(
         results.append(chosen_search_result)
     results.extend(other_results)
     results.append(asknews_result)
+    if apiagent_task is not None:
+        results.append(await apiagent_task)
 
     # AskNews and prediction-market providers embed source URLs in their text
     # output rather than scraping pages individually. Record those URLs as

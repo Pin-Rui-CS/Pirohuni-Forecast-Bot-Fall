@@ -132,6 +132,21 @@ jobs:
       - name: Install Python dependencies
         run: poetry install --no-interaction --no-root
 
+      # apiagent-kit (public data APIs) runs under Node. Optional: if either
+      # step fails the bridge reports "unavailable" and research falls back to
+      # scraping, so neither may fail the forecast.
+      - name: Set up Node for apiagent-kit
+        continue-on-error: true
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apiagent-kit/package-lock.json
+
+      - name: Install apiagent-kit
+        continue-on-error: true
+        run: npm ci --prefix apiagent-kit --no-audit --no-fund
+
       - name: Install Playwright browser dependencies
         run: poetry run playwright install --with-deps chromium
 
@@ -344,6 +359,7 @@ jobs:
           QUESTION_TYPE: ${{ inputs.question_type }}
           TOKEN_LIMIT: ${{ inputs.token_limit }}
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           SOCLAAS_API_KEY: ${{ secrets.SOCLAAS_API_KEY }}
           # TIER1_MODEL / TIER2_MODEL are deliberately NOT passed: they move research

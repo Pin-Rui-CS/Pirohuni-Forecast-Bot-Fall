@@ -129,6 +129,12 @@ ENABLE_SERPAPI_RESEARCH = _env_bool("ENABLE_SERPAPI_RESEARCH", True)
 ENABLE_FIRECRAWL_RESEARCH = _env_bool("ENABLE_FIRECRAWL_RESEARCH", True)
 ENABLE_TAVILY_RESEARCH = _env_bool("ENABLE_TAVILY_RESEARCH", True)
 ENABLE_PREDICTION_MARKET_RESEARCH = _env_bool("ENABLE_PREDICTION_MARKET_RESEARCH", True)
+# API agent (research/apiagent_research.py): a Qwen tool loop over apiagent-kit's
+# public data APIs. Runs only on SoCLaaS Qwen, never a paid model; skipped when
+# SoCLaaS or Node is unavailable.
+ENABLE_APIAGENT_RESEARCH = _env_bool("ENABLE_APIAGENT_RESEARCH", True)
+APIAGENT_TIMEOUT_SECONDS = float(os.getenv("APIAGENT_TIMEOUT_SECONDS") or "900")
+APIAGENT_MAX_STEPS = int(os.getenv("APIAGENT_MAX_STEPS") or "6")
 FIRECRAWL_SEARCH_TBS = os.getenv("FIRECRAWL_SEARCH_TBS", "").strip()
 # Firecrawl-first scraping of general research URLs (the serp_research scrape
 # cycles). Resolution-criteria scraping always tries Firecrawl when a key is

@@ -36,6 +36,8 @@
  */
 import { adapters, activeAdapters, find, getAdapter } from "./src/index.ts";
 import { HttpError, ShapeError } from "./src/index.ts";
+import { createToolkit, lastStepPrompt, systemPrompt } from "./src/index.ts";
+import { TURN_CHAR_BUDGET } from "./src/core/http.ts";
 
 /*
  * ONE CREDENTIAL, ONE NAME.
@@ -84,7 +86,65 @@ type Request = {
   api?: string;
   params?: Record<string, unknown>;
   timeoutMs?: number;
+  /** op=spec: ISO date the prompts should treat as today. */
+  today?: string;
+  /** op=tools: one agent step's tool calls. */
+  calls?: Array<{ id?: string; name?: string; args?: unknown }>;
+  /** op=tools: data characters already returned earlier in this turn. */
+  charsSpent?: number;
 };
+
+/*
+ * THE AGENT OPS. The bot runs the agent loop in Python, because its model
+ * calls must go through its own cost accounting and SoCLaaS streaming. The kit
+ * stays the source of the loop's tools and prompts:
+ *
+ *   spec   -> tool definitions + the system and last-step prompts
+ *   tools  -> run one step's tool calls through the toolkit, exactly as
+ *             runAgent would, and report the data characters they returned
+ *
+ * One process per STEP (not per call) so parallel calls in a step share the
+ * toolkit, and GDELT's in-process rate gate still spaces them. The turn's data
+ * budget spans steps, so the caller carries it in `charsSpent`.
+ */
+function agentSpec(request: Request): Payload {
+  const today = request.today ? new Date(request.today) : new Date();
+  if (Number.isNaN(today.getTime())) fail(`spec: invalid today ${request.today}`);
+  return {
+    ok: true,
+    definitions: createToolkit().definitions,
+    systemPrompt: systemPrompt(today),
+    lastStepPrompt: lastStepPrompt(today),
+    turnCharBudget: TURN_CHAR_BUDGET,
+  };
+}
+
+async function runTools(request: Request): Promise<Payload> {
+  const calls = Array.isArray(request.calls) ? request.calls : [];
+  const spent = Number(request.charsSpent) || 0;
+  const toolkit = createToolkit();
+
+  const results = await Promise.all(calls.map(async (call) => {
+    const name = String(call.name ?? "");
+    // The toolkit's budget counter starts at zero in a fresh process, so the
+    // cross-step check happens here, with the toolkit's own wording.
+    if (name === "call_api" && spent >= TURN_CHAR_BUDGET) {
+      const api = (call.args as { api?: unknown } | undefined)?.api;
+      return { id: call.id, output: {
+        api, error: "This turn has used its data budget. Answer with what you have " +
+          "already gathered and say what you could not check.",
+      } };
+    }
+    return { id: call.id, output: await toolkit.dispatch(name, call.args) };
+  }));
+
+  let charsReturned = 0;
+  for (const { output } of results) {
+    const rows = (output as { rows?: unknown } | null)?.rows;
+    if (Array.isArray(rows)) charsReturned += JSON.stringify(rows).length;
+  }
+  return { ok: true, results, charsReturned, usage: toolkit.usage() };
+}
 
 /** Control-flow carrier for an early return, so `fail` can be used mid-expression. */
 class Bail extends Error {
@@ -221,9 +281,13 @@ async function main(): Promise<Payload> {
     }
     case "call":
       return await callAdapter(request);
+    case "spec":
+      return agentSpec(request);
+    case "tools":
+      return await runTools(request);
     default:
       fail(`unknown op: ${request.op || "(missing)"}`, {
-        ops: ["list", "find", "call"],
+        ops: ["list", "find", "call", "spec", "tools"],
       });
   }
 }

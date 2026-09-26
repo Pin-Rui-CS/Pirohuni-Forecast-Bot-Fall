@@ -355,6 +355,15 @@ What was removed: the Next.js route handler, the `server-only` imports, the
 that gateway. What replaced them: the `ChatModel` seam and the provider-neutral
 loop.
 
+**Local changes in this repo (not upstream):**
+- `core/adapters/treasury-fiscal.ts` — U.S. Treasury Fiscal Data (keyless, Tier A),
+  a 25th adapter. `catalog` maps any fiscaldata.treasury.gov dataset page to its API.
+- `core/adapters/fred.ts` — optional `limit` param, so a program can take a whole
+  series. Agent callers omit it and keep the 25-row cap.
+
+Both exist for the bot's measured-series path (`known_series.py`). Re-syncing
+upstream means re-applying these two.
+
 Not carried over (available upstream if you want them): the smoke-test harness
 that live-checks all 24 adapters with a worker pool, and the React tool-call
 rendering components.
