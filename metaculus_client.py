@@ -323,3 +323,23 @@ async def get_post_details(post_id: int) -> dict:
         request_label=f"get_post_details(post_id={post_id})",
     )
     return details
+
+
+def post_tournaments(post_details: dict) -> list[dict]:
+    """The tournaments a post belongs to, as ``[{id, slug, name}]``.
+
+    Read from ``projects.tournament`` in a ``/posts/<id>/`` response, e.g.
+    ``[{"id": 33108, "slug": "metaculus-cup-fall-2026", "name": "Metaculus Cup
+    Fall 2026"}]``. Recorded in forecast.json so the forecast library can filter
+    by competition without asking Metaculus again. Empty when the post lists
+    none or the shape is unexpected -- this must never fail a forecast.
+    """
+    projects = post_details.get("projects") if isinstance(post_details, dict) else None
+    entries = projects.get("tournament") if isinstance(projects, dict) else None
+    if not isinstance(entries, list):
+        return []
+    return [
+        {"id": entry.get("id"), "slug": entry.get("slug"), "name": entry.get("name")}
+        for entry in entries
+        if isinstance(entry, dict) and (entry.get("slug") or entry.get("name"))
+    ]

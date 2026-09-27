@@ -17,6 +17,7 @@ from forecasters.numeric import get_numeric_gpt_prediction
 from metaculus_client import (
     create_forecast_payload,
     get_post_details,
+    post_tournaments,
     post_question_comment,
     post_question_prediction,
 )
@@ -318,6 +319,8 @@ async def forecast_individual_question(
     artifacts.save_forecast_json(
         {
             "question_details": _question_snapshot(question_details),
+            # Additive, no schema_version bump: readers treat a missing key as unknown.
+            "tournaments": post_tournaments(post_details),
             "artifact_check": research_bundle.artifact_check,
             "degraded_search_providers": research_bundle.degraded_search_providers,
             "run_values": result.run_values,
