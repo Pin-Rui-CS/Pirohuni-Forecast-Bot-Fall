@@ -25,6 +25,11 @@ name: Forecast via external cron
         type: boolean
       # The external cron sends only the four inputs above, so the defaults below
       # are what scheduled runs use. Same settings as test-one-metaculus-cup-question.
+      include_minibench:
+        description: "Also forecast the active MiniBench (project id: minibench), whatever the tournament input says"
+        required: false
+        default: true
+        type: boolean
       research_models:
         description: "SETTING 1 - research. qwen = the tested Qwen setup (free; evidence plan stays on Sonnet; ~45-70 min/question). original = paid Sonnet/Opus, no Qwen."
         required: false
@@ -176,6 +181,7 @@ jobs:
           DISPATCH_NUM_RUNS: ${{ inputs.num_runs }}
           DISPATCH_COST_LIMIT: ${{ inputs.cost_limit }}
           DISPATCH_NO_SUBMIT: ${{ inputs.no_submit && 'true' || 'false' }}
+          DISPATCH_INCLUDE_MINIBENCH: ${{ inputs.include_minibench && 'true' || 'false' }}
 
       - name: Run forecasting bot
         run: |
@@ -183,10 +189,17 @@ jobs:
 
           run_args=(--mode tournament)
 
-          if [ -n "$DISPATCH_TOURNAMENT" ]; then
-            read -r -a tournaments <<< "$DISPATCH_TOURNAMENT"
+          read -r -a tournaments <<< "$DISPATCH_TOURNAMENT"
+          # MiniBench rides along on every scheduled run. Appended here rather
+          # than put in the tournament default, because the external cron sends
+          # the tournament input explicitly. "minibench" always names the active one.
+          if [ "$DISPATCH_INCLUDE_MINIBENCH" = "true" ] && [[ " ${tournaments[*]} " != *" minibench "* ]]; then
+            tournaments+=(minibench)
+          fi
+          if [ ${#tournaments[@]} -gt 0 ]; then
             run_args+=(--tournament "${tournaments[@]}")
           fi
+          echo "Tournaments: ${tournaments[*]}"
 
           # Setting 2: one brief run per ticked model, in checkbox order (the first
           # is also the binary tiebreaker), plus one raw-research run on the dropdown
@@ -275,6 +288,7 @@ jobs:
           DISPATCH_NUM_RUNS: ${{ inputs.num_runs }}
           DISPATCH_COST_LIMIT: ${{ inputs.cost_limit }}
           DISPATCH_NO_SUBMIT: ${{ inputs.no_submit && 'true' || 'false' }}
+          DISPATCH_INCLUDE_MINIBENCH: ${{ inputs.include_minibench && 'true' || 'false' }}
           # How many questions run at once. Unset in code means unbounded, which
           # with Qwen research (~1 h/question behind a 24 req/min gate) leaves later
           # questions queueing until their own timeout fires. 2 fits ~12 questions

@@ -786,12 +786,29 @@ def _parse_pmf_params(params: dict) -> tuple[list[float], list[float]]:
     return [], []
 
 
+# An open tail bucket, written the way models label them: "16+", "-16 or less",
+# "<= -16", "≥ 16", "16 or more", "16 and above". The bucket sits at its bound,
+# which is where the open-bound grid puts that mass anyway. 46022 lost its
+# GPT-6 Astra run to "-16 or less" when only "16+" was understood.
+_PMF_TAIL_VALUE = re.compile(
+    r"^(?:[<>]=?|[≤≥]|at\s+(?:least|most)|under|over|below|above|fewer\s+than|more\s+than)?"
+    r"\s*(-?\d+(?:\.\d+)?)\s*"
+    r"(?:\+|or\s+(?:less|fewer|lower|below|under|more|greater|higher|above|over)"
+    r"|and\s+(?:below|under|lower|less|above|over|higher|more))?$",
+    re.IGNORECASE,
+)
+
+
 def _coerce_pmf_value(value) -> float:
     if isinstance(value, (int, float)):
         return float(value)
+    # Unicode minus and en/em dashes all mean a negative sign here.
     text = str(value).strip().replace(",", "")
-    if text.endswith("+"):
-        text = text[:-1]
+    for dash in ("−", "–", "—"):
+        text = text.replace(dash, "-")
+    match = _PMF_TAIL_VALUE.match(text)
+    if match:
+        return float(match.group(1))
     return float(text)
 
 
@@ -1268,6 +1285,7 @@ def distribution_guidance_for_question(
     step: float,
     use_pmf: bool,
     open_upper_bound: bool,
+    open_lower_bound: bool = False,
 ) -> tuple[str, str]:
     """Return (header_guidance, final_output_pmf_note) for the prompt.
 
@@ -1288,13 +1306,22 @@ def distribution_guidance_for_question(
         tail_label = f"{_format_outcome_value(outcome_values[-1] + step, step)}+"
     else:
         tail_label = ""
+    # Show the lower tail too when that bound is open. Given only "16+", a model
+    # invents its own lower label -- 46022's GPT-6 Astra wrote "-16 or less".
+    if open_lower_bound and outcome_values:
+        lower_tail_label = f"≤{_format_outcome_value(outcome_values[0] - step, step)}"
+    else:
+        lower_tail_label = ""
     value_text = ", ".join(
         _format_outcome_value(value, step) for value in outcome_values[:20]
     )
     if len(outcome_values) > 20:
         value_text += ", ..."
+    if lower_tail_label:
+        value_text = f"{lower_tail_label}, {value_text}"
     if tail_label:
         value_text += f", {tail_label}"
+    tail_labels = [label for label in (lower_tail_label, tail_label) if label]
 
     if not use_pmf:
         # Fine-resolution discrete: render as a continuous distribution. No PMF
@@ -1319,8 +1346,13 @@ def distribution_guidance_for_question(
         '{"distribution": {"type": "pmf", "params": {"values": [<outcome values>], '
         '"probabilities": [<floats>]}}} '
         f"using outcome values like: {value_text}. Probabilities must be nonnegative and "
-        "will be normalized. Use the open-ended upper-tail value when the question has one. "
-        "Prefer this pmf form for count questions. List CONSECUTIVE outcome values with no "
+        "will be normalized. Use the open-ended tail value(s) shown when the question has them. "
+        + (
+            "Every other value must be a plain number; the only allowed labels are "
+            + " and ".join(f'"{label}"' for label in tail_labels) + ". "
+            if tail_labels else "Every value must be a plain number. "
+        )
+        + "Prefer this pmf form for count questions. List CONSECUTIVE outcome values with no "
         "skips — include every value between the lowest and highest you consider plausible, "
         "even when its probability is tiny. Never coarsen to every 2nd or 5th value: a "
         "skipped value is treated as literally zero probability, not interpolated."
@@ -2300,6 +2332,7 @@ def build_numeric_prompt(question_details: dict, summary_report: str) -> tuple[s
         step=step,
         use_pmf=use_pmf,
         open_upper_bound=open_upper_bound,
+        open_lower_bound=open_lower_bound,
     )
 
     prompt = NUMERIC_PROMPT_TEMPLATE.format(
@@ -2492,6 +2525,16 @@ def _make_numeric_validator(geometry: dict):
         except Exception as exc:  # noqa: BLE001 - any parse failure is a repair signal
             return f"could not parse forecast JSON: {exc}"
         if parsed["kind"] == "pmf":
+            # Check the values here, not only at render time: a value the
+            # parser cannot read used to pass as "valid" and then drop the run
+            # with no repair attempt (46022, GPT-6 Astra's "-16 or less").
+            try:
+                values, probabilities = _parse_pmf_params(parsed["pmf"])
+            except (TypeError, ValueError) as exc:
+                return (f"pmf values must be plain numbers (or the tail labels shown "
+                        f"in the prompt): {exc}")
+            if not values or len(values) != len(probabilities):
+                return "pmf needs matching, nonempty values and probabilities lists"
             return None
         spec, _notes = build_mixture_spec_from_components(parsed["components"], geometry)
         if spec is None:

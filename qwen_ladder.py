@@ -154,7 +154,21 @@ def enabled() -> bool:
     return os.getenv("QWEN_LADDER", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def timeout_seconds() -> float:
+def is_forecast_label(label: str) -> bool:
+    """A forecast run ("numeric-forecast[qwen3.8:27b]") or the binary tiebreaker."""
+    return "-forecast" in label or label == "binary-tiebreaker"
+
+
+def timeout_seconds(label: str = "") -> float:
+    """Per-attempt deadline. Forecast runs get longer than research calls.
+
+    A forecast is one call whose thinking IS the output, and the raw-research
+    run reads the whole corpus: on 46022 its 180k-char prompt timed out at
+    XHigh after 600 s and the Medium retry came back empty, dropping the run.
+    The question itself has a 3-hour limit, so 20 minutes per attempt fits.
+    """
+    if is_forecast_label(label):
+        return float(os.getenv("QWEN_FORECAST_TIMEOUT_SECONDS", "1200"))
     return float(os.getenv("QWEN_LADDER_TIMEOUT_SECONDS", "600"))
 
 
@@ -262,11 +276,11 @@ def _record(call_id, label, effort, outcome, start, state, error=None) -> dict:
     }
 
 
-def _client_settings(route: llm_provider.Route) -> dict[str, Any]:
+def _client_settings(route: llm_provider.Route, label: str = "") -> dict[str, Any]:
     return {
         "headers": {"Authorization": "Bearer " + llm_provider.api_key_for(route.endpoint)},
         "follow_redirects": False,
-        "timeout": httpx.Timeout(connect=25, read=timeout_seconds(), write=45, pool=30),
+        "timeout": httpx.Timeout(connect=25, read=timeout_seconds(label), write=45, pool=30),
     }
 
 
@@ -275,11 +289,11 @@ async def run_async(route: llm_provider.Route, kwargs: dict[str, Any], *,
     label = current_label.get() or "unlabelled"
     call_id = uuid4().hex[:12]
     url = route.endpoint.base_url + "/chat/completions"
-    deadline = timeout_seconds()
+    deadline = timeout_seconds(label)
     usages: list[dict | None] = []
     failures: list[str] = []
     async with httpx.AsyncClient(
-        transport=transport or httpx.AsyncHTTPTransport(retries=0), **_client_settings(route),
+        transport=transport or httpx.AsyncHTTPTransport(retries=0), **_client_settings(route, label),
     ) as client:
         for rung, effort in enumerate(efforts_for(label)):
             if rung:
@@ -327,11 +341,11 @@ def run_sync(route: llm_provider.Route, kwargs: dict[str, Any], *,
     label = current_label.get() or "unlabelled"
     call_id = uuid4().hex[:12]
     url = route.endpoint.base_url + "/chat/completions"
-    deadline = timeout_seconds()
+    deadline = timeout_seconds(label)
     usages: list[dict | None] = []
     failures: list[str] = []
     with httpx.Client(
-        transport=transport or httpx.HTTPTransport(retries=0), **_client_settings(route),
+        transport=transport or httpx.HTTPTransport(retries=0), **_client_settings(route, label),
     ) as client:
         for rung, effort in enumerate(efforts_for(label)):
             if rung:
