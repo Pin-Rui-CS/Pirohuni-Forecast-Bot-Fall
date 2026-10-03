@@ -78,7 +78,7 @@ async def _create_chat_completion_with_retries(
             except (APIConnectionError, APIStatusError, APITimeoutError, RateLimitError) as exc:
                 llm_provider.note_failure(route, exc)
                 problem = _format_openrouter_exception(exc)
-                usage_handle.record_output(problem)
+                usage_handle.record_failure(problem)
                 last_problem = problem
                 logger.warning(
                     "[%s] %s attempt %d/%d failed: %s",
@@ -96,7 +96,7 @@ async def _create_chat_completion_with_retries(
             except QwenLadderFailed as exc:
                 # The ladder already spent its XHigh and Medium attempts;
                 # resending it from here would triple that. Fail the call.
-                usage_handle.record_output(str(exc))
+                usage_handle.record_failure(exc)
                 logger.warning("[%s] %s Qwen ladder failed: %s", provider, label, exc)
                 raise
 

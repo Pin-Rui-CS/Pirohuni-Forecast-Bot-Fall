@@ -126,6 +126,10 @@ class OpenRouterUsageRecord:
     # can still be stopped dead by quota. Tracked separately from cost_usd so
     # neither can be mistaken for the other.
     quota_microdollars: float = 0.0
+    # Set when the call failed. A failed call produced no output; recording the
+    # error text's length as output (as before) made Q46024's audit show 131
+    # "output characters" for calls that returned nothing.
+    error: str = ""
 
 
 class OpenRouterUsageHandle:
@@ -186,6 +190,19 @@ class OpenRouterUsageHandle:
                 if native["quota_microdollars"] else "",
             )
         self.record_output_characters(count_openrouter_output_characters(response))
+
+    def record_failure(self, error: Any) -> None:
+        """The call failed: zero output, the elapsed time, and why."""
+        if self._finished:
+            return
+        duration_seconds = time.monotonic() - self._started_at
+        for record in self._records:
+            record.output_characters = 0
+            record.output_tokens = 0
+            record.duration_seconds = duration_seconds
+            record.error = " ".join(str(error).split())[:300]
+        MonetaryCostManager._check_active_limits_after_usage_update()
+        self._finished = True
 
     def record_output(self, output: Any) -> None:
         self.record_output_characters(count_serialized_characters(output))
@@ -749,7 +766,7 @@ def _format_usage_markdown_table(records: list[OpenRouterUsageRecord]) -> str:
         lines.append(
             "| "
             f"{record.no} | "
-            f"{_table_cell(record.name_of_task)} | "
+            f"{_table_cell(record.name_of_task + (' (FAILED)' if record.error else ''))} | "
             f"{record.input_characters} | "
             f"{record.input_tokens} | "
             f"{record.output_characters} | "

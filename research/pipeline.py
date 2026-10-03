@@ -435,13 +435,31 @@ async def run_research(
     # spends a different provider's credits and always uses one proven to work. If
     # the whole main chain produced nothing, fall back to the first not-yet-
     # exhausted provider in the configured order.
+    #
+    # A failed check is "unknown", not "found": Q46024's check died on a SoCLaaS
+    # outage and returned None, which used to read as "no retry needed". The
+    # retry then runs on the evidence plan's own queries. ``artifact_check``
+    # itself stays None so the brief never claims a verdict nobody reached.
+    retry_basis = artifact_check
+    if artifact_check is None:
+        from query_maker import evidence_plan_queries
+
+        retry_basis = {
+            "status": "missing",
+            "retry_queries": [item.query for item in evidence_plan_queries(evidence_plan)],
+            "check_failed": True,
+        }
+        logger.warning(
+            "[research] artifact check failed; treating the artifact as missing and "
+            "retrying with %d evidence-plan queries", len(retry_basis["retry_queries"]),
+        )
     retry_label = _select_retry_provider_label(chosen_search_result, ordered_search_providers)
     run_retry_search = _retry_runner_for(retry_label) if retry_label else None
     pre_retry_result_count = len(included_results)
     wants_artifact_retry = bool(
-        artifact_check
-        and artifact_check.get("status") in {"missing", "partial"}
-        and artifact_check.get("retry_queries")
+        retry_basis
+        and retry_basis.get("status") in {"missing", "partial"}
+        and retry_basis.get("retry_queries")
         and run_retry_search is not None
     )
     if wants_artifact_retry and MonetaryCostManager.would_breach_input_reserve(
@@ -450,7 +468,7 @@ async def run_research(
         logger.warning(
             "[research] Required artifact %s but focused retry skipped: it would eat "
             "into the input tokens reserved for compile/forecast",
-            artifact_check.get("status"),
+            retry_basis.get("status"),
         )
         research_trace.emit(
             "retry_decision",
@@ -459,8 +477,8 @@ async def run_research(
                 "wants_retry": True,
                 "ran": False,
                 "reason": "skipped: would breach the compile/forecast input reserve",
-                "artifact_status": artifact_check.get("status"),
-                "retry_queries": artifact_check.get("retry_queries") or [],
+                "artifact_status": retry_basis.get("status"),
+                "retry_queries": retry_basis.get("retry_queries") or [],
                 "retry_provider": retry_label,
             },
             status="skipped",
@@ -468,14 +486,14 @@ async def run_research(
     elif wants_artifact_retry:
         retry_queries = [
             str(query).strip()
-            for query in artifact_check["retry_queries"][:_MAX_RETRY_QUERIES]
+            for query in retry_basis["retry_queries"][:_MAX_RETRY_QUERIES]
             if str(query).strip()
         ]
         if retry_queries:
             logger.info(
                 "[research] Required artifact %s; running focused retry via %s with %d queries "
                 "(time budget %.0fs)",
-                artifact_check.get("status"),
+                retry_basis.get("status"),
                 retry_label,
                 len(retry_queries),
                 ARTIFACT_RETRY_TIMEOUT_SECONDS,
@@ -511,7 +529,7 @@ async def run_research(
                     "wants_retry": True,
                     "ran": True,
                     "included": retry_included,
-                    "artifact_status": artifact_check.get("status"),
+                    "artifact_status": retry_basis.get("status"),
                     "retry_queries": retry_queries,
                     "retry_provider": retry_label,
                 },
@@ -530,11 +548,11 @@ async def run_research(
     else:
         no_retry_reason = (
             "artifact status is %r (retry only fires on missing/partial)"
-            % (artifact_check or {}).get("status")
-            if (artifact_check or {}).get("status") not in {"missing", "partial"}
+            % (retry_basis or {}).get("status")
+            if (retry_basis or {}).get("status") not in {"missing", "partial"}
             else (
                 "artifact check returned no retry queries"
-                if not (artifact_check or {}).get("retry_queries")
+                if not (retry_basis or {}).get("retry_queries")
                 else "no retry-capable search provider available"
             )
         )
@@ -545,8 +563,8 @@ async def run_research(
                 "wants_retry": False,
                 "ran": False,
                 "reason": no_retry_reason,
-                "artifact_status": (artifact_check or {}).get("status"),
-                "retry_queries": (artifact_check or {}).get("retry_queries") or [],
+                "artifact_status": (retry_basis or {}).get("status"),
+                "retry_queries": (retry_basis or {}).get("retry_queries") or [],
             },
         )
 
@@ -717,10 +735,33 @@ async def _run_search_chain(
                     meta={"fell_through": list(errored), "chosen": name},
                 )
             return result, errored
-        errored.append(name)
+        errored.append(f"{name} ({_search_failure_reason(content)})")
         if _is_quota_or_auth_error(content):
             exhausted.add(name)
+    if errored:
+        # Every provider failed. Record why, or the trace shows only that
+        # search "failed" (Q46024 blamed SerpAPI/Tavily/Firecrawl for what was
+        # a SoCLaaS outage in the query-generation step they all share).
+        research_trace.emit(
+            "search_chain",
+            "every search provider failed",
+            "\n".join(f"- {label}" for label in errored),
+            status="failed",
+            meta={"failed": list(errored)},
+        )
     return None, errored
+
+
+def _search_failure_reason(content: str | None) -> str:
+    """A short cause for the brief's warning banner."""
+    if not content or not _is_unavailable_result(content):
+        return "no usable results"
+    detail = content.split("unavailable", 1)[-1].lstrip(" :")
+    if "QwenUnavailable" in detail or ("QwenLadderFailed" in detail and "HTTP 5" in detail):
+        return "Qwen/SoCLaaS unavailable"
+    if "QwenLadderFailed" in detail:
+        return "a Qwen step failed"
+    return " ".join(detail.split())[:120] or "unavailable"
 
 
 def _select_retry_provider_label(

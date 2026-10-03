@@ -81,6 +81,7 @@ class QuestionArtifacts:
         prompt: str,
         run_sections: list[str],
         final_summary: str,
+        posted_comment: str = "",
     ) -> str:
         lines = [
             f"# Forecast Runs — {self.title}",
@@ -93,6 +94,8 @@ class QuestionArtifacts:
         for i, section in enumerate(run_sections, 1):
             lines += [f"## Run {i}", section, ""]
         lines += ["## Final", final_summary, ""]
+        if posted_comment:
+            lines += ["## Posted comment (what Metaculus shows)", posted_comment, ""]
         return self._write("runs.md", "\n".join(lines))
 
     def save_audit(

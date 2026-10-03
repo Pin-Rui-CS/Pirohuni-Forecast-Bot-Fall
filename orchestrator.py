@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import logging
 import os
 import time
@@ -8,6 +9,7 @@ import traceback
 from dataclasses import asdict
 
 from artifacts import QuestionArtifacts
+from forecast_comment import short_comment
 import llm_provider
 from config import API_BASE_URL, OPENROUTER_API_KEY
 from forecasters.base import ForecastResult
@@ -27,6 +29,7 @@ from monetary_cost_manager import (
     research_reserve_input_tokens,
 )
 from research.pipeline import run_research
+import qwen_ladder
 import research_trace
 
 logger = logging.getLogger(__name__)
@@ -42,6 +45,33 @@ QUESTION_TIMEOUT_SECONDS = int(os.getenv("QUESTION_TIMEOUT_SECONDS", str(20 * 60
 # from question start and so is spent while merely queueing.
 # 0 restores the old unbounded behaviour.
 QUESTION_CONCURRENCY = int(os.getenv("QUESTION_CONCURRENCY", "0"))
+
+# When SoCLaaS is down, Qwen-mode research cannot work, so a question that
+# closes late enough is left unsubmitted: already-forecast questions are
+# skipped, so the next cron run (every 30 min) retries it. The margin covers
+# that wait plus a full Qwen-mode question (~1 h). Closer than that, the bot
+# forecasts on degraded research and says so.
+QWEN_OUTAGE_DEFER_MARGIN_SECONDS = int(os.getenv("QWEN_OUTAGE_DEFER_MARGIN_SECONDS", str(150 * 60)))
+# Research steps that may give up on SoCLaaS before the brief is not trusted.
+QWEN_OUTAGE_DEFER_FAILURES = int(os.getenv("QWEN_OUTAGE_DEFER_FAILURES", "3"))
+# Starts the summary line of a deferred question; forecast_questions counts
+# these so a deferral is never only a log line.
+DEFERRED_MARKER = "DEFERRED (Qwen outage):"
+
+
+def _outage_deferral(close_time: str | None, now: datetime | None = None) -> tuple[bool, str]:
+    """(defer?, reason) for a question whose research has no working SoCLaaS."""
+    try:
+        close = datetime.fromisoformat(str(close_time).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False, "has no usable close time, so it cannot safely wait"
+    if close.tzinfo is None:
+        close = close.replace(tzinfo=timezone.utc)
+    remaining = (close - (now or datetime.now(timezone.utc))).total_seconds()
+    if remaining > QWEN_OUTAGE_DEFER_MARGIN_SECONDS:
+        return True, f"closes in {remaining / 3600:.1f} h; a later cron run can redo it"
+    return False, (f"closes in {remaining / 3600:.1f} h, inside the "
+                   f"{QWEN_OUTAGE_DEFER_MARGIN_SECONDS / 3600:.1f} h deferral margin")
 
 _QUESTION_SNAPSHOT_KEYS = (
     "id",
@@ -191,9 +221,33 @@ async def forecast_individual_question(
         summary_of_forecast += "Skipped: Forecast already made\n"
         return summary_of_forecast
 
+    # Research in Qwen mode cannot work without SoCLaaS (Q46024, 2026-10-01:
+    # every Qwen step got HTTP 503 and a one-page brief was submitted with
+    # three hours to spare). Not submitting lets a later cron run retry.
+    close_time = question_details.get("scheduled_close_time")
+    qwen_outage_note = ""
+    if qwen_ladder.research_uses_soclaas():
+        available, detail = await qwen_ladder.wait_until_available()
+        if not available:
+            defer, reason = _outage_deferral(close_time)
+            if defer:
+                line = (
+                    f"{DEFERRED_MARKER} SoCLaaS unavailable before research ({detail}); "
+                    f"the question {reason}. Nothing submitted."
+                )
+                logger.warning("Question %s: %s", question_id, line)
+                summary_of_forecast += line + "\n"
+                return summary_of_forecast
+            qwen_outage_note = (
+                f"QWEN OUTAGE: SoCLaaS unavailable before research ({detail}) and the "
+                f"question {reason}; forecasting on degraded research."
+            )
+            logger.warning("Question %s: %s", question_id, qwen_outage_note)
+
     artifacts = QuestionArtifacts(question_id, post_id, title, question_type or "unknown")
     research_trace.begin_question(artifacts.dir)
     question_started = time.monotonic()
+    outage_tally = qwen_ladder.track_outages(give_up_after=QWEN_OUTAGE_DEFER_FAILURES)
 
     # The reserve keeps optional research work (extra scrape cycles, provider
     # fall-through, artifact retry) from spending the input budget that the
@@ -218,6 +272,33 @@ async def forecast_individual_question(
             compiled_report=research_bundle.compiled_report,
             artifact_check=research_bundle.artifact_check,
         )
+
+        # An outage that began after the health check: the ladders back off,
+        # but if several still gave up, the brief is too hollow to submit.
+        if outage_tally.unavailable_ladders and not qwen_outage_note:
+            outage_steps = ", ".join(outage_tally.labels)
+            if outage_tally.confirmed:
+                defer, reason = _outage_deferral(close_time)
+                if defer:
+                    line = (
+                        f"{DEFERRED_MARKER} SoCLaaS went down during research "
+                        f"({outage_tally.unavailable_ladders} steps gave up: {outage_steps}); "
+                        f"the question {reason}. Nothing submitted."
+                    )
+                    logger.warning("Question %s: %s", question_id, line)
+                    research_trace.finalize()
+                    summary_of_forecast += line + "\n"
+                    return summary_of_forecast
+                qwen_outage_note = (
+                    f"QWEN OUTAGE: SoCLaaS went down during research and the question "
+                    f"{reason}; forecasting on degraded research ({outage_steps})."
+                )
+            else:
+                qwen_outage_note = (
+                    f"QWEN OUTAGE (partial): {outage_tally.unavailable_ladders} research "
+                    f"step(s) gave up on SoCLaaS: {outage_steps}."
+                )
+            logger.warning("Question %s: %s", question_id, qwen_outage_note)
 
         forecast_started = time.monotonic()
         if question_type == "binary":
@@ -292,6 +373,9 @@ async def forecast_individual_question(
         logger.warning("Question %s: %s", question_id, degradation_line)
         summary_of_forecast += f"{degradation_line}\n"
 
+    if qwen_outage_note:
+        summary_of_forecast += f"{qwen_outage_note}\n"
+
     summary_of_forecast += (
         f"Wall time: research {research_seconds:.1f}s + forecast {forecast_seconds:.1f}s "
         f"= {total_seconds:.1f}s total\n"
@@ -305,10 +389,23 @@ async def forecast_individual_question(
     abstained = result.forecast is None
     forecast_payload = create_forecast_payload(result.forecast, question_type)
 
+    # What gets POSTED is a short summary of result.comment (the full rationale
+    # of every run, often 10-20 KB). Cosmetic: built after the forecast is final,
+    # free Qwen only, falls back to an excerpt, never fails the question.
+    posted_comment = ""
+    if submit_prediction and not abstained:
+        posted_comment = await short_comment(
+            title=title,
+            question_type=question_type or "",
+            forecast=result.forecast,
+            full_comment=result.comment,
+        )
+
     artifacts.save_runs(
         prompt=result.prompt,
         run_sections=result.run_transcripts,
         final_summary=result.comment,
+        posted_comment=posted_comment,
     )
     artifacts.save_audit(
         usage_yaml_table=usage_yaml_table,
@@ -323,6 +420,7 @@ async def forecast_individual_question(
             "tournaments": post_tournaments(post_details),
             "artifact_check": research_bundle.artifact_check,
             "degraded_search_providers": research_bundle.degraded_search_providers,
+            "qwen_outage": qwen_outage_note or None,
             "run_values": result.run_values,
             "final_forecast": result.forecast,
             "forecast_payload": forecast_payload,
@@ -334,6 +432,7 @@ async def forecast_individual_question(
             "llm_calls": llm_calls,
             "abstained": abstained,
             "submitted": submit_prediction and not abstained,
+            "posted_comment": posted_comment or None,
         }
     )
 
@@ -345,7 +444,8 @@ async def forecast_individual_question(
         summary_of_forecast += "Abstained: no usable forecast; nothing submitted.\n"
     elif submit_prediction:
         await post_question_prediction(question_id, forecast_payload)
-        await post_question_comment(post_id, result.comment)
+        if posted_comment:
+            await post_question_comment(post_id, posted_comment)
         summary_of_forecast += "Posted: Forecast was posted to Metaculus.\n"
 
     return summary_of_forecast
@@ -445,6 +545,18 @@ async def forecast_questions(
     )
     logger.info(run_usage_yaml_table)
     logger.info(await get_openrouter_usage_summary())
+
+    deferred = [
+        question_id
+        for (question_id, _), forecast_summary in zip(open_question_id_post_id, forecast_summaries)
+        if isinstance(forecast_summary, str) and DEFERRED_MARKER in forecast_summary
+    ]
+    if deferred:
+        logger.warning(
+            "\n%s\n%d question(s) DEFERRED because SoCLaaS Qwen was down (nothing "
+            "submitted; a later cron run will retry): %s\n%s",
+            "#" * 100, len(deferred), deferred, "#" * 100,
+        )
 
     errors = []
     for question_id_post_id, forecast_summary in zip(

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from llm_client import call_llm
+from monetary_cost_manager import HardLimitExceededError
 from utils import _truncate_text
 
 logger = logging.getLogger(__name__)
@@ -159,6 +160,7 @@ async def generate_google_search_query_plan(
     cache_key = hashlib.sha256(
         "\x00".join([prompt, str(model), str(temperature), str(max_queries)]).encode("utf-8")
     ).hexdigest()
+    fallback = _fallback_query_plan(title, asknews_research, max_queries)
 
     async with _QUERY_PLAN_CACHE_LOCK:
         task = _QUERY_PLAN_CACHE.get(cache_key)
@@ -166,7 +168,9 @@ async def generate_google_search_query_plan(
             if len(_QUERY_PLAN_CACHE) >= _MAX_QUERY_PLAN_CACHE_ENTRIES:
                 _QUERY_PLAN_CACHE.clear()
             task = asyncio.ensure_future(
-                _generate_query_plan_uncached(prompt, model, temperature, max_queries)
+                _generate_query_plan_uncached(
+                    prompt, model, temperature, max_queries, fallback=fallback
+                )
             )
             _QUERY_PLAN_CACHE[cache_key] = task
         else:
@@ -188,15 +192,65 @@ async def _generate_query_plan_uncached(
     model: str,
     temperature: float,
     max_queries: int,
+    fallback: list[GoogleSearchQuery] | None = None,
 ) -> list[GoogleSearchQuery]:
-    response = await call_llm(
-        prompt,
-        model=model,
-        temperature=temperature,
-        _label="google-query-generation",
-    )
-    parsed = _extract_json_value(response)
-    queries = _parse_query_plan(parsed)
+    try:
+        response = await call_llm(
+            prompt,
+            model=model,
+            temperature=temperature,
+            _label="google-query-generation",
+        )
+        parsed = _extract_json_value(response)
+        queries = _parse_query_plan(parsed)
+        return _dedupe_and_cap_queries(queries, max_queries)
+    except HardLimitExceededError:
+        raise
+    except Exception as exc:
+        if not fallback:
+            raise
+        # Q46024: this one LLM step failing (SoCLaaS down) used to sink SerpAPI,
+        # Tavily and Firecrawl in turn, so no web search ran at all. The
+        # fallback is returned -- and so cached -- for every provider.
+        logger.warning(
+            "[query-maker] query generation failed (%s: %s); searching with %d "
+            "fallback queries: %s",
+            type(exc).__name__, exc, len(fallback), [item.query for item in fallback],
+        )
+        return list(fallback)
+
+
+EVIDENCE_PLAN_QUERIES_HEADING = "## Search Queries To Prefer"
+
+
+def evidence_plan_queries(text: str) -> list[GoogleSearchQuery]:
+    """The bullets under the evidence plan's "Search Queries To Prefer" heading."""
+    if EVIDENCE_PLAN_QUERIES_HEADING not in (text or ""):
+        return []
+    section = text.split(EVIDENCE_PLAN_QUERIES_HEADING, 1)[1].split("\n#", 1)[0]
+    queries = []
+    for line in section.splitlines():
+        line = line.strip()
+        if not line.startswith(("- ", "* ")):
+            continue
+        query = _normalise_query(line[2:])
+        if query:
+            queries.append(GoogleSearchQuery(
+                query=query, purpose="from the evidence plan (query generation failed)", priority=2,
+            ))
+    return queries
+
+
+def _fallback_query_plan(
+    title: str, research_context: str, max_queries: int
+) -> list[GoogleSearchQuery]:
+    """Queries that need no LLM: the evidence plan's own, else the title."""
+    queries = evidence_plan_queries(research_context)
+    if not queries and _normalise_query(title or ""):
+        queries = [GoogleSearchQuery(
+            query=_normalise_query(title), purpose="question title (query generation failed)",
+            priority=1,
+        )]
     return _dedupe_and_cap_queries(queries, max_queries)
 
 

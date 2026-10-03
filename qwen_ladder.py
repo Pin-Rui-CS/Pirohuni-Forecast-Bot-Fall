@@ -7,11 +7,17 @@ get the same policy without changing a line at the call site:
 
   1. One streamed request at the label's starting effort (XHigh by default).
   2. If it times out, loses the stream, finishes without [DONE]/stop, returns
-     nothing, or gets HTTP 408/5xx: one more request at Medium, built from the
-     same original kwargs -- never from the failed partial answer.
-  3. Auth, quota and 429 refusals stop immediately. Less thinking cures none
+     nothing, or the answer is unusable: one more request at Medium, built from
+     the same original kwargs -- never from the failed partial answer.
+  3. HTTP 408/5xx or a refused connection means SoCLaaS itself is unavailable,
+     which less thinking does not cure. The same rung is retried after a
+     backoff (UNAVAILABLE_BACKOFF_SECONDS), and the backoff is applied to the
+     shared endpoint gate so every other Qwen call pauses too instead of
+     hammering an outage. When the backoffs run out, QwenUnavailable is raised
+     and counted against the current question (see OutageTally).
+  4. Auth, quota and 429 refusals stop immediately. Less thinking cures none
      of them.
-  4. When every rung fails, raise QwenLadderFailed. It is not an OpenAI
+  5. When every rung fails, raise QwenLadderFailed. It is not an OpenAI
      exception, so llm_client's three-attempt retry loop does not turn one
      ladder into three. There is no paid fallback here.
 
@@ -51,6 +57,12 @@ MAX_TOKENS = 65536
 # The sampler the A1 screen and the precompression replay used.
 SAMPLER = {"temperature": 1, "top_p": .95, "top_k": 20}
 RETRY_STATUS = frozenset({408, 500, 502, 503, 504})
+# Waits before re-sending after SoCLaaS reports itself unavailable. On
+# 2026-10-01 (Q46024) every Qwen call got HTTP 503 for the whole research
+# window; the old ladder spent both rungs within ~2 s and gave up, so one
+# outage silently emptied the brief. ~100 s of patience rides out a blip;
+# a longer outage is the orchestrator's job (wait_until_available + deferral).
+UNAVAILABLE_BACKOFF_SECONDS: tuple[float, ...] = (10.0, 30.0, 60.0)
 REFUSAL_CODES = frozenset({"401", "402", "403", "429"})
 REFUSAL_TERMS = ("quota", "budget", "rate_limit", "rate limit", "unauthorized",
                  "forbidden", "authentication", "access denied")
@@ -75,8 +87,61 @@ class AttemptFailed(RuntimeError):
     """This rung failed in a way the next rung might not."""
 
 
+class Unavailable(AttemptFailed):
+    """SoCLaaS answered 408/5xx or refused the connection: wait, don't step down."""
+
+
 class QwenLadderFailed(RuntimeError):
     """Every rung failed, or a refusal stopped the ladder."""
+
+
+class QwenUnavailable(QwenLadderFailed):
+    """The ladder gave up because SoCLaaS stayed unavailable through every backoff."""
+
+
+@dataclass
+class OutageTally:
+    """Per-question count of ladders that gave up because SoCLaaS was down.
+
+    The orchestrator installs one per question (track_outages) and reads it
+    after research to decide whether the brief is too hollow to submit. Once
+    ``give_up_after`` ladders have given up, the outage is confirmed for this
+    question and later ladders fail at once instead of each waiting out the
+    backoffs: the question is going to be deferred anyway.
+    """
+    unavailable_ladders: int = 0
+    labels: list[str] = field(default_factory=list)
+    give_up_after: int = 0  # 0 = never short-circuit
+
+    @property
+    def confirmed(self) -> bool:
+        return 0 < self.give_up_after <= self.unavailable_ladders
+
+
+_outage_tally: ContextVar[OutageTally | None] = ContextVar("qwen_outage_tally", default=None)
+
+
+def track_outages(give_up_after: int = 0) -> OutageTally:
+    """Start counting for the current task (and the tasks/threads it spawns)."""
+    tally = OutageTally(give_up_after=give_up_after)
+    _outage_tally.set(tally)
+    return tally
+
+
+def _raise_if_outage_confirmed(label: str) -> None:
+    tally = _outage_tally.get()
+    if tally is not None and tally.confirmed:
+        raise QwenUnavailable(
+            f"{label}: skipped -- SoCLaaS outage already confirmed for this question "
+            f"({tally.unavailable_ladders} steps gave up)"
+        )
+
+
+def _note_unavailable_ladder(label: str) -> None:
+    tally = _outage_tally.get()
+    if tally is not None:
+        tally.unavailable_ladders += 1
+        tally.labels.append(label)
 
 
 @dataclass
@@ -175,7 +240,7 @@ def timeout_seconds(label: str = "") -> float:
 # Labels whose calls are small decisions, not long reasoning: an API-agent step
 # picks the next tool call, and XHigh would spend minutes on each of six steps.
 # QWEN_START_EFFORT still overrides.
-DEFAULT_START_EFFORT: dict[str, str] = {"apiagent": "medium"}
+DEFAULT_START_EFFORT: dict[str, str] = {"apiagent": "medium", "forecast-comment": "medium"}
 
 
 def efforts_for(label: str) -> tuple[str, ...]:
@@ -228,8 +293,39 @@ def _refuse_or_retry(route: llm_provider.Route, status: int, response: Any) -> N
     """Map an HTTP error status onto a rung failure or a hard stop."""
     llm_provider.note_failure(route, SimpleNamespace(status_code=status, response=response))
     if status in RETRY_STATUS:
-        raise AttemptFailed(f"HTTP {status}")
+        raise Unavailable(f"HTTP {status}")
     raise StreamRefused(f"SoCLaaS HTTP {status}; no lower-effort retry")
+
+
+def _unavailable_backoff(route: llm_provider.Route, delay: float) -> bool:
+    """Push the shared gate back by ``delay``. False when the route is ungated."""
+    gate = llm_provider.gate_for(route)
+    if not gate.enabled:
+        return False
+    gate.penalise(delay, reason="SoCLaaS unavailable")
+    return True
+
+
+async def _wait_unavailable_async(route: llm_provider.Route, delay: float) -> None:
+    if _unavailable_backoff(route, delay):
+        await llm_provider.gate_for(route).wait_async()
+    else:
+        await asyncio.sleep(delay)
+
+
+def _wait_unavailable_sync(route: llm_provider.Route, delay: float) -> None:
+    if _unavailable_backoff(route, delay):
+        llm_provider.gate_for(route).wait_sync()
+    else:
+        time.sleep(delay)
+
+
+def _give_up_unavailable(label: str, failures: list[str]) -> QwenUnavailable:
+    _note_unavailable_ladder(label)
+    return QwenUnavailable(
+        f"{label}: SoCLaaS unavailable through {len(UNAVAILABLE_BACKOFF_SECONDS)} backoffs -- "
+        + "; ".join(failures)
+    )
 
 
 def _completion(state: StreamState, effort: str, usages: list[dict | None]):
@@ -287,18 +383,20 @@ def _client_settings(route: llm_provider.Route, label: str = "") -> dict[str, An
 async def run_async(route: llm_provider.Route, kwargs: dict[str, Any], *,
                     transport: httpx.AsyncBaseTransport | None = None):
     label = current_label.get() or "unlabelled"
+    _raise_if_outage_confirmed(label)
     call_id = uuid4().hex[:12]
     url = route.endpoint.base_url + "/chat/completions"
     deadline = timeout_seconds(label)
     usages: list[dict | None] = []
     failures: list[str] = []
+    efforts = efforts_for(label)
+    backoffs = list(UNAVAILABLE_BACKOFF_SECONDS)
+    rung = 0
     async with httpx.AsyncClient(
         transport=transport or httpx.AsyncHTTPTransport(retries=0), **_client_settings(route, label),
     ) as client:
-        for rung, effort in enumerate(efforts_for(label)):
-            if rung:
-                # The caller gated the first request; a retry is another request.
-                await llm_provider.gate_for(route).wait_async()
+        while rung < len(efforts):
+            effort = efforts[rung]
             state, start, outcome, error = StreamState(), time.monotonic(), "interrupted", None
             try:
                 async with asyncio.timeout(deadline):
@@ -317,6 +415,8 @@ async def run_async(route: llm_provider.Route, kwargs: dict[str, Any], *,
                 outcome = "ok"
             except TimeoutError:
                 outcome, error = "timeout", f"no complete answer within {deadline:.0f}s"
+            except (Unavailable, httpx.ConnectError, httpx.ConnectTimeout) as exc:
+                outcome, error = "unavailable", f"{type(exc).__name__}: {exc}"
             except (httpx.TransportError, json.JSONDecodeError, AttemptFailed) as exc:
                 outcome, error = "failed", f"{type(exc).__name__}: {exc}"
             except StreamRefused as exc:
@@ -328,6 +428,17 @@ async def run_async(route: llm_provider.Route, kwargs: dict[str, Any], *,
             if outcome == "ok":
                 return _completion(state, effort, usages)
             failures.append(f"{effort} {outcome}: {error}")
+            if outcome == "unavailable":
+                if not backoffs:
+                    raise _give_up_unavailable(label, failures)
+                # Same rung again: the request was never served, so less
+                # thinking would only waste the effort the label asked for.
+                await _wait_unavailable_async(route, backoffs.pop(0))
+                continue
+            rung += 1
+            if rung < len(efforts):
+                # The caller gated the first request; a retry is another request.
+                await llm_provider.gate_for(route).wait_async()
     raise QwenLadderFailed(f"{label}: every Qwen attempt failed -- " + "; ".join(failures))
 
 
@@ -339,17 +450,20 @@ def run_sync(route: llm_provider.Route, kwargs: dict[str, Any], *,
     checked between chunks, so a stream that keeps trickling cannot run on.
     """
     label = current_label.get() or "unlabelled"
+    _raise_if_outage_confirmed(label)
     call_id = uuid4().hex[:12]
     url = route.endpoint.base_url + "/chat/completions"
     deadline = timeout_seconds(label)
     usages: list[dict | None] = []
     failures: list[str] = []
+    efforts = efforts_for(label)
+    backoffs = list(UNAVAILABLE_BACKOFF_SECONDS)
+    rung = 0
     with httpx.Client(
         transport=transport or httpx.HTTPTransport(retries=0), **_client_settings(route, label),
     ) as client:
-        for rung, effort in enumerate(efforts_for(label)):
-            if rung:
-                llm_provider.gate_for(route).wait_sync()
+        while rung < len(efforts):
+            effort = efforts[rung]
             state, start, outcome, error = StreamState(), time.monotonic(), "interrupted", None
             try:
                 with client.stream("POST", url, json=_payload(kwargs, effort)) as response:
@@ -367,8 +481,12 @@ def run_sync(route: llm_provider.Route, kwargs: dict[str, Any], *,
                 check_complete(state)
                 check_required_output(label, state)
                 outcome = "ok"
+            except httpx.ConnectTimeout as exc:
+                outcome, error = "unavailable", f"{type(exc).__name__}: {exc}"
             except (TimeoutError, httpx.TimeoutException):
                 outcome, error = "timeout", f"no complete answer within {deadline:.0f}s"
+            except (Unavailable, httpx.ConnectError) as exc:
+                outcome, error = "unavailable", f"{type(exc).__name__}: {exc}"
             except (httpx.TransportError, json.JSONDecodeError, AttemptFailed) as exc:
                 outcome, error = "failed", f"{type(exc).__name__}: {exc}"
             except StreamRefused as exc:
@@ -380,7 +498,110 @@ def run_sync(route: llm_provider.Route, kwargs: dict[str, Any], *,
             if outcome == "ok":
                 return _completion(state, effort, usages)
             failures.append(f"{effort} {outcome}: {error}")
+            if outcome == "unavailable":
+                if not backoffs:
+                    raise _give_up_unavailable(label, failures)
+                _wait_unavailable_sync(route, backoffs.pop(0))
+                continue
+            rung += 1
+            if rung < len(efforts):
+                llm_provider.gate_for(route).wait_sync()
     raise QwenLadderFailed(f"{label}: every Qwen attempt failed -- " + "; ".join(failures))
+
+
+# --- Is SoCLaaS up at all? ---------------------------------------------------
+# Asked once per question before research (Q46024: SoCLaaS answered 503 for the
+# whole research window and a one-page brief was submitted). Availability only:
+# a 400 still means the server is answering.
+
+_availability_lock: asyncio.Lock | None = None
+_last_up_at = 0.0
+_confirmed_down = False
+# A probe that succeeded this recently is trusted without another request.
+_FRESH_SECONDS = 120.0
+
+
+def research_uses_soclaas() -> bool:
+    """True when the ladder is on and research call sites are routed to SoCLaaS Qwen."""
+    if not enabled():
+        return False
+    route = llm_provider.route_for_model(llm_provider.QWEN_RESEARCH_MODEL)
+    if route.endpoint.name != llm_provider.ENDPOINT_SOCLAAS.name:
+        return False
+    return any(llm_provider.label_routes_to_qwen(label)
+               for label in ("compiler/research-brief", "artifact-check", "google-query-generation"))
+
+
+async def probe(*, transport: httpx.AsyncBaseTransport | None = None) -> tuple[bool, str]:
+    """One tiny streamed request: (up, detail)."""
+    route = llm_provider.route_for_model(llm_provider.QWEN_RESEARCH_MODEL)
+    payload = {"model": route.model_id, "stream": True, "max_tokens": 256,
+               "reasoning_effort": "medium",
+               "messages": [{"role": "user", "content": "Reply with the single word OK."}]}
+    try:
+        await llm_provider.gate_for(route).wait_async()
+        async with httpx.AsyncClient(
+            transport=transport or httpx.AsyncHTTPTransport(retries=0),
+            headers={"Authorization": "Bearer " + llm_provider.api_key_for(route.endpoint)},
+            timeout=httpx.Timeout(connect=15, read=90, write=15, pool=15),
+        ) as client:
+            async with client.stream("POST", route.endpoint.base_url + "/chat/completions",
+                                     json=payload) as response:
+                status = response.status_code
+                if status >= 400:
+                    body = (await response.aread()).decode("utf-8", "replace")[:300]
+                    quota = llm_provider.is_quota_exhaustion(SimpleNamespace(
+                        status_code=status, response=SimpleNamespace(text=body)))
+                    if status in RETRY_STATUS or status in (401, 402, 403) or quota:
+                        return False, f"HTTP {status} {body}".strip()
+                    return True, f"HTTP {status}"
+                async for line in response.aiter_lines():
+                    raw = line[5:].strip() if line.startswith("data:") else ""
+                    if raw == "[DONE]":
+                        return True, f"HTTP {status}"
+                    if raw:
+                        error = json.loads(raw).get("error")
+                        if error:
+                            return False, f"HTTP {status} stream error: {json.dumps(error)[:200]}"
+                        return True, f"HTTP {status}"
+                return False, f"HTTP {status} but the stream closed without data"
+    except (httpx.TransportError, json.JSONDecodeError) as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+async def wait_until_available(*, backoffs: tuple[float, ...] | None = None,
+                               transport: httpx.AsyncBaseTransport | None = None) -> tuple[bool, str]:
+    """Probe, retrying on the ladder's own backoff schedule: (up, detail).
+
+    Shared by concurrent questions: one probing sequence at a time, a recent
+    success is reused, and once a full wait has ended down, later questions in
+    the same run get a single probe instead of waiting the schedule again.
+    """
+    global _availability_lock, _last_up_at, _confirmed_down
+    if _availability_lock is None:
+        _availability_lock = asyncio.Lock()
+    schedule = UNAVAILABLE_BACKOFF_SECONDS if backoffs is None else backoffs
+    async with _availability_lock:
+        if time.monotonic() - _last_up_at < _FRESH_SECONDS:
+            return True, "recently probed"
+        delays = () if _confirmed_down else schedule
+        for attempt in range(len(delays) + 1):
+            if attempt:
+                await asyncio.sleep(delays[attempt - 1])
+            up, detail = await probe(transport=transport)
+            logger.info("[qwen-ladder] availability probe %d: %s (%s)",
+                        attempt + 1, "up" if up else "DOWN", detail)
+            if up:
+                _last_up_at, _confirmed_down = time.monotonic(), False
+                return True, detail
+        _confirmed_down = True
+        return False, detail
+
+
+def reset_availability() -> None:
+    """Forget cached availability (tests)."""
+    global _availability_lock, _last_up_at, _confirmed_down
+    _availability_lock, _last_up_at, _confirmed_down = None, 0.0, False
 
 
 class _AsyncCompletions:

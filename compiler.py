@@ -749,6 +749,7 @@ async def _try_llm_compile(
         },
         {"role": "user", "content": prompt},
     ]
+    usage_handle = None
     try:
         await llm_provider.gate_for(route).wait_async()
         async with llm_rate_limiter:
@@ -824,6 +825,18 @@ async def _try_llm_compile(
         raise
     except Exception as exc:
         logger.warning("Research compiler LLM pass failed: %s: %s", type(exc).__name__, exc)
+        if usage_handle is not None:
+            usage_handle.record_failure(f"{type(exc).__name__}: {exc}")
+        # Without this the trace shows only "compiler output: ok" for what is
+        # really the deterministic fallback brief (Q46024).
+        research_trace.emit(
+            "brief",
+            "compiler LLM pass failed; deterministic fallback brief used",
+            "",
+            status="failed",
+            error=f"{type(exc).__name__}: {exc}",
+            meta={"chain": "brief", "model": model},
+        )
         return None
 
 
@@ -1128,46 +1141,33 @@ def _build_heuristic_report(
     else:
         lines.append("- No evidence plan was available.")
 
-    lines.extend(["", "## Direct Evidence"])
+    # Each source appears ONCE, with page chrome stripped. Q46024's fallback
+    # brief carried the resolution scrape twice (here and under a second
+    # heading), its site menu included, plus three sections of fixed filler.
+    lines.extend(["", "## Resolution Source Findings"])
     if resolution_sections:
-        lines.append(_join_compact(resolution_sections, max_chars=5_000))
+        lines.append(_join_compact(
+            [_strip_page_chrome(part) for part in resolution_sections], max_chars=12_000))
     else:
-        lines.append("- No direct resolution-source evidence was available.")
-
-    lines.extend(["", "## Near Proxy Evidence"])
-    lines.append("- Review market and scraped-search sections below for close-but-not-identical evidence.")
-
-    lines.extend(["", "## Weak Proxy Evidence"])
-    lines.append("- Treat adjacent markets, broad commentary, and indirect technical/context signals cautiously unless they directly match the resolution criteria.")
-
-    lines.extend(["", "## Background Color"])
-    if news_sections:
-        lines.append("- AskNews and general scraped evidence may provide useful context, but should not override missing direct base-rate artifacts.")
-    else:
-        lines.append("- No background news context was available.")
+        lines.append("- No resolution-source scrape was available or no URL was present in the resolution criteria.")
 
     lines.extend(["", "## Market Signals"])
     if market_sections:
         lines.append(_join_compact(market_sections, max_chars=8_000))
     else:
-        lines.append("- No useful Polymarket, Kalshi, or Manifold signal found.")
-
-    lines.extend(["", "## Resolution Source Findings"])
-    if resolution_sections:
-        lines.append(_join_compact(resolution_sections, max_chars=10_000))
-    else:
-        lines.append("- No resolution-source scrape was available or no URL was present in the resolution criteria.")
+        lines.append("- No usable Polymarket, Kalshi, or Manifold result (none found, or the search failed).")
 
     lines.extend(["", "## News And External Evidence"])
     if news_sections:
-        lines.append(_join_compact(news_sections, max_chars=14_000))
+        lines.append(_join_compact(
+            [_strip_page_chrome(part) for part in news_sections], max_chars=14_000))
     else:
         lines.append("- No AskNews articles were available.")
 
     if other_sections:
         lines.extend(["", "## Other Provider Output"])
         for provider, content in other_sections:
-            lines.extend([f"### {provider}", _truncate_text(content, 4_000)])
+            lines.extend([f"### {provider}", _truncate_text(_strip_page_chrome(content), 4_000)])
 
     lines.extend(
         [
@@ -1270,6 +1270,59 @@ def _format_sections(sections: list[ProviderResult]) -> str:
     return "\n\n---\n\n".join(
         f"## Provider: {provider}\n{content}" for provider, content in sections
     )
+
+
+# Lines that are navigation, not content: a bare image/link (optionally with a
+# trailing markdown line break), a lone backslash, or a one/two-character menu
+# initial ("W\\", "$\\").
+_CHROME_LINE = re.compile(
+    r"^\s*(?:!?\[[^\]]*\]\([^)]*\)\s*\\*|\\+|\S{1,2}\\*|\$\\*)\s*$"
+)
+
+
+# Markdown images, including ones whose alt text wraps onto the next line.
+_MARKDOWN_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+# A run of at least this many tiny label paragraphs is a menu or footer.
+_MENU_RUN = 5
+
+
+def _is_menu_label(paragraph: str) -> bool:
+    """1-4 words, one line, no sentence punctuation or markup: "Chess Culture"."""
+    text = paragraph.strip()
+    return (
+        "\n" not in text
+        and 0 < len(text.split()) <= 4
+        and not re.search(r"[.!?:*|]", text)
+        and not text.startswith(("-", "#", ">"))
+    )
+
+
+def _strip_page_chrome(text: str) -> str:
+    """Drop images, site menus and exact-repeat paragraphs from a raw page scrape.
+
+    Only the deterministic fallback uses it: there the scrape reaches the
+    forecaster unsummarised (the summary step needs the LLM that just failed).
+    """
+    text = _MARKDOWN_IMAGE.sub("", text)
+    kept = [line for line in text.splitlines() if not _CHROME_LINE.match(line)]
+    paragraphs, seen = [], set()
+    for paragraph in re.split(r"\n\s*\n", "\n".join(kept)):
+        key = " ".join(paragraph.split())
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        paragraphs.append(paragraph.strip("\n"))
+    result, run = [], []
+    for paragraph in paragraphs + [""]:
+        if paragraph and _is_menu_label(paragraph):
+            run.append(paragraph)
+            continue
+        if len(run) < _MENU_RUN:
+            result.extend(run)
+        run = []
+        if paragraph:
+            result.append(paragraph)
+    return "\n\n".join(result)
 
 
 def _join_compact(parts: list[str], max_chars: int) -> str:

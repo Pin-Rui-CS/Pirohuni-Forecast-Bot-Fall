@@ -955,6 +955,12 @@ def _qwen_label_override(label: str | None) -> str | None:
     return None
 
 
+def label_routes_to_qwen(label: str) -> bool:
+    """True when QWEN_RESEARCH_LABELS or the profile sends this call site to Qwen."""
+    override = active_profile().label_overrides.get(label)
+    return (override or _qwen_label_override(label)) == QWEN_RESEARCH_MODEL
+
+
 def route_for(model: str, *, label: str | None = None) -> Route:
     """Internal role name (or a concrete id) -> Route. Never raises.
 
@@ -1262,14 +1268,13 @@ class RateGate:
             logger.debug("[rate] %s: waiting %.2fs for a slot", self.name, delay)
             time.sleep(delay)
 
-    def penalise(self, seconds: float) -> None:
-        """A 429 arrived: push the whole queue back, not just this caller."""
+    def penalise(self, seconds: float, reason: str = "a rate-limit response") -> None:
+        """A 429 (or an outage) arrived: push the whole queue back, not just this caller."""
         if seconds <= 0:
             return
         with self._lock:
             self._next_at = max(self._next_at, time.monotonic() + seconds)
-        logger.warning("[rate] %s: backing off %.1fs after a rate-limit response",
-                       self.name, seconds)
+        logger.warning("[rate] %s: backing off %.1fs after %s", self.name, seconds, reason)
 
 
 _NULL_GATE: Final = RateGate(0.0, "ungated")

@@ -16,6 +16,7 @@ The function is synchronous and safe to call from asyncio via asyncio.to_thread(
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sys
 from pathlib import Path
@@ -30,6 +31,8 @@ import llm_provider
 from monetary_cost_manager import (
     HardLimitExceededError,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Config
@@ -103,13 +106,16 @@ def _generate_search_queries(question: str) -> list[str]:
                 return queries
     except HardLimitExceededError:
         raise
-    except Exception:
-        pass
-    # Fallback: use keyword extraction
-    kw = _extract_keywords(question)
+    except Exception as exc:
+        logger.warning("[manifold] search-query generation failed (%s: %s); "
+                       "searching with the question title's keywords", type(exc).__name__, exc)
+    # Title only: the block also carries the evidence plan, and searching
+    # with all of it got HTTP 422 from Polymarket on Q46024.
+    title = question.removeprefix("## Forecasting question").split("\n## ", 1)[0].strip()
+    kw = _extract_keywords(title)
     tokens = kw.split()
     short = " ".join(tokens[:3]) if len(tokens) > 3 else kw
-    return _unique_nonempty([kw, short, question.strip()])
+    return _unique_nonempty([kw, short, title])
 
 
 # ---------------------------------------------------------------------------
