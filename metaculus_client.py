@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import datetime
 from email.utils import parsedate_to_datetime
 import json
@@ -294,7 +295,18 @@ def list_posts_from_tournament(
     return data
 
 
-def get_open_question_ids_from_tournament(tournament_id: int | str = DEFAULT_TOURNAMENT_ID) -> list[tuple[int, int]]:
+@dataclass(frozen=True)
+class OpenQuestion:
+    """One open question from a tournament listing, with its close time."""
+
+    question_id: int
+    post_id: int
+    scheduled_close_time: str | None = None
+
+
+def list_open_questions(tournament_id: int | str = DEFAULT_TOURNAMENT_ID) -> list[OpenQuestion]:
+    """Open questions in a tournament. The close time comes with the listing,
+    so ordering a run's queue by it costs no extra Metaculus calls."""
     posts = list_posts_from_tournament(tournament_id)
 
     post_dict = dict()
@@ -302,7 +314,7 @@ def get_open_question_ids_from_tournament(tournament_id: int | str = DEFAULT_TOU
         if question := post.get("question"):
             post_dict[post["id"]] = [question]
 
-    open_question_id_post_id: list[tuple[int, int]] = []
+    open_questions: list[OpenQuestion] = []
     for post_id, questions in post_dict.items():
         for question in questions:
             if question.get("status") == "open":
@@ -310,9 +322,15 @@ def get_open_question_ids_from_tournament(tournament_id: int | str = DEFAULT_TOU
                     f"ID: {question['id']}\nQ: {question['title']}\nCloses: "
                     f"{question['scheduled_close_time']}"
                 )
-                open_question_id_post_id.append((question["id"], post_id))
+                open_questions.append(
+                    OpenQuestion(question["id"], post_id, question.get("scheduled_close_time"))
+                )
 
-    return open_question_id_post_id
+    return open_questions
+
+
+def get_open_question_ids_from_tournament(tournament_id: int | str = DEFAULT_TOURNAMENT_ID) -> list[tuple[int, int]]:
+    return [(q.question_id, q.post_id) for q in list_open_questions(tournament_id)]
 
 
 async def get_post_details(post_id: int) -> dict:

@@ -75,6 +75,7 @@ the env overrides that change reasoning effort and prompt caching. Run
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import threading
@@ -479,6 +480,7 @@ class Endpoint:
     requests_per_minute: float = 0.0   # 0 == ungated
     timeout_seconds: float = 600.0
     probe_on_start: bool = False
+    max_in_flight: int = 0             # simultaneous streams; 0 == unlimited
 
 
 ENDPOINT_OPENROUTER: Final = Endpoint(
@@ -516,6 +518,13 @@ ENDPOINT_SOCLAAS: Final = Endpoint(
     # fires on a dead connection, and the gateway's 502 names the real limit.
     timeout_seconds=330.0,
     probe_on_start=True,
+    # CONCURRENCY. The rate above spaces request STARTS; a long XHigh stream
+    # then runs for minutes, so starts alone do not bound how many are open.
+    # The gateway answered a fifth simultaneous stream with 429 (45707 A/B run,
+    # 2026-09-21), and on 2026-10-05 two questions precompressing at once held
+    # six streams open: SoCLaaS replied 429 "dispatch queue wait expired" and
+    # the main-tournament question 46056 was lost. Process-wide cap.
+    max_in_flight=int(os.getenv("SOCLAAS_MAX_IN_FLIGHT", "4")),
 )
 
 
@@ -955,12 +964,6 @@ def _qwen_label_override(label: str | None) -> str | None:
     return None
 
 
-def label_routes_to_qwen(label: str) -> bool:
-    """True when QWEN_RESEARCH_LABELS or the profile sends this call site to Qwen."""
-    override = active_profile().label_overrides.get(label)
-    return (override or _qwen_label_override(label)) == QWEN_RESEARCH_MODEL
-
-
 def route_for(model: str, *, label: str | None = None) -> Route:
     """Internal role name (or a concrete id) -> Route. Never raises.
 
@@ -1234,14 +1237,23 @@ class RateGate:
 
     A gate with ``requests_per_minute <= 0`` is a no-op, which is what the
     OpenRouter and OpenAI endpoints use.
+
+    ``max_in_flight`` separately caps how many streams are open at once
+    (``in_flight_async`` / ``in_flight_sync``). One thread-safe semaphore
+    serves both worlds; the async side polls it so the event loop never
+    blocks. 0 means unlimited.
     """
 
-    def __init__(self, requests_per_minute: float, name: str = "") -> None:
+    _IN_FLIGHT_POLL_SECONDS = 0.5
+
+    def __init__(self, requests_per_minute: float, name: str = "", max_in_flight: int = 0) -> None:
         self.name = name
         self.requests_per_minute = requests_per_minute
         self._interval = 0.0 if requests_per_minute <= 0 else 60.0 / requests_per_minute
         self._lock = threading.Lock()
         self._next_at = 0.0
+        self.max_in_flight = max_in_flight
+        self._slots = threading.BoundedSemaphore(max_in_flight) if max_in_flight > 0 else None
 
     @property
     def enabled(self) -> bool:
@@ -1276,6 +1288,34 @@ class RateGate:
             self._next_at = max(self._next_at, time.monotonic() + seconds)
         logger.warning("[rate] %s: backing off %.1fs after %s", self.name, seconds, reason)
 
+    @contextlib.asynccontextmanager
+    async def in_flight_async(self):
+        """Hold one of ``max_in_flight`` stream slots for the duration."""
+        if self._slots is None:
+            yield
+            return
+        waited = 0.0
+        while not self._slots.acquire(blocking=False):
+            await asyncio.sleep(self._IN_FLIGHT_POLL_SECONDS)
+            waited += self._IN_FLIGHT_POLL_SECONDS
+        if waited:
+            logger.debug("[rate] %s: waited %.1fs for a stream slot", self.name, waited)
+        try:
+            yield
+        finally:
+            self._slots.release()
+
+    @contextlib.contextmanager
+    def in_flight_sync(self):
+        if self._slots is None:
+            yield
+            return
+        self._slots.acquire()
+        try:
+            yield
+        finally:
+            self._slots.release()
+
 
 _NULL_GATE: Final = RateGate(0.0, "ungated")
 _GATES: dict[str, RateGate] = {}
@@ -1284,11 +1324,11 @@ _GATES: dict[str, RateGate] = {}
 def gate_for(route: Route) -> RateGate:
     """The shared gate for this route's endpoint (a no-op when ungated)."""
     endpoint = route.endpoint
-    if endpoint.requests_per_minute <= 0:
+    if endpoint.requests_per_minute <= 0 and endpoint.max_in_flight <= 0:
         return _NULL_GATE
     gate = _GATES.get(endpoint.name)
     if gate is None:
-        gate = RateGate(endpoint.requests_per_minute, endpoint.name)
+        gate = RateGate(endpoint.requests_per_minute, endpoint.name, endpoint.max_in_flight)
         _GATES[endpoint.name] = gate
     return gate
 

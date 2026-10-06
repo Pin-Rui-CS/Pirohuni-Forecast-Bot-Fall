@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+import heapq
+import itertools
 import logging
+import math
 import os
 import time
 import traceback
-from dataclasses import asdict
 
 from artifacts import QuestionArtifacts
 from forecast_comment import short_comment
@@ -24,6 +27,7 @@ from metaculus_client import (
     post_question_prediction,
 )
 from monetary_cost_manager import (
+    HardLimitExceededError,
     MonetaryCostManager,
     get_openrouter_key_usage,
     research_reserve_input_tokens,
@@ -45,33 +49,17 @@ QUESTION_TIMEOUT_SECONDS = int(os.getenv("QUESTION_TIMEOUT_SECONDS", str(20 * 60
 # from question start and so is spent while merely queueing.
 # 0 restores the old unbounded behaviour.
 QUESTION_CONCURRENCY = int(os.getenv("QUESTION_CONCURRENCY", "0"))
+# The GitHub-hosted job limit (no timeout-minutes is set, so 360 min). No
+# question is started later than this minus QUESTION_TIMEOUT_SECONDS; what is
+# left waits for the next run instead of being killed mid-forecast.
+RUN_TIME_LIMIT_SECONDS = int(os.getenv("RUN_TIME_LIMIT_SECONDS", str(6 * 3600)))
+# Live queue: how often a run may re-list its tournaments for newly opened
+# questions (it does so only when a worker frees up).
+QUESTION_DISCOVERY_INTERVAL_SECONDS = float(os.getenv("QUESTION_DISCOVERY_INTERVAL_SECONDS", "60"))
 
-# When SoCLaaS is down, Qwen-mode research cannot work, so a question that
-# closes late enough is left unsubmitted: already-forecast questions are
-# skipped, so the next cron run (every 30 min) retries it. The margin covers
-# that wait plus a full Qwen-mode question (~1 h). Closer than that, the bot
-# forecasts on degraded research and says so.
-QWEN_OUTAGE_DEFER_MARGIN_SECONDS = int(os.getenv("QWEN_OUTAGE_DEFER_MARGIN_SECONDS", str(150 * 60)))
-# Research steps that may give up on SoCLaaS before the brief is not trusted.
-QWEN_OUTAGE_DEFER_FAILURES = int(os.getenv("QWEN_OUTAGE_DEFER_FAILURES", "3"))
-# Starts the summary line of a deferred question; forecast_questions counts
-# these so a deferral is never only a log line.
-DEFERRED_MARKER = "DEFERRED (Qwen outage):"
-
-
-def _outage_deferral(close_time: str | None, now: datetime | None = None) -> tuple[bool, str]:
-    """(defer?, reason) for a question whose research has no working SoCLaaS."""
-    try:
-        close = datetime.fromisoformat(str(close_time).replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return False, "has no usable close time, so it cannot safely wait"
-    if close.tzinfo is None:
-        close = close.replace(tzinfo=timezone.utc)
-    remaining = (close - (now or datetime.now(timezone.utc))).total_seconds()
-    if remaining > QWEN_OUTAGE_DEFER_MARGIN_SECONDS:
-        return True, f"closes in {remaining / 3600:.1f} h; a later cron run can redo it"
-    return False, (f"closes in {remaining / 3600:.1f} h, inside the "
-                   f"{QWEN_OUTAGE_DEFER_MARGIN_SECONDS / 3600:.1f} h deferral margin")
+# Starts the summary line of a question whose research lost SoCLaaS Qwen;
+# forecast_questions counts these so an outage is never only a log line.
+QWEN_OUTAGE_MARKER = "QWEN OUTAGE:"
 
 _QUESTION_SNAPSHOT_KEYS = (
     "id",
@@ -221,33 +209,13 @@ async def forecast_individual_question(
         summary_of_forecast += "Skipped: Forecast already made\n"
         return summary_of_forecast
 
-    # Research in Qwen mode cannot work without SoCLaaS (Q46024, 2026-10-01:
-    # every Qwen step got HTTP 503 and a one-page brief was submitted with
-    # three hours to spare). Not submitting lets a later cron run retry.
-    close_time = question_details.get("scheduled_close_time")
-    qwen_outage_note = ""
-    if qwen_ladder.research_uses_soclaas():
-        available, detail = await qwen_ladder.wait_until_available()
-        if not available:
-            defer, reason = _outage_deferral(close_time)
-            if defer:
-                line = (
-                    f"{DEFERRED_MARKER} SoCLaaS unavailable before research ({detail}); "
-                    f"the question {reason}. Nothing submitted."
-                )
-                logger.warning("Question %s: %s", question_id, line)
-                summary_of_forecast += line + "\n"
-                return summary_of_forecast
-            qwen_outage_note = (
-                f"QWEN OUTAGE: SoCLaaS unavailable before research ({detail}) and the "
-                f"question {reason}; forecasting on degraded research."
-            )
-            logger.warning("Question %s: %s", question_id, qwen_outage_note)
-
     artifacts = QuestionArtifacts(question_id, post_id, title, question_type or "unknown")
     research_trace.begin_question(artifacts.dir)
     question_started = time.monotonic()
-    outage_tally = qwen_ladder.track_outages(give_up_after=QWEN_OUTAGE_DEFER_FAILURES)
+    # Records SoCLaaS going down during this question: once a Qwen call and its
+    # retry both fail, later Qwen calls fail at once (Q46024, 2026-10-01).
+    outage_tally = qwen_ladder.track_outages()
+    qwen_outage_note = ""
 
     # The reserve keeps optional research work (extra scrape cycles, provider
     # fall-through, artifact retry) from spending the input budget that the
@@ -273,31 +241,14 @@ async def forecast_individual_question(
             artifact_check=research_bundle.artifact_check,
         )
 
-        # An outage that began after the health check: the ladders back off,
-        # but if several still gave up, the brief is too hollow to submit.
-        if outage_tally.unavailable_ladders and not qwen_outage_note:
-            outage_steps = ", ".join(outage_tally.labels)
-            if outage_tally.confirmed:
-                defer, reason = _outage_deferral(close_time)
-                if defer:
-                    line = (
-                        f"{DEFERRED_MARKER} SoCLaaS went down during research "
-                        f"({outage_tally.unavailable_ladders} steps gave up: {outage_steps}); "
-                        f"the question {reason}. Nothing submitted."
-                    )
-                    logger.warning("Question %s: %s", question_id, line)
-                    research_trace.finalize()
-                    summary_of_forecast += line + "\n"
-                    return summary_of_forecast
-                qwen_outage_note = (
-                    f"QWEN OUTAGE: SoCLaaS went down during research and the question "
-                    f"{reason}; forecasting on degraded research ({outage_steps})."
-                )
-            else:
-                qwen_outage_note = (
-                    f"QWEN OUTAGE (partial): {outage_tally.unavailable_ladders} research "
-                    f"step(s) gave up on SoCLaaS: {outage_steps}."
-                )
+        # No backup: the forecast goes ahead on whatever research survived,
+        # flagged so the outage is visible in the summary and forecast.json.
+        if outage_tally.down:
+            qwen_outage_note = (
+                f"{QWEN_OUTAGE_MARKER} SoCLaaS went down during research (failed after retry: "
+                f"{', '.join(outage_tally.labels)}; skipped afterwards: "
+                f"{', '.join(outage_tally.skipped) or 'none'}); forecasting on degraded research."
+            )
             logger.warning("Question %s: %s", question_id, qwen_outage_note)
 
         forecast_started = time.monotonic()
@@ -479,58 +430,184 @@ async def forecast_individual_question_with_timeout(
         ) from exc
 
 
+@dataclass(order=True)
+class _QueuedQuestion:
+    """One question waiting for a worker. Sorts by tournament rank (CLI order:
+    the main tournament first), then soonest close, then arrival."""
+
+    rank: int
+    close_ts: float
+    seq: int
+    question_id: int = field(compare=False)
+    post_id: int = field(compare=False)
+    attempt: int = field(default=1, compare=False)
+
+
+def _close_timestamp(close_time: str | None) -> float:
+    try:
+        return datetime.fromisoformat(str(close_time).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return math.inf
+
+
 async def forecast_questions(
     open_question_id_post_id: list[tuple[int, int]],
     submit_prediction: bool,
     num_runs_per_question: int,
     skip_previously_forecasted_questions: bool,
     per_question_token_hard_limit: float = 0,
+    *,
+    tournament_ids: list[int | str] | None = None,
 ) -> None:
+    """Forecast a queue of questions with QUESTION_CONCURRENCY workers.
+
+    2026-10-05: ~10 questions landed together (1 main tournament + minibench).
+    The main one (46056) crashed mid-run, was never retried, and the next run
+    could only start after this one finished, by which time it had closed. So:
+
+    - the queue is ordered by tournament rank (``tournament_ids`` in CLI order,
+      main tournament first), then soonest ``scheduled_close_time``;
+    - with ``tournament_ids``, the tournaments are re-listed whenever a worker
+      frees up (at most every QUESTION_DISCOVERY_INTERVAL_SECONDS), so a
+      question released mid-run joins this run's queue at its priority instead
+      of waiting for the next run;
+    - a question that raises is queued once more at its priority, if still open;
+    - no question is STARTED after RUN_TIME_LIMIT_SECONDS minus
+      QUESTION_TIMEOUT_SECONDS, so the run ends inside the job limit.
+    """
     # Self-initialize logging so entry points that call forecast_questions
     # directly (e.g. the inline-Python CI workflows) still get console INFO
     # output — including the per-question token/cost usage tables — and the
     # run.log file. No-op when forecasting_bot.py already configured it.
     from artifacts import run_log_file_path
+    from metaculus_client import list_open_questions
     from run_logging import setup_run_logging
 
     setup_run_logging(run_log_file_path())
 
     logger.info(await get_openrouter_usage_summary())
 
+    run_started = time.monotonic()
+    start_deadline = run_started + RUN_TIME_LIMIT_SECONDS - QUESTION_TIMEOUT_SECONDS
+    queue: list[_QueuedQuestion] = []
+    known: set[int] = set()
+    arrival = itertools.count()
+    results: list[tuple[_QueuedQuestion, str | BaseException]] = []
+    first_failures: list[tuple[_QueuedQuestion, BaseException]] = []
+
+    def enqueue(question_id: int, post_id: int, rank: int, close_time: str | None) -> bool:
+        if question_id in known:
+            return False
+        known.add(question_id)
+        heapq.heappush(queue, _QueuedQuestion(
+            rank, _close_timestamp(close_time), next(arrival), question_id, post_id))
+        return True
+
+    def discover() -> list[tuple[int, int, int, str | None]]:
+        found = []
+        for rank, tournament_id in enumerate(tournament_ids or []):
+            for question in list_open_questions(tournament_id):
+                found.append((question.question_id, question.post_id, rank,
+                              question.scheduled_close_time))
+        return found
+
+    discovery_lock = asyncio.Lock()
+    last_discovery = [-math.inf]
+
+    async def refresh(force: bool = False) -> None:
+        if not tournament_ids:
+            return
+        async with discovery_lock:
+            if not force and time.monotonic() - last_discovery[0] < QUESTION_DISCOVERY_INTERVAL_SECONDS:
+                return
+            last_discovery[0] = time.monotonic()
+            try:
+                found = await asyncio.to_thread(discover)
+            except Exception as exc:  # noqa: BLE001 - a listing failure keeps the current queue
+                logger.warning("Re-listing tournaments failed (%s: %s); keeping the current queue.",
+                               type(exc).__name__, exc)
+                return
+            added = [qid for qid, pid, rank, close in found if enqueue(qid, pid, rank, close)]
+            if added and not force:
+                logger.info("Live queue: %d newly opened question(s) joined this run: %s",
+                            len(added), added)
+
+    await refresh(force=True)
+    # Explicit questions (cup workflows, examples, eval tools) keep their order
+    # after any tournament-listed ones.
+    for question_id, post_id in open_question_id_post_id:
+        enqueue(question_id, post_id, len(tournament_ids or []), None)
+
     with MonetaryCostManager(
         input_token_hard_limit=0,
         output_token_hard_limit=0,
     ) as run_cost_manager:
-        question_gate = (
-            asyncio.Semaphore(QUESTION_CONCURRENCY) if QUESTION_CONCURRENCY > 0 else None
+        workers: set[asyncio.Task] = set()
+
+        async def worker() -> None:
+            while queue:
+                if time.monotonic() > start_deadline:
+                    logger.warning(
+                        "Not starting more questions: %d left for the next run "
+                        "(RUN_TIME_LIMIT_SECONDS=%d, QUESTION_TIMEOUT_SECONDS=%d).",
+                        len(queue), RUN_TIME_LIMIT_SECONDS, QUESTION_TIMEOUT_SECONDS,
+                    )
+                    queue.clear()
+                    return
+                item = heapq.heappop(queue)
+                # Own task per question: its ContextVars (trace, ledger, outage
+                # tally) stay isolated, as they were under gather. The timeout
+                # starts here, not while the question waited for a worker.
+                try:
+                    summary = await asyncio.create_task(forecast_individual_question_with_timeout(
+                        item.question_id, item.post_id, submit_prediction, num_runs_per_question,
+                        skip_previously_forecasted_questions, per_question_token_hard_limit,
+                    ))
+                except Exception as exc:  # noqa: BLE001 - recorded and retried below
+                    retry = (
+                        item.attempt == 1
+                        and not isinstance(exc, HardLimitExceededError)
+                        and item.close_ts > datetime.now(timezone.utc).timestamp()
+                    )
+                    if retry:
+                        logger.warning(
+                            "Question %s failed (%s: %s); queued once more at its priority.",
+                            item.question_id, type(exc).__name__, exc,
+                        )
+                        first_failures.append((item, exc))
+                        item.attempt = 2
+                        item.seq = next(arrival)
+                        heapq.heappush(queue, item)
+                    else:
+                        results.append((item, exc))
+                else:
+                    results.append((item, summary))
+                await refresh()
+                top_up()
+
+        def top_up() -> None:
+            limit = QUESTION_CONCURRENCY if QUESTION_CONCURRENCY > 0 else len(workers) + len(queue)
+            while queue and len(workers) < limit:
+                task = asyncio.create_task(worker())
+                workers.add(task)
+                task.add_done_callback(workers.discard)
+
+        logger.info(
+            "Forecasting %d question(s), at most %s at a time%s.",
+            len(queue), QUESTION_CONCURRENCY or "all",
+            "; new questions join the queue as they open" if tournament_ids else "",
         )
-
-        async def run_one(question_id: int, post_id: int):
-            if question_gate is None:
-                return await forecast_individual_question_with_timeout(
-                    question_id, post_id, submit_prediction, num_runs_per_question,
-                    skip_previously_forecasted_questions, per_question_token_hard_limit,
-                )
-            # Acquire BEFORE the timeout starts: a question should not spend
-            # its wall-clock budget waiting for a slot it has not been given.
-            async with question_gate:
-                return await forecast_individual_question_with_timeout(
-                    question_id, post_id, submit_prediction, num_runs_per_question,
-                    skip_previously_forecasted_questions, per_question_token_hard_limit,
-                )
-
-        if question_gate is not None:
-            logger.info(
-                "Forecasting %d question(s), at most %d at a time.",
-                len(open_question_id_post_id), QUESTION_CONCURRENCY,
-            )
-        forecast_tasks = [
-            run_one(question_id, post_id)
-            for question_id, post_id in open_question_id_post_id
-        ]
-        forecast_summaries = await asyncio.gather(*forecast_tasks, return_exceptions=True)
+        top_up()
+        while workers:
+            await asyncio.wait(set(workers))
         total_estimated_tokens = run_cost_manager.total_tokens
         run_usage_yaml_table = run_cost_manager.format_usage_yaml_table("openrouter_llm_run_usage")
+
+    for item, exc in first_failures:
+        logger.warning("Question %s failed on its first attempt: %s: %s",
+                       item.question_id, type(exc).__name__, exc)
+    open_question_id_post_id = [(item.question_id, item.post_id) for item, _ in results]
+    forecast_summaries = [outcome for _, outcome in results]
 
     completed_count = sum(
         1 for forecast_summary in forecast_summaries if not isinstance(forecast_summary, Exception)
@@ -546,16 +623,16 @@ async def forecast_questions(
     logger.info(run_usage_yaml_table)
     logger.info(await get_openrouter_usage_summary())
 
-    deferred = [
+    degraded = [
         question_id
         for (question_id, _), forecast_summary in zip(open_question_id_post_id, forecast_summaries)
-        if isinstance(forecast_summary, str) and DEFERRED_MARKER in forecast_summary
+        if isinstance(forecast_summary, str) and QWEN_OUTAGE_MARKER in forecast_summary
     ]
-    if deferred:
+    if degraded:
         logger.warning(
-            "\n%s\n%d question(s) DEFERRED because SoCLaaS Qwen was down (nothing "
-            "submitted; a later cron run will retry): %s\n%s",
-            "#" * 100, len(deferred), deferred, "#" * 100,
+            "\n%s\n%d question(s) forecast on degraded research because SoCLaaS Qwen "
+            "went down: %s\n%s",
+            "#" * 100, len(degraded), degraded, "#" * 100,
         )
 
     errors = []

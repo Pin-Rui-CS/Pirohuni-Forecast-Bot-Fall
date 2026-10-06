@@ -538,7 +538,7 @@ async def run_research(
             if retry_included:
                 included_results.append((retry_result[0], retry_result[1] or ""))
             else:
-                if _is_quota_or_auth_error(retry_result[1]):
+                if _is_quota_or_auth_error(retry_result[1], retry_label):
                     _exhausted_search_providers.add(retry_label)
                 # Only escalate to a run-level search-degraded warning if the main
                 # chain also produced nothing; a retry miss alone does not mean
@@ -674,11 +674,16 @@ _EXHAUSTING_ERROR_MARKERS = (
 _exhausted_search_providers: set[str] = set()
 
 
-def _is_quota_or_auth_error(content: str | None) -> bool:
+def _is_quota_or_auth_error(content: str | None, provider: str = "") -> bool:
     """True when a provider failed in a way that will not recover this run."""
     if not _is_unavailable_result(content):
         return False
     lowered = content.lower()
+    # SerpAPI answers 429 when the plan's searches are used up. On 2026-10-05 it
+    # did so for every question, each time costing 40-120 s before Tavily took
+    # over. (Tavily's 429 is a short rate limit, so this is SerpAPI only.)
+    if provider == "SerpAPI Google" and "429" in lowered:
+        return True
     return any(marker in lowered for marker in _EXHAUSTING_ERROR_MARKERS)
 
 
@@ -736,7 +741,7 @@ async def _run_search_chain(
                 )
             return result, errored
         errored.append(f"{name} ({_search_failure_reason(content)})")
-        if _is_quota_or_auth_error(content):
+        if _is_quota_or_auth_error(content, name):
             exhausted.add(name)
     if errored:
         # Every provider failed. Record why, or the trace shows only that

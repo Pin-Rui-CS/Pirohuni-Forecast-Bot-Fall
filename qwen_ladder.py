@@ -9,14 +9,17 @@ get the same policy without changing a line at the call site:
   2. If it times out, loses the stream, finishes without [DONE]/stop, returns
      nothing, or the answer is unusable: one more request at Medium, built from
      the same original kwargs -- never from the failed partial answer.
-  3. HTTP 408/5xx or a refused connection means SoCLaaS itself is unavailable,
-     which less thinking does not cure. The same rung is retried after a
-     backoff (UNAVAILABLE_BACKOFF_SECONDS), and the backoff is applied to the
-     shared endpoint gate so every other Qwen call pauses too instead of
-     hammering an outage. When the backoffs run out, QwenUnavailable is raised
-     and counted against the current question (see OutageTally).
-  4. Auth, quota and 429 refusals stop immediately. Less thinking cures none
-     of them.
+  3. HTTP 408/5xx, a refused connection, or a 429 that is the gateway's busy
+     queue rather than a spent quota (``is_overload_429``) means SoCLaaS itself
+     is unavailable, which less thinking does not cure. The same rung is retried once after a
+     backoff (UNAVAILABLE_BACKOFF_SECONDS), applied to the shared endpoint gate
+     so every other Qwen call pauses too. If the retry fails as well, SoCLaaS
+     is down for the rest of the question (see OutageTally): QwenUnavailable is
+     raised, and every later Qwen call in that question fails at once. There
+     is no backup; research carries on with whatever the other providers got.
+  4. Auth, access and quota refusals stop immediately. Less thinking cures
+     none of them. Every stream holds one of the endpoint's ``max_in_flight``
+     slots (llm_provider.RateGate) while it runs.
   5. When every rung fails, raise QwenLadderFailed. It is not an OpenAI
      exception, so llm_client's three-attempt retry loop does not turn one
      ladder into three. There is no paid fallback here.
@@ -57,12 +60,11 @@ MAX_TOKENS = 65536
 # The sampler the A1 screen and the precompression replay used.
 SAMPLER = {"temperature": 1, "top_p": .95, "top_k": 20}
 RETRY_STATUS = frozenset({408, 500, 502, 503, 504})
-# Waits before re-sending after SoCLaaS reports itself unavailable. On
+# Wait before the one retry after SoCLaaS reports itself unavailable. On
 # 2026-10-01 (Q46024) every Qwen call got HTTP 503 for the whole research
-# window; the old ladder spent both rungs within ~2 s and gave up, so one
-# outage silently emptied the brief. ~100 s of patience rides out a blip;
-# a longer outage is the orchestrator's job (wait_until_available + deferral).
-UNAVAILABLE_BACKOFF_SECONDS: tuple[float, ...] = (10.0, 30.0, 60.0)
+# window and each step spent both rungs within ~2 s; a lower effort never
+# helped, a pause might.
+UNAVAILABLE_BACKOFF_SECONDS: tuple[float, ...] = (30.0,)
 REFUSAL_CODES = frozenset({"401", "402", "403", "429"})
 REFUSAL_TERMS = ("quota", "budget", "rate_limit", "rate limit", "unauthorized",
                  "forbidden", "authentication", "access denied")
@@ -96,45 +98,42 @@ class QwenLadderFailed(RuntimeError):
 
 
 class QwenUnavailable(QwenLadderFailed):
-    """The ladder gave up because SoCLaaS stayed unavailable through every backoff."""
+    """SoCLaaS was unavailable, after its retry or already down for this question."""
 
 
 @dataclass
 class OutageTally:
-    """Per-question count of ladders that gave up because SoCLaaS was down.
+    """Per-question record of SoCLaaS going down.
 
-    The orchestrator installs one per question (track_outages) and reads it
-    after research to decide whether the brief is too hollow to submit. Once
-    ``give_up_after`` ladders have given up, the outage is confirmed for this
-    question and later ladders fail at once instead of each waiting out the
-    backoffs: the question is going to be deferred anyway.
+    The orchestrator installs one per question (track_outages). The first
+    ladder whose retry also fails marks SoCLaaS down; every later Qwen call in
+    that question then fails at once instead of waiting out its own retry, and
+    the orchestrator flags the forecast as built on degraded research.
     """
     unavailable_ladders: int = 0
     labels: list[str] = field(default_factory=list)
-    give_up_after: int = 0  # 0 = never short-circuit
+    skipped: list[str] = field(default_factory=list)
 
     @property
-    def confirmed(self) -> bool:
-        return 0 < self.give_up_after <= self.unavailable_ladders
+    def down(self) -> bool:
+        return self.unavailable_ladders > 0
 
 
 _outage_tally: ContextVar[OutageTally | None] = ContextVar("qwen_outage_tally", default=None)
 
 
-def track_outages(give_up_after: int = 0) -> OutageTally:
-    """Start counting for the current task (and the tasks/threads it spawns)."""
-    tally = OutageTally(give_up_after=give_up_after)
+def track_outages() -> OutageTally:
+    """Start a record for the current task (and the tasks/threads it spawns)."""
+    tally = OutageTally()
     _outage_tally.set(tally)
     return tally
 
 
-def _raise_if_outage_confirmed(label: str) -> None:
+def _raise_if_down(label: str) -> None:
     tally = _outage_tally.get()
-    if tally is not None and tally.confirmed:
-        raise QwenUnavailable(
-            f"{label}: skipped -- SoCLaaS outage already confirmed for this question "
-            f"({tally.unavailable_ladders} steps gave up)"
-        )
+    if tally is not None and tally.down:
+        tally.skipped.append(label)
+        raise QwenUnavailable(f"{label}: skipped -- SoCLaaS is down for this question")
 
 
 def _note_unavailable_ladder(label: str) -> None:
@@ -289,10 +288,21 @@ def _payload(kwargs: dict[str, Any], effort: str) -> dict[str, Any]:
     return payload
 
 
+def is_overload_429(status: int, response: Any) -> bool:
+    """A 429 that is SoCLaaS being busy, not our quota being spent.
+
+    2026-10-05: ``429 {"error":"dispatch queue wait expired"}`` -- the request
+    waited in the gateway's queue and was dropped. Waiting cures that; a spent
+    daily/monthly budget it does not.
+    """
+    return status == 429 and not llm_provider.is_quota_exhaustion(
+        SimpleNamespace(status_code=status, response=response))
+
+
 def _refuse_or_retry(route: llm_provider.Route, status: int, response: Any) -> None:
     """Map an HTTP error status onto a rung failure or a hard stop."""
     llm_provider.note_failure(route, SimpleNamespace(status_code=status, response=response))
-    if status in RETRY_STATUS:
+    if status in RETRY_STATUS or is_overload_429(status, response):
         raise Unavailable(f"HTTP {status}")
     raise StreamRefused(f"SoCLaaS HTTP {status}; no lower-effort retry")
 
@@ -323,7 +333,7 @@ def _wait_unavailable_sync(route: llm_provider.Route, delay: float) -> None:
 def _give_up_unavailable(label: str, failures: list[str]) -> QwenUnavailable:
     _note_unavailable_ladder(label)
     return QwenUnavailable(
-        f"{label}: SoCLaaS unavailable through {len(UNAVAILABLE_BACKOFF_SECONDS)} backoffs -- "
+        f"{label}: SoCLaaS unavailable, retry failed too; down for this question -- "
         + "; ".join(failures)
     )
 
@@ -383,7 +393,7 @@ def _client_settings(route: llm_provider.Route, label: str = "") -> dict[str, An
 async def run_async(route: llm_provider.Route, kwargs: dict[str, Any], *,
                     transport: httpx.AsyncBaseTransport | None = None):
     label = current_label.get() or "unlabelled"
-    _raise_if_outage_confirmed(label)
+    _raise_if_down(label)
     call_id = uuid4().hex[:12]
     url = route.endpoint.base_url + "/chat/completions"
     deadline = timeout_seconds(label)
@@ -399,17 +409,21 @@ async def run_async(route: llm_provider.Route, kwargs: dict[str, Any], *,
             effort = efforts[rung]
             state, start, outcome, error = StreamState(), time.monotonic(), "interrupted", None
             try:
-                async with asyncio.timeout(deadline):
-                    async with client.stream("POST", url, json=_payload(kwargs, effort)) as response:
-                        if response.status_code >= 400:
-                            await response.aread()
-                            _refuse_or_retry(route, response.status_code, response)
-                        async for line in response.aiter_lines():
-                            raw = line[5:].strip() if line.startswith("data:") else ""
-                            if raw:
-                                consume(state, raw, route.model_id)
-                            if state.done:
-                                break
+                # The slot wait sits outside the deadline: queueing behind our
+                # own streams must not eat this attempt's time.
+                async with llm_provider.gate_for(route).in_flight_async():
+                    start = time.monotonic()
+                    async with asyncio.timeout(deadline):
+                        async with client.stream("POST", url, json=_payload(kwargs, effort)) as response:
+                            if response.status_code >= 400:
+                                await response.aread()
+                                _refuse_or_retry(route, response.status_code, response)
+                            async for line in response.aiter_lines():
+                                raw = line[5:].strip() if line.startswith("data:") else ""
+                                if raw:
+                                    consume(state, raw, route.model_id)
+                                if state.done:
+                                    break
                 check_complete(state)
                 check_required_output(label, state)
                 outcome = "ok"
@@ -450,7 +464,7 @@ def run_sync(route: llm_provider.Route, kwargs: dict[str, Any], *,
     checked between chunks, so a stream that keeps trickling cannot run on.
     """
     label = current_label.get() or "unlabelled"
-    _raise_if_outage_confirmed(label)
+    _raise_if_down(label)
     call_id = uuid4().hex[:12]
     url = route.endpoint.base_url + "/chat/completions"
     deadline = timeout_seconds(label)
@@ -466,18 +480,20 @@ def run_sync(route: llm_provider.Route, kwargs: dict[str, Any], *,
             effort = efforts[rung]
             state, start, outcome, error = StreamState(), time.monotonic(), "interrupted", None
             try:
-                with client.stream("POST", url, json=_payload(kwargs, effort)) as response:
-                    if response.status_code >= 400:
-                        response.read()
-                        _refuse_or_retry(route, response.status_code, response)
-                    for line in response.iter_lines():
-                        if time.monotonic() - start > deadline:
-                            raise TimeoutError
-                        raw = line[5:].strip() if line.startswith("data:") else ""
-                        if raw:
-                            consume(state, raw, route.model_id)
-                        if state.done:
-                            break
+                with llm_provider.gate_for(route).in_flight_sync():
+                    start = time.monotonic()
+                    with client.stream("POST", url, json=_payload(kwargs, effort)) as response:
+                        if response.status_code >= 400:
+                            response.read()
+                            _refuse_or_retry(route, response.status_code, response)
+                        for line in response.iter_lines():
+                            if time.monotonic() - start > deadline:
+                                raise TimeoutError
+                            raw = line[5:].strip() if line.startswith("data:") else ""
+                            if raw:
+                                consume(state, raw, route.model_id)
+                            if state.done:
+                                break
                 check_complete(state)
                 check_required_output(label, state)
                 outcome = "ok"
@@ -507,101 +523,6 @@ def run_sync(route: llm_provider.Route, kwargs: dict[str, Any], *,
             if rung < len(efforts):
                 llm_provider.gate_for(route).wait_sync()
     raise QwenLadderFailed(f"{label}: every Qwen attempt failed -- " + "; ".join(failures))
-
-
-# --- Is SoCLaaS up at all? ---------------------------------------------------
-# Asked once per question before research (Q46024: SoCLaaS answered 503 for the
-# whole research window and a one-page brief was submitted). Availability only:
-# a 400 still means the server is answering.
-
-_availability_lock: asyncio.Lock | None = None
-_last_up_at = 0.0
-_confirmed_down = False
-# A probe that succeeded this recently is trusted without another request.
-_FRESH_SECONDS = 120.0
-
-
-def research_uses_soclaas() -> bool:
-    """True when the ladder is on and research call sites are routed to SoCLaaS Qwen."""
-    if not enabled():
-        return False
-    route = llm_provider.route_for_model(llm_provider.QWEN_RESEARCH_MODEL)
-    if route.endpoint.name != llm_provider.ENDPOINT_SOCLAAS.name:
-        return False
-    return any(llm_provider.label_routes_to_qwen(label)
-               for label in ("compiler/research-brief", "artifact-check", "google-query-generation"))
-
-
-async def probe(*, transport: httpx.AsyncBaseTransport | None = None) -> tuple[bool, str]:
-    """One tiny streamed request: (up, detail)."""
-    route = llm_provider.route_for_model(llm_provider.QWEN_RESEARCH_MODEL)
-    payload = {"model": route.model_id, "stream": True, "max_tokens": 256,
-               "reasoning_effort": "medium",
-               "messages": [{"role": "user", "content": "Reply with the single word OK."}]}
-    try:
-        await llm_provider.gate_for(route).wait_async()
-        async with httpx.AsyncClient(
-            transport=transport or httpx.AsyncHTTPTransport(retries=0),
-            headers={"Authorization": "Bearer " + llm_provider.api_key_for(route.endpoint)},
-            timeout=httpx.Timeout(connect=15, read=90, write=15, pool=15),
-        ) as client:
-            async with client.stream("POST", route.endpoint.base_url + "/chat/completions",
-                                     json=payload) as response:
-                status = response.status_code
-                if status >= 400:
-                    body = (await response.aread()).decode("utf-8", "replace")[:300]
-                    quota = llm_provider.is_quota_exhaustion(SimpleNamespace(
-                        status_code=status, response=SimpleNamespace(text=body)))
-                    if status in RETRY_STATUS or status in (401, 402, 403) or quota:
-                        return False, f"HTTP {status} {body}".strip()
-                    return True, f"HTTP {status}"
-                async for line in response.aiter_lines():
-                    raw = line[5:].strip() if line.startswith("data:") else ""
-                    if raw == "[DONE]":
-                        return True, f"HTTP {status}"
-                    if raw:
-                        error = json.loads(raw).get("error")
-                        if error:
-                            return False, f"HTTP {status} stream error: {json.dumps(error)[:200]}"
-                        return True, f"HTTP {status}"
-                return False, f"HTTP {status} but the stream closed without data"
-    except (httpx.TransportError, json.JSONDecodeError) as exc:
-        return False, f"{type(exc).__name__}: {exc}"
-
-
-async def wait_until_available(*, backoffs: tuple[float, ...] | None = None,
-                               transport: httpx.AsyncBaseTransport | None = None) -> tuple[bool, str]:
-    """Probe, retrying on the ladder's own backoff schedule: (up, detail).
-
-    Shared by concurrent questions: one probing sequence at a time, a recent
-    success is reused, and once a full wait has ended down, later questions in
-    the same run get a single probe instead of waiting the schedule again.
-    """
-    global _availability_lock, _last_up_at, _confirmed_down
-    if _availability_lock is None:
-        _availability_lock = asyncio.Lock()
-    schedule = UNAVAILABLE_BACKOFF_SECONDS if backoffs is None else backoffs
-    async with _availability_lock:
-        if time.monotonic() - _last_up_at < _FRESH_SECONDS:
-            return True, "recently probed"
-        delays = () if _confirmed_down else schedule
-        for attempt in range(len(delays) + 1):
-            if attempt:
-                await asyncio.sleep(delays[attempt - 1])
-            up, detail = await probe(transport=transport)
-            logger.info("[qwen-ladder] availability probe %d: %s (%s)",
-                        attempt + 1, "up" if up else "DOWN", detail)
-            if up:
-                _last_up_at, _confirmed_down = time.monotonic(), False
-                return True, detail
-        _confirmed_down = True
-        return False, detail
-
-
-def reset_availability() -> None:
-    """Forget cached availability (tests)."""
-    global _availability_lock, _last_up_at, _confirmed_down
-    _availability_lock, _last_up_at, _confirmed_down = None, 0.0, False
 
 
 class _AsyncCompletions:

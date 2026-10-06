@@ -209,5 +209,8 @@ if __name__ == "__main__":
             args.num_runs,
             SKIP_PREVIOUSLY_FORECASTED_QUESTIONS,
             args.cost_limit,
+            # CLI order is priority order (the main tournament before minibench),
+            # and the run picks up questions that open while it is running.
+            tournament_ids=tournament_ids if args.mode == "tournament" else None,
         )
     )

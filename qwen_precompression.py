@@ -132,6 +132,10 @@ async def generate_candidate(
     key = llm_provider.api_key_for(route.endpoint)
     if not key:
         raise PrecompressionPaused("SOCLAAS_API_KEY is not configured")
+    try:
+        qwen_ladder._raise_if_down("compiler/precompress")
+    except qwen_ladder.QwenUnavailable as exc:
+        raise PrecompressionPaused(str(exc)) from exc
     if artifact_dir is None:
         artifact_dir = ROOT / "data/qwen-precompression" / (
             datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid4().hex[:10])
@@ -176,13 +180,17 @@ async def generate_candidate(
                 state = qwen_ladder.StreamState()
                 start = time.monotonic()
                 handle = None
+                unavailable = False
                 try:
                     label = f"compiler/precompress/qwen/{effort}"
                     accounting_route = llm_provider.route_for(MODEL, label=label)
                     if accounting_route.endpoint != route.endpoint or accounting_route.model_id != MODEL:
                         raise PrecompressionPaused("Task override conflicts with fixed SoCLaaS accounting route")
                     await llm_provider.gate_for(route).wait_async()
-                    async with llm_rate_limiter:
+                    # One of the endpoint's max_in_flight stream slots, shared
+                    # with every ladder call (2026-10-05: six open streams).
+                    async with llm_provider.gate_for(route).in_flight_async(), llm_rate_limiter:
+                        start = time.monotonic()
                         handle = MonetaryCostManager.start_openrouter_call(label, MODEL, payload)
                         async with asyncio.timeout(timeout_seconds):
                             async with client.stream("POST", ENDPOINT, json=payload) as response:
@@ -225,8 +233,14 @@ async def generate_candidate(
                 except httpx.HTTPStatusError as exc:
                     record.update(status="failed", error_type=type(exc).__name__)
                     llm_provider.note_failure(route, exc)
-                    if exc.response.status_code not in {408, 500, 502, 503, 504}:
-                        raise PrecompressionPaused(f"SoCLaaS HTTP {exc.response.status_code}; no thinking retry") from exc
+                    status = exc.response.status_code
+                    # A busy-gateway 429 ("dispatch queue wait expired") is
+                    # transient like a 5xx; only a spent quota or an access
+                    # refusal stops here (2026-10-05, question 46056).
+                    if status not in qwen_ladder.RETRY_STATUS and not qwen_ladder.is_overload_429(
+                            status, exc.response):
+                        raise PrecompressionPaused(f"SoCLaaS HTTP {status}; no thinking retry") from exc
+                    unavailable = True
                 except (TimeoutError, httpx.TransportError, AttemptRejected, json.JSONDecodeError) as exc:
                     record.update(status="failed", error_type=type(exc).__name__, error=str(exc))
                 except BaseException as exc:
@@ -250,6 +264,10 @@ async def generate_candidate(
                                     advisory_rejection_reasons=record["rejection_reasons"])
                     save_json(artifact_dir / "manifest.json", manifest)
                     return Candidate(state.answer, artifact_dir, effort)
+                if unavailable and effort == "xhigh" and qwen_ladder.UNAVAILABLE_BACKOFF_SECONDS:
+                    # Same shared pause the ladder uses before its one retry.
+                    await qwen_ladder._wait_unavailable_async(
+                        route, qwen_ladder.UNAVAILABLE_BACKOFF_SECONDS[0])
         manifest["status"] = "no_acceptable_candidate"
         save_json(artifact_dir / "manifest.json", manifest)
         return Candidate(None, artifact_dir, None)

@@ -192,6 +192,20 @@ async def compile_research_report(
             exc,
         )
         llm_report = None
+    except Exception as exc:  # noqa: BLE001 - a question is never lost to the compile step
+        from qwen_precompression import PrecompressionPaused, mode
+
+        if isinstance(exc, PrecompressionPaused) and mode() == "review":
+            raise  # review mode pauses by design; it is an evaluation setting
+        logger.warning(
+            "Research compiler failed (%s: %s); falling back to the deterministic brief.",
+            type(exc).__name__, exc,
+        )
+        research_trace.emit(
+            "brief", "compiler failed; deterministic fallback brief used", "",
+            status="failed", error=f"{type(exc).__name__}: {exc}", meta={"chain": "brief"},
+        )
+        llm_report = None
     return llm_report or heuristic_report
 
 
@@ -456,7 +470,25 @@ async def _compress_section_text(name: str, content: str, target_chars: int) -> 
 
     qwen_mode = mode()
     if qwen_mode != "off":
-        candidate = await review_qwen_precompression(name, content, target_chars)
+        try:
+            candidate = await review_qwen_precompression(name, content, target_chars)
+        except PrecompressionPaused as exc:
+            if isinstance(exc.__cause__, HardLimitExceededError):
+                # The token budget refused it: the compiler's own handler
+                # falls back to the deterministic brief.
+                raise exc.__cause__
+            if qwen_mode == "review":
+                raise
+            # 2026-10-05 (46056): one chunk's SoCLaaS 429 propagated out of the
+            # compiler and the whole main-tournament question was lost. A chunk
+            # that cannot be condensed keeps its original text; the overflow
+            # pass below cuts visibly if the budget still is not met.
+            logger.warning("Qwen precompression failed for %r; keeping the original: %s", name, exc)
+            research_trace.emit(
+                "precompress", name, "", status="failed", error=f"{type(exc).__name__}: {exc}",
+                meta={"target_chars": target_chars, "input_chars": len(content)},
+            )
+            return None
         if qwen_mode == "review":
             raise PrecompressionPaused(
                 f"Qwen precompression saved for semantic review: {candidate.artifact_dir}"
@@ -644,9 +676,22 @@ async def _fit_sections_to_budget(
                 async with limit:
                     return await _compress_section_text(label, chunk, per_chunk_target)
 
-            results = await asyncio.gather(*(
+            # return_exceptions: one failing chunk must not leave its siblings
+            # streaming orphaned after the error has already propagated
+            # (46056's kept SoCLaaS busy for 8 more minutes).
+            outcomes = await asyncio.gather(*(
                 bounded(label, chunks[idx]) for idx, label in jobs.items()
-            ))
+            ), return_exceptions=True)
+            for outcome in outcomes:
+                if isinstance(outcome, (HardLimitExceededError, PrecompressionPaused)):
+                    raise outcome
+            results = []
+            for label, outcome in zip(jobs.values(), outcomes):
+                if isinstance(outcome, BaseException):
+                    logger.warning("Qwen precompression failed for %r; keeping the original: %s: %s",
+                                   label, type(outcome).__name__, outcome)
+                    outcome = None
+                results.append(outcome)
         for (idx, label), compressed in zip(jobs.items(), results):
             if compressed is None:
                 new_parts[idx] = (chunks[idx] if qwen_mode != "off"
