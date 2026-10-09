@@ -88,10 +88,21 @@ jobs:
         run: |
           set -o pipefail
           args=(fetch --question-id "${{ inputs.question_id }}" --out diagnostics_runs --publish)
-          [ -n "${{ inputs.run_id }}" ] && args+=(--run-id "${{ inputs.run_id }}")
-          [ "${{ inputs.use_qwen_checks }}" = "true" ] || args+=(--no-qwen)
-          pre=$(find gh_artifact -type d -name qwen-precompression 2>/dev/null | head -1)
-          [ -n "$pre" ] && args+=(--precompression "$pre")
+          if [ -n "${{ inputs.run_id }}" ]; then
+            args+=(--run-id "${{ inputs.run_id }}")
+          fi
+          if [ "${{ inputs.use_qwen_checks }}" != "true" ]; then
+            args+=(--no-qwen)
+          fi
+          # gh_artifact exists only when a GitHub run id was given and its
+          # artifact downloaded; under -e/pipefail a bare `find` on a missing
+          # folder would kill this step before the tester starts.
+          if [ -d gh_artifact ]; then
+            pre=$(find gh_artifact -type d -name qwen-precompression | head -1 || true)
+            if [ -n "$pre" ]; then
+              args+=(--precompression "$pre")
+            fi
+          fi
           poetry run python eval_tools/diagnose_run.py "${args[@]}" | tee diagnostics_summary.md
           cat diagnostics_summary.md >> "$GITHUB_STEP_SUMMARY"
 
