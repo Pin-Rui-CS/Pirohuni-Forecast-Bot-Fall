@@ -289,6 +289,7 @@ async def get_binary_gpt_prediction(
                 i + 1, run.model, run.error,
             )
             record["dropped"] = True
+            record["error"] = str(run.error or "")[:500]
             ensemble.append(record)
             continue
         probability = extract_probability_from_response_as_percentage_not_decimal(run.response)

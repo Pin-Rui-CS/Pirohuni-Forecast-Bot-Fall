@@ -628,6 +628,16 @@ async def run_research(
     raw_research_view = _apply_artifact_status_banner(
         _build_raw_research_view(included_results), artifact_check
     )
+    # Saved so a diagnosis can see what the raw-research forecaster read and
+    # whether the view's character cap cut it (runs.md stores only the brief prompt).
+    research_trace.emit(
+        "raw_view",
+        "raw research view (raw-research forecaster input)",
+        raw_research_view,
+        meta={"chars": len(raw_research_view),
+              "uncapped_chars": sum(len(c or "") for _, c in included_results),
+              "cap": _RAW_VIEW_MAX_CHARS},
+    )
 
     return ResearchBundle(
         evidence_plan=evidence_plan,

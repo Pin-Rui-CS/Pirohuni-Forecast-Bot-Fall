@@ -750,6 +750,7 @@ async def _try_llm_compile(
 
     model = route.model_id
 
+    chars_before_fit = {name: len(content or "") for name, content in cleaned_sections}
     cleaned_sections = await _fit_sections_to_budget(cleaned_sections)
     # Byte-exact record of what the compiler can know. "Dropped by the
     # compiler" vs "never reached the compiler" (the 44619 forensic) becomes
@@ -763,8 +764,11 @@ async def _try_llm_compile(
         ),
         meta={
             "model": model,
+            # chars_before_fit = after cleaning, before precompression/truncation.
             "sections": [
-                {"name": name, "chars": len(content)} for name, content in cleaned_sections
+                {"name": name, "chars": len(content),
+                 "chars_before_fit": chars_before_fit.get(name, len(content))}
+                for name, content in cleaned_sections
             ],
         },
     )

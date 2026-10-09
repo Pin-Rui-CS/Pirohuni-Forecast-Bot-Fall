@@ -43,7 +43,6 @@ _MAX_ERROR_CHARS = 500
 _MAX_REMOVED_LINES_SHOWN = 80
 _TRUNCATION_MARKER = "\n\n[research_trace: payload truncated at {cap:,} chars — original was {orig:,} chars]"
 
-_URL_PATTERN = re.compile(r'https?://[^\s\)\]\'"<>`]+', re.IGNORECASE)
 
 
 def _enabled() -> bool:
@@ -222,6 +221,25 @@ def _canonical_url(url: str) -> str:
     return cleaned.rstrip("/").rstrip(".,;:!?)")
 
 
+def citation_match(url: str, text: str) -> str | None:
+    """How ``text`` cites ``url``: "url", "domain", or None.
+
+    The brief usually writes sources without a scheme, often in backticks
+    (`bigpumpkins.com/WeighoffResultsBySite.aspx?s=81&c=P&y=2025`, or just
+    `oregonlive.com`), so matching only http(s):// URLs marked every source
+    "never cited" (46133: 14 of 14). Match the canonical URL as a substring
+    first, then fall back to the bare host.
+    """
+    key = _canonical_url(url)
+    haystack = re.sub(r"https?://(www\.)?", "", str(text or "").lower())
+    if key and key in haystack:
+        return "url"
+    host = key.split("/", 1)[0]
+    if host and host in haystack:
+        return "domain"
+    return None
+
+
 def _cell(value: Any) -> str:
     return str(value).replace("|", "\\|").replace("\r", " ").replace("\n", " ").strip()
 
@@ -360,7 +378,6 @@ def _render_citation_survival(events: list[dict]) -> list[str]:
     if not briefs:
         return ["## Citation survival", "", "No brief event captured — table unavailable.", ""]
     brief_text = str(briefs[-1].get("_payload", ""))
-    cited = {_canonical_url(u) for u in _URL_PATTERN.findall(brief_text)}
     lines = [
         "## Citation survival (scraped-ok URL → cited in final brief?)",
         "",
@@ -375,7 +392,8 @@ def _render_citation_survival(events: list[dict]) -> list[str]:
             continue
         reported.add(key)
         meta = event.get("meta", {})
-        mark = "yes" if key in cited else "**NO — paid for, never cited**"
+        match = citation_match(url, brief_text)
+        mark = {"url": "yes", "domain": "domain only"}.get(match, "**NO — paid for, never cited**")
         lines.append(
             f"| {_cell(url)} | {_cell(meta.get('engine', '—'))} "
             f"| {_cell(meta.get('phase', ''))} | {mark} |"

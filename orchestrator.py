@@ -8,6 +8,7 @@ import itertools
 import logging
 import math
 import os
+from pathlib import Path
 import time
 import traceback
 
@@ -211,6 +212,10 @@ async def forecast_individual_question(
 
     artifacts = QuestionArtifacts(question_id, post_id, title, question_type or "unknown")
     research_trace.begin_question(artifacts.dir)
+    # Every Qwen attempt (effort, outcome, seconds, error) for this question,
+    # so a diagnosis need not untangle run.log, where questions interleave.
+    qwen_ladder.question_attempt_log.set(
+        Path(os.path.join(artifacts.dir, "trace", "qwen_attempts.jsonl")))
     question_started = time.monotonic()
     # Records SoCLaaS going down during this question: once a Qwen call and its
     # retry both fail, later Qwen calls fail at once (Q46024, 2026-10-01).

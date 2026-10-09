@@ -1,0 +1,107 @@
+name: Diagnose a forecast
+
+# Manual. Runs an objective checklist over ONE already-forecast question, from
+# the run stored in the forecast library (Supabase). It never forecasts. The
+# only model it may call is Qwen on SoCLaaS, for narrow extraction tasks whose
+# answers code verifies; no OpenRouter or OpenAI key is passed to this job.
+# Results: Supabase table run_diagnostics + diagnostics.md next to the run's
+# files, and a workflow artifact.
+
+"on":
+  workflow_dispatch:
+    inputs:
+      question_id:
+        description: "Metaculus question id (not post id) of an already-forecast question"
+        required: true
+        type: string
+      run_id:
+        description: "Library run id (e.g. gh-37659581347-1). Blank = latest run for this question"
+        required: false
+        default: ""
+        type: string
+      github_run_id:
+        description: "Optional: GitHub Actions run id that produced the forecast, to also pull its precompression files (kept 14 days)"
+        required: false
+        default: ""
+        type: string
+      use_qwen_checks:
+        description: "Run the Qwen-assisted checks (free, SoCLaaS only)"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+          installer-parallel: true
+
+      - name: Load cached venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('**/poetry.lock') }}
+
+      - name: Install Python dependencies (Poetry)
+        run: poetry install --no-interaction --no-root
+
+      - name: Download precompression files (optional)
+        if: ${{ inputs.github_run_id != '' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          name=$(gh api "repos/${{ github.repository }}/actions/runs/${{ inputs.github_run_id }}/artifacts" \
+                 --jq '.artifacts[] | select(.expired == false and (.name | test("llm-results"))) | .name' | head -1)
+          if [ -n "$name" ]; then
+            gh run download "${{ inputs.github_run_id }}" -R "${{ github.repository }}" -n "$name" -D gh_artifact
+            echo "Downloaded $name"
+          else
+            echo "No unexpired llm-results artifact for that run; precompression check will be skipped."
+          fi
+
+      - name: Diagnose
+        env:
+          PYTHONUNBUFFERED: "1"
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SOCLAAS_API_KEY: ${{ secrets.SOCLAAS_API_KEY }}
+          QWEN_LADDER: "1"
+        run: |
+          set -o pipefail
+          args=(fetch --question-id "${{ inputs.question_id }}" --out diagnostics_runs --publish)
+          [ -n "${{ inputs.run_id }}" ] && args+=(--run-id "${{ inputs.run_id }}")
+          [ "${{ inputs.use_qwen_checks }}" = "true" ] || args+=(--no-qwen)
+          pre=$(find gh_artifact -type d -name qwen-precompression 2>/dev/null | head -1)
+          [ -n "$pre" ] && args+=(--precompression "$pre")
+          poetry run python eval_tools/diagnose_run.py "${args[@]}" | tee diagnostics_summary.md
+          cat diagnostics_summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-q${{ inputs.question_id }}-${{ github.run_id }}
+          path: |
+            diagnostics_runs/**/diagnostics.*
+            diagnostics_summary.md
+          if-no-files-found: ignore
+          retention-days: 30

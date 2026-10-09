@@ -322,6 +322,7 @@ async def get_multiple_choice_gpt_prediction(
                 i + 1, run.model, run.error,
             )
             record["dropped"] = True
+            record["error"] = str(run.error or "")[:500]
             ensemble.append(record)
             continue
         option_probabilities = extract_option_probabilities_from_response(run.response, options)

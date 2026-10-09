@@ -149,6 +149,9 @@ class Scrape:
     ok: bool
     content: str = ""
     error: str = ""
+    # Size of the page before the _MAX_SCRAPE_CHARS cut (0 = not measured).
+    # Recorded in the trace so a diagnosis can see what the cap removed.
+    raw_chars: int = 0
 
 
 def scrape_adequacy(content: str) -> tuple[bool, str]:
@@ -1124,6 +1127,8 @@ async def _scrape_targets(
                     "group": group.group,
                     "cycle": cycle_no,
                     "phase": f"{tool} / {phase}",
+                    "raw_chars": scrape.raw_chars or len(scrape.content),
+                    "truncated": scrape.content.endswith("[Truncated.]"),
                 },
             )
             return scrape
@@ -1182,6 +1187,7 @@ async def _scrape_targets(
                         purpose=item.purpose,
                         ok=bool(result.content.strip()),
                         content=_truncate_text(result.content, _MAX_SCRAPE_CHARS),
+                        raw_chars=len(result.content or ""),
                         error="" if result.content.strip() else f"{adapter.name} returned no content.",
                     ),
                     engine=f"adapter:{adapter.name}",
@@ -1289,6 +1295,7 @@ async def _scrape_targets(
                                 purpose=item.purpose,
                                 ok=True,
                                 content=_truncate_text(content, _MAX_SCRAPE_CHARS),
+                                raw_chars=len(content or ""),
                             ),
                             engine=source_ledger.ENGINE_FIRECRAWL,
                         )
@@ -1329,6 +1336,7 @@ async def _scrape_targets(
                         purpose=item.purpose,
                         ok=True,
                         content=_truncate_text(content, _MAX_SCRAPE_CHARS),
+                        raw_chars=len(content or ""),
                     ),
                     engine=source_ledger.ENGINE_CRAWL4AI_BASIC,
                 )
@@ -1375,6 +1383,7 @@ async def _scrape_targets(
                                 purpose=item.purpose,
                                 ok=True,
                                 content=_truncate_text(content, _MAX_SCRAPE_CHARS),
+                                raw_chars=len(content or ""),
                             ),
                             engine=_ENGINE_FIRECRAWL_RENDER,
                         )
@@ -1419,6 +1428,7 @@ async def _scrape_targets(
                     purpose=item.purpose,
                     ok=True,
                     content=_truncate_text(snapshot_text, _MAX_SCRAPE_CHARS),
+                    raw_chars=len(snapshot_text or ""),
                 ),
                 engine="wayback-snapshot",
             )

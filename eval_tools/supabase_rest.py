@@ -131,6 +131,12 @@ class SupabaseREST:
             "GET", f"/rest/v1/{relation}", f"select from {relation}", params=params
         ).json()
 
+    def download(self, bucket: str, path: str) -> bytes:
+        """Read one stored file. Raises SupabaseError on 404 or any other failure."""
+        return self._request(
+            "GET", f"/storage/v1/object/{bucket}/{path}", f"download {bucket}/{path}"
+        ).content
+
     def upload(self, bucket: str, path: str, data: bytes, content_type: str) -> None:
         """Write one file, replacing any existing object at ``path``."""
         self._request(

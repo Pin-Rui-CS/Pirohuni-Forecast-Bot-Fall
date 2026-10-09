@@ -63,6 +63,7 @@ eval_tools/*
 !eval_tools/score_outcomes.py
 !eval_tools/score_forecasts.py
 !eval_tools/supabase_rest.py
+!eval_tools/diagnose_run.py
 CAPABILITIES.md
 INCIDENTS.md
 SOCLAAS.md
@@ -73,3 +74,6 @@ task-breakdown-44879-44880.md
 
 # Handoff doc for the separate reader/website repo (copy it over, then delete)
 FORECAST-LIBRARY-HANDOFF.md
+
+# Run diagnostics fetched locally by eval_tools/diagnose_run.py fetch
+diagnostics_runs/

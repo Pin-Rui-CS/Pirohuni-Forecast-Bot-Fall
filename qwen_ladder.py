@@ -239,7 +239,9 @@ def timeout_seconds(label: str = "") -> float:
 # Labels whose calls are small decisions, not long reasoning: an API-agent step
 # picks the next tool call, and XHigh would spend minutes on each of six steps.
 # QWEN_START_EFFORT still overrides.
-DEFAULT_START_EFFORT: dict[str, str] = {"apiagent": "medium", "forecast-comment": "medium"}
+# A key ending in "/" covers every label under it ("diagnostics/plan-items").
+DEFAULT_START_EFFORT: dict[str, str] = {"apiagent": "medium", "forecast-comment": "medium",
+                                        "diagnostics/": "medium"}
 
 
 def efforts_for(label: str) -> tuple[str, ...]:
@@ -248,7 +250,9 @@ def efforts_for(label: str) -> tuple[str, ...]:
     QWEN_START_EFFORT="serp-scrape-extract=medium" starts that label at Medium,
     which leaves it a single attempt -- there is no rung below Medium.
     """
-    start = DEFAULT_START_EFFORT.get(label, EFFORT_LADDER[0])
+    start = DEFAULT_START_EFFORT.get(label) or next(
+        (effort for prefix, effort in DEFAULT_START_EFFORT.items()
+         if prefix.endswith("/") and label.startswith(prefix)), EFFORT_LADDER[0])
     for entry in os.getenv("QWEN_START_EFFORT", "").split(","):
         name, _, effort = entry.partition("=")
         if name.strip() and name.strip() == label and effort.strip():
@@ -264,6 +268,13 @@ def set_attempt_log(path: Path | None) -> None:
     _attempt_log = Path(path) if path else None
 
 
+# Per-question attempt log. Questions run concurrently, so a module global would
+# interleave them; a ContextVar set inside the question's task follows that
+# question's calls (child tasks inherit it). Written in addition to the global.
+question_attempt_log: ContextVar[Path | None] = ContextVar("qwen_question_attempt_log",
+                                                            default=None)
+
+
 def _log_attempt(record: dict) -> None:
     logger.info(
         "[qwen-ladder] %s | %s | %s | %.1fs | answer=%d reasoning=%d chars%s",
@@ -271,12 +282,11 @@ def _log_attempt(record: dict) -> None:
         record["answer_chars"], record["reasoning_chars"],
         f" | {record['error']}" if record.get("error") else "",
     )
-    if _attempt_log is None:
-        return
-    with _log_lock:
-        _attempt_log.parent.mkdir(parents=True, exist_ok=True)
-        with _attempt_log.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    for target in {path for path in (question_attempt_log.get(), _attempt_log) if path}:
+        with _log_lock:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def _payload(kwargs: dict[str, Any], effort: str) -> dict[str, Any]:
