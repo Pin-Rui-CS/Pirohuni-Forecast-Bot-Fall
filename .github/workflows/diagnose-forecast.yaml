@@ -4,8 +4,8 @@ name: Diagnose a forecast
 # the run stored in the forecast library (Supabase). It never forecasts. The
 # only model it may call is Qwen on SoCLaaS, for narrow extraction tasks whose
 # answers code verifies; no OpenRouter or OpenAI key is passed to this job.
-# Results: Supabase table run_diagnostics + diagnostics.md next to the run's
-# files, and a workflow artifact.
+# Results: Supabase tables run_diagnostics + run_lineage, diagnostics.md and
+# the step files next to the run's files, and a workflow artifact.
 
 "on":
   workflow_dispatch:
@@ -113,6 +113,7 @@ jobs:
           name: diagnostics-q${{ inputs.question_id }}-${{ github.run_id }}
           path: |
             diagnostics_runs/**/diagnostics.*
+            diagnostics_runs/**/lineage.json
             diagnostics_summary.md
           if-no-files-found: ignore
           retention-days: 30

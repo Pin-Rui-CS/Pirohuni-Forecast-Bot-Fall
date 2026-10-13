@@ -9,6 +9,7 @@ from typing import Any
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI, RateLimitError
 
+import call_log
 import llm_provider
 from config import llm_rate_limiter
 from monetary_cost_manager import MonetaryCostManager, count_openrouter_reasoning_tokens
@@ -290,6 +291,26 @@ def _user_message(prompt: str, cache_static_prefix: bool, route: Any) -> dict:
 
 
 async def call_llm(
+    prompt: str,
+    model: str = "anthropic/claude-opus-5.5",
+    temperature: float = 0.3,
+    _label: str = "forecast",
+    return_transcript: bool = False,
+    cache_static_prefix: bool = False,
+    max_tokens: int | None = None,
+    raise_on_truncation: bool = False,
+    deliberate: bool = False,
+) -> str | tuple[str, str]:
+    """Call the LLM (see ``_call_llm``), naming the call in the external call log."""
+    token = call_log.set_label(_label)
+    try:
+        return await _call_llm(prompt, model, temperature, _label, return_transcript,
+                               cache_static_prefix, max_tokens, raise_on_truncation, deliberate)
+    finally:
+        call_log.reset_label(token)
+
+
+async def _call_llm(
     prompt: str,
     model: str = "anthropic/claude-opus-5.5",
     temperature: float = 0.3,

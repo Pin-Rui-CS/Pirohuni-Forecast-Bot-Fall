@@ -6,9 +6,12 @@
     # a run stored in the forecast library (latest run, or a given run id)
     poetry run python eval_tools/diagnose_run.py fetch --question-id 46133 [--run-id gh-...] [--publish]
 
-Writes diagnostics.json and diagnostics.md into the question folder. With
---publish, upserts one row per check into Supabase `run_diagnostics` and
-uploads diagnostics.md next to the run's files.
+Writes diagnostics.json, diagnostics.md and lineage.json (the run's flow map,
+API calls and evidence lifecycle; spec in diagnostics/LINEAGE.md) into the
+question folder. With --publish, upserts one row per check into Supabase
+`run_diagnostics`, the lineage into `run_lineage`, and uploads diagnostics.md
+plus every step's input/output file (<blob_prefix>/steps/<file>.gz) next to
+the run's files.
 
 Never forecasts and never calls a paid model: the paid keys are blanked before
 anything is imported, and the Qwen tasks assert a SoCLaaS route per call.
@@ -39,12 +42,15 @@ import dotenv  # noqa: E402
 
 dotenv.load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
+from diagnostics import checks_lineage, lineage  # noqa: E402
 from diagnostics.loader import load, long_path  # noqa: E402
+from diagnostics.result import sort_key  # noqa: E402
 from diagnostics.runner import render_markdown, run_all  # noqa: E402
 from eval_tools.publish_runs import BUCKET, _gzip, _sanitize  # noqa: E402
 from eval_tools.supabase_rest import SupabaseError, SupabaseREST  # noqa: E402
 
 TABLE = "run_diagnostics"
+LINEAGE_TABLE = "run_lineage"
 _FILES = ("forecast.json", "research.md.gz", "runs.md.gz", "audit.md.gz", "evolution.md.gz")
 
 
@@ -90,13 +96,31 @@ def fetch(client: SupabaseREST, question_id: int, run_id: str | None, out_root: 
     return qdir, run_id, prefix
 
 
-def publish(client: SupabaseREST, art, results, markdown: str, run_id: str, prefix: str | None) -> None:
+def publish(client: SupabaseREST, art, results, markdown: str, lin: dict, run_id: str, prefix: str | None) -> None:
     question_id = int(art.forecast.get("question_id"))
     rows = [_sanitize({"run_id": run_id, "question_id": question_id, **r.as_row()}) for r in results]
     client.upsert(TABLE, rows, on_conflict="run_id,question_id,check_id")
     prefix = prefix or f"runs/{run_id}/{question_id}"
     client.upload(BUCKET, f"{prefix}/diagnostics.md.gz", _gzip(markdown.encode("utf-8")), "application/gzip")
-    print(f"Published {len(rows)} checks to {TABLE} and {prefix}/diagnostics.md.gz")
+    # Step files one by one: the step page opens a single input/output, and the
+    # run's trace.tar.gz cannot be read file by file from a browser.
+    files = lineage.payload_files(lin)
+    for name in files:
+        path = long_path(os.path.join(art.question_dir, "trace", name))
+        if os.path.isfile(path):
+            with open(path, "rb") as handle:
+                text = lineage.redact(handle.read().decode("utf-8", errors="replace"))
+            client.upload(BUCKET, f"{prefix}/steps/{name}.gz", _gzip(text.encode("utf-8")), "application/gzip")
+    try:
+        client.upsert(LINEAGE_TABLE, [_sanitize({
+            "run_id": run_id, "question_id": question_id, "schema_version": lin["schema_version"],
+            "lineage_source": lin["lineage_source"], "lineage": json.loads(lineage.dumps(lin)),
+        })], on_conflict="run_id,question_id")
+    except SupabaseError as exc:  # the checks above are already stored
+        print(f"Lineage NOT stored ({str(exc)[:200]}). If the table is missing, apply "
+              "db/migrations/004_run_lineage.sql in the Supabase SQL editor and re-run.")
+    print(f"Published {len(rows)} checks to {TABLE}, the lineage to {LINEAGE_TABLE}, "
+          f"{prefix}/diagnostics.md.gz and {len(files)} step files under {prefix}/steps/")
 
 
 async def main(argv: list[str] | None = None) -> int:
@@ -130,7 +154,11 @@ async def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"No forecast.json in {qdir}")
 
     results = await run_all(art, use_qwen=not args.no_qwen)
+    lin = lineage.build(art, results, files_prefix=prefix or (f"runs/{run_id}/{art.forecast.get('question_id')}"
+                                                            if run_id else None))
+    results = sorted(results + checks_lineage.run(lin), key=sort_key)
     markdown = render_markdown(art, results)
+    _write(os.path.join(qdir, "lineage.json"), lineage.dumps(lin).encode("utf-8"))
     _write(os.path.join(qdir, "diagnostics.json"),
            json.dumps(_sanitize([r.as_row() for r in results]), indent=1, ensure_ascii=False).encode("utf-8"))
     _write(os.path.join(qdir, "diagnostics.md"), markdown.encode("utf-8"))
@@ -142,7 +170,7 @@ async def main(argv: list[str] | None = None) -> int:
         elif not run_id:
             print("--publish skipped: no run id in forecast.json provenance")
         else:
-            publish(client, art, results, markdown, run_id, prefix)
+            publish(client, art, results, markdown, lin, run_id, prefix)
     return 0
 
 

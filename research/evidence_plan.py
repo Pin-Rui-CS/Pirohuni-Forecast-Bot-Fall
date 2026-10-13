@@ -46,7 +46,8 @@ async def build_evidence_plan(
         )
         parsed = _extract_json_object(response)
         plan = _format_plan(parsed)
-        research_trace.emit("evidence_plan", "evidence plan", plan, meta={"model": model})
+        research_trace.emit("evidence_plan", "evidence plan", plan, meta={"model": model},
+                            **_plan_lineage(asknews_research))
         return plan
     except HardLimitExceededError:
         raise
@@ -59,8 +60,17 @@ async def build_evidence_plan(
             status="fallback",
             error=f"{type(exc).__name__}: {exc}",
             meta={"model": model},
+            **_plan_lineage(asknews_research),
         )
         return plan
+
+
+def _plan_lineage(asknews_research: str) -> dict:
+    """The plan reads the question (and the filtered AskNews block when given);
+    it is both a document every step can read and the brief writer's first section."""
+    reads = ["input:question"] + ([research_trace.ref_doc("asknews_filtered")] if asknews_research else [])
+    return {"reads": reads, "writes": [research_trace.ref_doc("plan"), research_trace.ref_section("Evidence Plan")],
+            "kind": "model", "lane": "*"}
 
 
 def _build_prompt(

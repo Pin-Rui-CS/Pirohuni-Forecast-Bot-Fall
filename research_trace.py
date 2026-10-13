@@ -16,6 +16,14 @@ Design rules (see docs/research_trace_plan.md):
   dict keyed by a ContextVar scope, so questions forecast concurrently keep
   separate traces, and deep shared code (scrape/extract/compile) can emit
   without threading a writer through every signature.
+
+Lineage contract (diagnostics/LINEAGE.md is the reader's side): every event
+also records what the step READ and WROTE as plain references (``url:``,
+``page:``, ``section:``, ``doc:``, ``input:question``), plus any text it cut
+and the external calls it made. The run's flow map is built from these alone,
+so a new or changed step shows up correctly by declaring its references --
+nothing downstream knows stage names. Build references with ``ref_url`` /
+``ref_page`` / ``ref_doc`` / ``ref_section`` so they always match.
 """
 
 from __future__ import annotations
@@ -34,9 +42,14 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 _LOCK = threading.Lock()
-# scope (= trace directory path) -> {"seq": int, "events": [dict, ...]}
+# scope (= trace directory path) -> {"seq": int, "events": [dict, ...], "scopes": {...}}
 _STATE: dict[str, dict] = {}
 _ACTIVE: ContextVar[str] = ContextVar("research_trace_dir", default="")
+# The research provider whose work is running here (see ``scope``): its name is
+# the lane, its feeds are what its first steps read, and it collects the
+# references its steps write so the provider's section can say what it joined.
+_SCOPE: ContextVar[dict | None] = ContextVar("research_trace_scope", default=None)
+LINEAGE_VERSION = 1
 
 _MAX_PAYLOAD_CHARS = 200_000
 _MAX_ERROR_CHARS = 500
@@ -75,6 +88,101 @@ def begin_question(question_dir: str) -> None:
         logger.warning("research_trace.begin_question failed: %s: %s", type(exc).__name__, exc)
 
 
+# ---------------------------------------------------------------------------
+# Lineage references and provider scopes
+# ---------------------------------------------------------------------------
+
+def ref_url(url: str) -> str:
+    """A URL as a reference to find/fetch (search results, ranking choices)."""
+    return "url:" + _canonical_ref(url)
+
+
+def ref_page(url: str) -> str:
+    """The fetched text of a URL."""
+    return "page:" + _canonical_ref(url)
+
+
+def ref_doc(name: str) -> str:
+    """A named document a step produced (plan, check, brief, report...)."""
+    return "doc:" + " ".join(str(name).split())
+
+
+def ref_section(name: str) -> str:
+    """A research section handed to the compiler, by its provider name."""
+    return "section:" + " ".join(str(name).split())
+
+
+def _canonical_ref(url: str) -> str:
+    # Same canonical form as diagnostics/lineage_legacy.canon.
+    cleaned = str(url or "").strip().lower()
+    cleaned = re.sub(r"^https?://", "", cleaned)
+    if cleaned.startswith("www."):
+        cleaned = cleaned[4:]
+    return cleaned.split("#", 1)[0].rstrip("/").rstrip(".,;:!?)")
+
+
+class scope:
+    """``with research_trace.scope("Tavily Search", feeds=[...]):`` around one
+    provider's work. Events inside take the provider as their lane, steps that
+    start the provider read ``feeds()``, and ``outputs_of(name)`` later tells
+    the provider's section which references it joined. Never raises."""
+
+    def __init__(self, name: str, feeds: list[str] | None = None, lane: str | None = None):
+        self.record = {"name": name, "lane": lane or name, "feeds": list(feeds or ["input:question"]),
+                       "written": [], "read": set(), "marked": None}
+        self._token = None
+
+    def __enter__(self):
+        try:
+            self._token = _SCOPE.set(self.record)
+            trace_dir = _ACTIVE.get()
+            with _LOCK:
+                state = _STATE.get(trace_dir)
+                if state is not None:
+                    state.setdefault("scopes", {})[self.record["name"]] = self.record
+        except Exception:  # noqa: BLE001 - tracing must never fail a run
+            pass
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            if self._token is not None:
+                _SCOPE.reset(self._token)
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+
+def feeds() -> list[str]:
+    """What the current provider's first steps read (``input:question`` outside one)."""
+    record = _SCOPE.get()
+    return list(record["feeds"]) if record else ["input:question"]
+
+
+def mark_output(refs: list[str]) -> None:
+    """Declare which references make up the current provider's final text
+    (e.g. every cycle report of a search provider)."""
+    record = _SCOPE.get()
+    if record is not None:
+        record["marked"] = list(refs)
+
+
+def outputs_of(name: str) -> list[str]:
+    """References a provider's section was built from: what it marked, else
+    everything written inside it that nothing inside it read, else its feeds."""
+    try:
+        with _LOCK:
+            record = (_STATE.get(_ACTIVE.get()) or {}).get("scopes", {}).get(name)
+        if not record:
+            return []
+        if record["marked"]:
+            return list(record["marked"])
+        unread = [ref for ref in dict.fromkeys(record["written"]) if ref not in record["read"]]
+        return unread or list(record["feeds"])
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def emit(
     stage: str,
     label: str,
@@ -83,12 +191,25 @@ def emit(
     status: str = "ok",
     error: str = "",
     meta: dict | None = None,
+    reads: list[str] | None = None,
+    writes: list[str] | None = None,
+    cuts: list[dict] | None = None,
+    input: Any = None,  # noqa: A002 - the step's exact input (prompt), saved beside the payload
+    kind: str | None = None,
+    lane: str | None = None,
+    duration_s: float | None = None,
 ) -> None:
     """Record one research-state event.
 
     ``payload`` may be a string (saved as .md) or a dict/list (saved as .json).
     ``meta["chain"]`` links versioned documents (extract report v1/v2/...,
     artifact check v1/v2, brief) so the renderer can diff consecutive versions.
+
+    Lineage: ``reads``/``writes`` are the references this step consumed and
+    produced (``reads`` defaults to the current provider's feeds and is then
+    flagged as defaulted); ``cuts`` lists text a cap or truncation dropped as
+    ``{"kept", "of", "reason"}``; ``kind`` is search | fetch | model | code |
+    note; ``lane`` overrides the provider scope ("*" = spans every lane).
     """
     try:
         trace_dir = _ACTIVE.get()
@@ -121,6 +242,8 @@ def emit(
             "chars": original_chars,
             "payload_file": filename,
             "meta": dict(meta or {}),
+            "lineage": _lineage_block(trace_dir, seq, stage, label, reads, writes, cuts, input,
+                                      kind, lane, duration_s),
         }
         with open(os.path.join(trace_dir, filename), "w", encoding="utf-8") as f:
             f.write(text)
@@ -135,6 +258,52 @@ def emit(
                 f.write(jsonl_line + "\n")
     except Exception as exc:  # noqa: BLE001 - tracing must never fail a run
         logger.warning("research_trace.emit(%s/%s) failed: %s: %s", stage, label, type(exc).__name__, exc)
+
+
+def _lineage_block(*args) -> dict:
+    try:
+        return _build_lineage_block(*args)
+    except Exception as exc:  # noqa: BLE001 - a lineage problem must not lose the event
+        return {"v": LINEAGE_VERSION, "reads": [], "writes": [], "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _build_lineage_block(trace_dir, seq, stage, label, reads, writes, cuts, input_, kind, lane, duration_s) -> dict:
+    record = _SCOPE.get()
+    try:
+        from source_ledger import current_context
+
+        _, phase = current_context()
+    except Exception:  # noqa: BLE001
+        phase = None
+    block = {
+        "v": LINEAGE_VERSION,
+        "reads": list(reads) if reads is not None else feeds(),
+        "writes": list(writes or []),
+        "cuts": [c for c in (cuts or []) if isinstance(c, dict)],
+        "kind": kind,
+        "lane": lane if lane is not None else (record["lane"] if record else None),
+        "pass": phase,
+    }
+    if reads is None:
+        block["reads_defaulted"] = True
+    if duration_s is not None:
+        block["duration_s"] = round(float(duration_s), 2)
+    if input_ is not None:
+        text = input_ if isinstance(input_, str) else json.dumps(input_, indent=2, default=str)
+        name = f"{seq:03d}_{_slug(stage)}_{_slug(label)}_input.md"
+        with open(os.path.join(trace_dir, name), "w", encoding="utf-8") as f:
+            f.write(text[:_MAX_PAYLOAD_CHARS])
+        block["input_file"], block["input_chars"] = name, len(text)
+    try:
+        import call_log
+
+        block["calls"] = call_log.claim()
+    except Exception:  # noqa: BLE001
+        pass
+    if record is not None:
+        record["written"].extend(block["writes"])
+        record["read"].update(block["reads"])
+    return block
 
 
 def finalize() -> None:

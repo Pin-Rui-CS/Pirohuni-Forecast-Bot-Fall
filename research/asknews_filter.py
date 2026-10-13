@@ -85,6 +85,8 @@ async def filter_asknews_research(
             status="failed",
             error=f"{type(exc).__name__}: {exc}",
             meta={"model": model, "input_chars": len(raw)},
+            reads=["input:question"], writes=[research_trace.ref_doc("asknews_filtered")],
+            kind="model", lane="AskNews",
         )
         return raw
 
@@ -103,6 +105,8 @@ async def filter_asknews_research(
             status="rejected",
             error="filtered block was empty or lost the article citation format",
             meta={"model": model, "input_chars": len(raw)},
+            reads=["input:question"], writes=[research_trace.ref_doc("asknews_filtered")],
+            kind="model", lane="AskNews",
         )
         return raw
 
@@ -115,6 +119,8 @@ async def filter_asknews_research(
             "input_chars": len(raw),
             "output_chars": len(filtered),
         },
+        reads=["input:question"], writes=[research_trace.ref_doc("asknews_filtered")],
+        kind="model", lane="AskNews",
     )
     logger.info(
         "[research] AskNews filter: %d -> %d chars", len(raw), len(filtered)

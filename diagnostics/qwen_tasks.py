@@ -99,10 +99,53 @@ Reply with JSON only: [{{"item": <number>, "found": true|false, "quote": "<verba
         lines.append(f"[{kind}] {state}: {text[:120]}" + (f' -- "{quote}"' if verified else ""))
         if not verified:
             missing.append(kind)
+    absent = [i for i, (kind, _) in enumerate(items) if kind in missing]
+    in_research = await _in_research(a, items, absent) if absent else {}
+    detail = []
+    for i, (kind, text) in enumerate(items):
+        _, verified, quote = verdict.get(i, (False, False, ""))
+        found, rquote = in_research.get(i, (None, ""))
+        detail.append({"kind": kind, "text": text, "in_brief": verified, "quote": quote if verified else "",
+                       "in_research": True if verified else found, "research_quote": rquote})
     status = FAIL if "artifact" in missing else WARN if missing else PASS
     return Check("evidence.plan_items", "evidence", title, status,
                  f"{len(items) - len(missing)}/{len(items)} requested items verified in the brief",
-                 value={"missing": missing, "items": len(items)}, evidence=lines, method="qwen")
+                 value={"missing": missing, "items": len(items), "detail": detail},
+                 evidence=lines, method="qwen")
+
+
+async def _in_research(a: RunArtifacts, items: list, indexes: list[int]) -> dict:
+    """For plan items missing from the brief: did the research the brief writer
+    was given contain them? {index: (found, verified quote)}; found is None when
+    there was no research text to check."""
+    compiler = a.events("compiler_input")
+    research = a.payload(compiler[-1]) if compiler else ""
+    if not research:
+        return {}
+    listing = "\n".join(f"{i}. {items[i][1]}" for i in indexes)
+    result = {i: (False, "") for i in indexes}
+    for start in range(0, min(len(research), 2 * _MAX_SOURCE_CHARS), _MAX_SOURCE_CHARS):
+        chunk = research[start:start + _MAX_SOURCE_CHARS]
+        answer = await _ask("plan-items-research", f"""For each requested item, say whether the TEXT contains it.
+If it does, copy one short sentence or table row from the TEXT verbatim as proof.
+
+REQUESTED ITEMS:
+{listing}
+
+TEXT:
+<<<
+{chunk}
+>>>
+
+Reply with JSON only: [{{"item": <number>, "found": true|false, "quote": "<verbatim text, or empty>"}}]""")
+        for row in answer if isinstance(answer, list) else []:
+            try:
+                idx = int(row.get("item"))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if idx in result and not result[idx][0] and row.get("found") and _quoted(row.get("quote", ""), chunk):
+                result[idx] = (True, str(row.get("quote"))[:160])
+    return result
 
 
 def _row_verified(year: str, value: str, quote: str, source: str, *, lookback: int = 2000) -> bool:

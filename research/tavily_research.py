@@ -165,6 +165,8 @@ async def build_tavily_research_result(
         "tavily results (per-query rank order)",
         research_trace.format_search_results(search_results),
         meta={"queries": queries, "result_count": len(search_results)},
+        reads=research_trace.feeds(), writes=[research_trace.ref_url(r.url) for r in search_results],
+        kind="search",
     )
     ranked_url_groups = await rank_tavily_urls(
         title=title,
@@ -246,7 +248,6 @@ async def rank_tavily_urls(
         results=results[:_MAX_RANKING_INPUT_RESULTS],
         max_ranked_urls=max_ranked_urls,
     )
-    research_trace.emit("rank", "tavily ranking prompt", prompt, meta={"model": model})
     response = await call_llm(
         prompt,
         model=model,
@@ -260,6 +261,11 @@ async def rank_tavily_urls(
         "rank",
         "tavily ranked url groups",
         research_trace.ranked_groups_payload(deduped_groups),
+        meta={"model": model},
+        input=prompt,
+        reads=[research_trace.ref_url(r.url) for r in results[:_MAX_RANKING_INPUT_RESULTS]],
+        writes=[research_trace.ref_url(item.url) for group in deduped_groups for item in group.urls],
+        kind="model",
     )
     return deduped_groups
 

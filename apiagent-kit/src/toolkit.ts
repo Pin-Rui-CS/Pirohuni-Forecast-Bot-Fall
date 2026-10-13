@@ -227,6 +227,8 @@ export function createToolkit(): Toolkit {
       };
     }
 
+    // ms and httpStatus feed the forecast bot's per-question call log.
+    const started = Date.now();
     try {
       const result = await adapter.run(
         parsed.data,
@@ -243,6 +245,8 @@ export function createToolkit(): Toolkit {
         url: result.url,
         retrievedAt: result.retrievedAt,
         rowCount: result.rows.length,
+        ms: Date.now() - started,
+        httpStatus: 200,
         truncated: result.truncated ?? false,
         note: result.note,
         rows: result.rows,
@@ -250,7 +254,13 @@ export function createToolkit(): Toolkit {
       };
     } catch (error) {
       failures += 1;
-      return { api: adapter.id, name: adapter.name, ...explain(error) };
+      return {
+        api: adapter.id,
+        name: adapter.name,
+        ms: Date.now() - started,
+        httpStatus: error instanceof HttpError ? error.status : null,
+        ...explain(error),
+      };
     }
   }
 

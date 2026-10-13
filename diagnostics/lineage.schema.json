@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pirohuni-forecast-bot/lineage.schema.json",
+  "title": "Run lineage",
+  "description": "Flow map, external calls and evidence lifecycle of one diagnosed forecast. Human spec: diagnostics/LINEAGE.md. Unknown extra fields may appear and must be ignored.",
+  "type": "object",
+  "required": ["schema_version", "lineage_source", "run", "lanes", "nodes", "edges", "calls", "facts", "losses"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "lineage_source": {"enum": ["declared", "legacy-translation"]},
+    "run": {
+      "type": "object",
+      "required": ["question_id", "run_id", "files_layout", "layers"],
+      "properties": {
+        "question_id": {"type": ["integer", "null"]},
+        "title": {"type": ["string", "null"]},
+        "question_type": {"type": ["string", "null"]},
+        "run_id": {"type": ["string", "null"]},
+        "run_timestamp": {"type": ["string", "null"]},
+        "timings": {"type": "object", "additionalProperties": {"type": ["number", "null"]}},
+        "files_prefix": {"type": ["string", "null"], "description": "Storage prefix; step files are at {files_prefix}/steps/{file}.gz"},
+        "files_layout": {"const": "{files_prefix}/steps/{file}.gz"},
+        "layers": {"type": "integer", "minimum": 1}
+      }
+    },
+    "lanes": {"type": "array", "items": {"type": "string"}, "description": "Flow-map columns in display order. Never includes '*'."},
+    "nodes": {"type": "array", "items": {"$ref": "#/$defs/node"}},
+    "edges": {"type": "array", "items": {"$ref": "#/$defs/edge"}},
+    "calls": {"type": "array", "items": {"$ref": "#/$defs/call"}},
+    "facts": {"type": "array", "items": {"$ref": "#/$defs/fact"}},
+    "losses": {
+      "type": "object",
+      "description": "stage -> state -> number of facts lost or changed at a step of that stage",
+      "additionalProperties": {"type": "object", "additionalProperties": {"type": "integer"}}
+    }
+  },
+  "$defs": {
+    "status": {"enum": ["pass", "warn", "fail", "unused"]},
+    "cut": {
+      "type": "object",
+      "required": ["kept", "reason"],
+      "properties": {
+        "ref": {"type": "string"},
+        "kept": {"type": ["integer", "null"]},
+        "of": {"type": ["integer", "null"]},
+        "reason": {"type": "string"}
+      }
+    },
+    "node": {
+      "type": "object",
+      "required": ["id", "stage", "label", "kind", "lane", "layer", "group", "status", "parents", "children",
+                   "cuts", "output", "input", "call_ids", "dead_end", "gaps", "inferred"],
+      "properties": {
+        "id": {"type": "string"},
+        "seq": {"type": ["integer", "null"]},
+        "stage": {"type": "string"},
+        "label": {"type": ["string", "null"]},
+        "kind": {"type": "string", "description": "input | search | fetch | model | code | note (new values may appear)"},
+        "lane": {"type": ["string", "null"], "description": "A lane name, '*' for spanning, null only for input nodes"},
+        "pass": {"type": ["string", "null"]},
+        "layer": {"type": "integer", "minimum": 0},
+        "group": {"type": "string"},
+        "status": {"$ref": "#/$defs/status"},
+        "status_raw": {"type": "string"},
+        "error": {"type": "string"},
+        "ts": {"type": ["string", "null"]},
+        "duration_s": {"type": ["number", "null"]},
+        "model": {"type": ["string", "null"]},
+        "cuts": {"type": "array", "items": {"$ref": "#/$defs/cut"}},
+        "note": {"type": "string"},
+        "output": {
+          "type": ["object", "null"],
+          "required": ["file", "chars"],
+          "properties": {"file": {"type": ["string", "null"]}, "chars": {"type": "integer"}}
+        },
+        "input": {
+          "type": ["object", "null"],
+          "properties": {
+            "file": {"type": ["string", "null"], "description": "Exact input (prompt) file, when saved"},
+            "chars": {"type": ["integer", "null"]},
+            "from": {"type": "array", "items": {"type": "string"}, "description": "Parent node ids whose outputs were the input"}
+          }
+        },
+        "parents": {"type": "array", "items": {"type": "string"}},
+        "children": {"type": "array", "items": {"type": "string"}},
+        "call_ids": {"type": "array", "items": {"type": "string"}},
+        "dead_end": {"type": "boolean"},
+        "gaps": {"type": "array", "items": {"type": "string"}},
+        "inferred": {"type": "boolean"},
+        "reads": {"type": "array", "items": {"type": "string"}},
+        "writes": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "edge": {
+      "type": "object",
+      "required": ["from", "to", "cut", "inferred"],
+      "properties": {
+        "from": {"type": "string"},
+        "to": {"type": "string"},
+        "refs": {"type": "array", "items": {"type": "string"}},
+        "ref_count": {"type": "integer"},
+        "chars": {"type": ["integer", "null"]},
+        "cut": {"type": "boolean"},
+        "inferred": {"type": "boolean"}
+      }
+    },
+    "call": {
+      "type": "object",
+      "required": ["id", "node_id", "service", "kind", "request", "failed", "retry_of"],
+      "properties": {
+        "id": {"type": "string"},
+        "node_id": {"type": ["string", "null"]},
+        "service": {"type": ["string", "null"]},
+        "kind": {"type": "string", "description": "http | search | scrape | data | model (new values may appear)"},
+        "request": {"type": ["string", "null"]},
+        "status_code": {"type": ["integer", "null"]},
+        "started_at": {"type": ["string", "null"]},
+        "duration_s": {"type": ["number", "null"]},
+        "returned": {"type": ["string", "integer", "null"]},
+        "outcome": {"type": ["string", "null"]},
+        "failed": {"type": "boolean"},
+        "retry_of": {"type": ["string", "null"]}
+      }
+    },
+    "fact_step": {
+      "type": "object",
+      "required": ["node_id", "state"],
+      "properties": {
+        "node_id": {"type": ["string", "null"]},
+        "state": {"enum": ["present", "modified", "dropped", "gone", "never_fetched", "unknown"]},
+        "note": {"type": "string"},
+        "quote": {"type": ["string", "null"]}
+      }
+    },
+    "fact": {
+      "type": "object",
+      "required": ["id", "claim", "plan_item", "steps", "final_state", "lost_at"],
+      "properties": {
+        "id": {"type": "string"},
+        "claim": {"type": "string"},
+        "source": {"type": "string"},
+        "numbers": {"type": "array", "items": {"type": "string"}},
+        "plan_item": {"type": "boolean"},
+        "origin": {"type": ["string", "null"]},
+        "steps": {"type": "array", "items": {"$ref": "#/$defs/fact_step"}},
+        "lost_at": {"type": ["string", "null"]},
+        "final_state": {"enum": ["present", "modified", "dropped", "gone", "never_fetched", "unknown"]}
+      }
+    }
+  }
+}

@@ -12,6 +12,7 @@ from config import (
     HETEROGENEOUS_RUN_ENABLED,
     HETEROGENEOUS_RUN_MODEL,
 )
+import research_trace
 from llm_client import call_llm
 
 logger = logging.getLogger(__name__)
@@ -177,6 +178,24 @@ async def gather_forecast_runs(
         return f"{type(exc).__name__}: {str(exc)[:200]}"
 
     async def one_run(index: int, model: str) -> ForecastRun:
+        run = await _one_run(index, model)
+        # Lineage: one node per run, reading the brief or (the heterogeneous
+        # member) the raw research view.
+        raw = prompts[index] != prompt
+        research_trace.emit(
+            "forecast",
+            f"{label} run {index + 1} · {short_model_name(model)}" + (" (raw research)" if raw else ""),
+            run.transcript or "",
+            status="ok" if run.valid else "failed",
+            error=run.error or "",
+            meta={"model": model, "repaired": run.repaired},
+            reads=[research_trace.ref_doc("raw_view" if raw else "brief")],
+            writes=[research_trace.ref_doc(f"forecast:{label}:{index + 1}")],
+            kind="model", lane="*",
+        )
+        return run
+
+    async def _one_run(index: int, model: str) -> ForecastRun:
         tag = short_model_name(model)
         run_prompt = prompts[index]
         # A hard call failure (provider down, rate-limited, quota exhausted) must

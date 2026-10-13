@@ -194,6 +194,8 @@ async def build_firecrawl_research_result(
         "Firecrawl search results (raw, pre-digest)",
         research_trace.format_search_results(search_results),
         meta={"queries": queries, "result_count": len(search_results)},
+        reads=research_trace.feeds(), writes=[research_trace.ref_url(r.url) for r in search_results],
+        kind="search",
     )
     ranked_url_groups, search_results_summary = await rank_firecrawl_urls(
         title=title,

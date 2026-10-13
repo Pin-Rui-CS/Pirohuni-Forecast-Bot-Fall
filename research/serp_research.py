@@ -404,6 +404,8 @@ async def build_serp_research_result(
         "serpapi results (per-query rank order)",
         research_trace.format_search_results(organic_results),
         meta={"queries": queries, "result_count": len(organic_results)},
+        reads=research_trace.feeds(), writes=[research_trace.ref_url(r.link) for r in organic_results],
+        kind="search",
     )
     ranked_url_groups = await rank_serp_urls(
         title=title,
@@ -490,7 +492,6 @@ async def rank_serp_urls(
         results=results[:_MAX_RANKING_INPUT_RESULTS],
         max_ranked_urls=max_ranked_urls,
     )
-    research_trace.emit("rank", "serp ranking prompt", prompt, meta={"model": model})
     response = await call_llm(
         prompt,
         model=model,
@@ -506,6 +507,11 @@ async def rank_serp_urls(
         "rank",
         "serp ranked url groups",
         research_trace.ranked_groups_payload(deduped_groups),
+        meta={"model": model},
+        input=prompt,
+        reads=[research_trace.ref_url(r.link) for r in results[:_MAX_RANKING_INPUT_RESULTS]],
+        writes=[research_trace.ref_url(item.url) for group in deduped_groups for item in group.urls],
+        kind="model",
     )
     return deduped_groups
 
@@ -536,6 +542,7 @@ async def run_scrape_cycles(
         return []
 
     cycles: list[Cycle] = []
+    extract_refs: list[str] = []
     next_index = {group.group: 0 for group in groups}
     needed = {group.group for group in groups}
     report_parts: list[str] = []
@@ -620,10 +627,16 @@ async def run_scrape_cycles(
         # the per-cycle payload is still what makes each cycle's yield
         # auditable against its cost.
         trace_tool, trace_phase = source_ledger.current_context()
+        extract_ref = research_trace.ref_doc(f"extract:{trace_tool}:{trace_phase}:{cycle_no}")
         research_trace.emit(
             "extract_report",
             f"{trace_tool} extract report — cycle {cycle_no}",
             delta,
+            # Each cycle reads its own pages and the previous cycle's report;
+            # the provider's section joins every cycle (mark_output below).
+            reads=[research_trace.ref_page(scrape.url) for scrape in scrapes] + extract_refs[-1:],
+            writes=[extract_ref],
+            kind="model",
             meta={
                 "chain": f"extract:{trace_tool}:{trace_phase}",
                 "cycle": cycle_no,
@@ -632,6 +645,8 @@ async def run_scrape_cycles(
                 "cumulative_chars": len(report),
             },
         )
+        extract_refs.append(extract_ref)
+        research_trace.mark_output(list(extract_refs))
         needed = set(lack)
         if not needed:
             break
@@ -1130,6 +1145,12 @@ async def _scrape_targets(
                     "raw_chars": scrape.raw_chars or len(scrape.content),
                     "truncated": scrape.content.endswith("[Truncated.]"),
                 },
+                reads=[research_trace.ref_url(scrape.url)],
+                writes=[research_trace.ref_page(scrape.url)] if scrape.ok else [],
+                cuts=[{"kept": len(scrape.content), "of": scrape.raw_chars,
+                       "reason": "scrape cap (40,000 chars)"}]
+                if scrape.ok and scrape.content.endswith("[Truncated.]") else None,
+                kind="fetch",
             )
             return scrape
 

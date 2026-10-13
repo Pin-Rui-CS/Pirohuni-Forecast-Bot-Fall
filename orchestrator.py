@@ -35,6 +35,7 @@ from monetary_cost_manager import (
 )
 from research.pipeline import run_research
 import qwen_ladder
+import call_log
 import research_trace
 
 logger = logging.getLogger(__name__)
@@ -212,6 +213,8 @@ async def forecast_individual_question(
 
     artifacts = QuestionArtifacts(question_id, post_id, title, question_type or "unknown")
     research_trace.begin_question(artifacts.dir)
+    # Every external HTTP call made for this question -> trace/calls.jsonl.
+    call_log.install()
     # Every Qwen attempt (effort, outcome, seconds, error) for this question,
     # so a diagnosis need not untangle run.log, where questions interleave.
     qwen_ladder.question_attempt_log.set(

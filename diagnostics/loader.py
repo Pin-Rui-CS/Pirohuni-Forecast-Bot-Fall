@@ -63,6 +63,7 @@ class RunArtifacts:
     run_log_lines: list[str] = field(default_factory=list)   # this question's time window
     run_log_all: list[str] = field(default_factory=list)     # whole run, for run-wide causes
     qwen_attempts: list[dict] = field(default_factory=list)
+    calls: list[dict] = field(default_factory=list)          # trace/calls.jsonl (external HTTP calls)
     precompression: dict[str, dict] = field(default_factory=dict)
 
     # ---- research.md ---------------------------------------------------------
@@ -203,11 +204,12 @@ def load(question_dir: str, *, run_log: str | None = None,
             art.trace_events.append(json.loads(line))
         except ValueError:
             continue
-    for line in _read(os.path.join(question_dir, "trace", "qwen_attempts.jsonl")).splitlines():
-        try:
-            art.qwen_attempts.append(json.loads(line))
-        except ValueError:
-            continue
+    for name, target in (("qwen_attempts.jsonl", art.qwen_attempts), ("calls.jsonl", art.calls)):
+        for line in _read(os.path.join(question_dir, "trace", name)).splitlines():
+            try:
+                target.append(json.loads(line))
+            except ValueError:
+                continue
 
     log_path = run_log or os.path.join(os.path.dirname(os.path.abspath(question_dir)), "run.log")
     log_text = _read(log_path)

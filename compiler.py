@@ -204,6 +204,7 @@ async def compile_research_report(
         research_trace.emit(
             "brief", "compiler failed; deterministic fallback brief used", "",
             status="failed", error=f"{type(exc).__name__}: {exc}", meta={"chain": "brief"},
+            reads=[research_trace.ref_doc("compiler_input")], writes=[], kind="note", lane="*",
         )
         llm_report = None
     return llm_report or heuristic_report
@@ -455,6 +456,7 @@ async def review_qwen_precompression(
         "precompress", name, candidate.answer or "", status="experimental",
         meta={"artifact_dir": str(candidate.artifact_dir), "effort": candidate.selected_effort,
               "semantic_review": "pending", "input_chars": len(content)},
+        **_precompress_lineage(name, content, candidate.answer),
     )
     return candidate
 
@@ -487,6 +489,7 @@ async def _compress_section_text(name: str, content: str, target_chars: int) -> 
             research_trace.emit(
                 "precompress", name, "", status="failed", error=f"{type(exc).__name__}: {exc}",
                 meta={"target_chars": target_chars, "input_chars": len(content)},
+                **_precompress_lineage(name, content, None),
             )
             return None
         if qwen_mode == "review":
@@ -538,6 +541,7 @@ async def _compress_section_text(name: str, content: str, target_chars: int) -> 
             status="failed",
             error=f"{type(exc).__name__}: {exc}",
             meta={"target_chars": target_chars, "input_chars": len(content)},
+            **_precompress_lineage(name, content, None),
         )
         return None
     compressed = (compressed or "").strip()
@@ -549,6 +553,7 @@ async def _compress_section_text(name: str, content: str, target_chars: int) -> 
             status="failed",
             error="compression call returned empty output",
             meta={"target_chars": target_chars, "input_chars": len(content)},
+            **_precompress_lineage(name, content, None),
         )
         return None
     research_trace.emit(
@@ -556,11 +561,25 @@ async def _compress_section_text(name: str, content: str, target_chars: int) -> 
         name,
         compressed,
         meta={"target_chars": target_chars, "input_chars": len(content)},
+        **_precompress_lineage(name, content, compressed),
     )
     return (
         f"[Section condensed from {len(content):,} to {len(compressed):,} chars; "
         f"preservation of all distinct claims has not been verified.]\n{compressed}"
     )
+
+
+def _section_of(label: str) -> str:
+    """"Tavily Search (part 2/5)" -> "Tavily Search"."""
+    return re.sub(r"\s*\(part \d+/\d+\)\s*$", "", label)
+
+
+def _precompress_lineage(name: str, content: str, compressed: str | None) -> dict:
+    out = {"reads": [research_trace.ref_section(_section_of(name))], "kind": "model",
+           "writes": [research_trace.ref_doc(f"precompress:{name}")] if compressed else []}
+    if compressed:
+        out["cuts"] = [{"kept": len(compressed), "of": len(content), "reason": "compressed by a model"}]
+    return out
 
 
 def _visible_truncate(name: str, content: str, target_chars: int) -> str:
@@ -583,6 +602,10 @@ def _visible_truncate(name: str, content: str, target_chars: int) -> str:
         status="truncated",
         error=f"visible truncation dropped {dropped} chars from the tail",
         meta={"target_chars": target_chars, "input_chars": len(content)},
+        reads=[research_trace.ref_section(_section_of(name))],
+        writes=[research_trace.ref_doc(f"precompress:{name}")],
+        cuts=[{"kept": target_chars, "of": len(content), "reason": "visible truncation to fit the budget"}],
+        kind="code",
     )
     return content[: max(0, target_chars)].rstrip() + marker
 
@@ -771,6 +794,18 @@ async def _try_llm_compile(
                 for name, content in cleaned_sections
             ],
         },
+        # Each section as handed over, plus its condensed parts when the fit
+        # step changed it (parts kept raw still come straight from the section).
+        reads=[ref for name, content in cleaned_sections
+               for ref in [research_trace.ref_section(name)]
+               + ([research_trace.ref_doc(f"precompress:{name}") + "*"]
+                  if len(content) != chars_before_fit.get(name, len(content)) else [])],
+        writes=[research_trace.ref_doc("compiler_input")],
+        cuts=[{"ref": research_trace.ref_section(name), "kept": len(content),
+               "of": chars_before_fit[name], "reason": "fit to the brief writer's budget"}
+              for name, content in cleaned_sections
+              if len(content) < chars_before_fit.get(name, len(content))],
+        kind="code", lane="*",
     )
 
     prompt = _build_compiler_prompt(
@@ -845,6 +880,7 @@ async def _try_llm_compile(
                 status="failed",
                 error=f"empty content, finish_reason={getattr(choice, 'finish_reason', 'unknown')}",
                 meta={"chain": "brief", "model": model},
+                reads=[research_trace.ref_doc("compiler_input")], writes=[], kind="note", lane="*",
             )
             return None
         # A brief cut off at the output cap is non-empty, so the old
@@ -867,6 +903,7 @@ async def _try_llm_compile(
                 status="truncated",
                 error=f"finish_reason=length at max_tokens={_COMPILER_MAX_OUTPUT_TOKENS}",
                 meta={"chain": "brief", "max_tokens": _COMPILER_MAX_OUTPUT_TOKENS},
+                reads=[research_trace.ref_doc("compiler_input")], writes=[], kind="note", lane="*",
             )
             content = content.rstrip() + _TRUNCATION_NOTICE
         return _normalise_compiled_report(content)
@@ -885,6 +922,7 @@ async def _try_llm_compile(
             status="failed",
             error=f"{type(exc).__name__}: {exc}",
             meta={"chain": "brief", "model": model},
+            reads=[research_trace.ref_doc("compiler_input")], writes=[], kind="note", lane="*",
         )
         return None
 

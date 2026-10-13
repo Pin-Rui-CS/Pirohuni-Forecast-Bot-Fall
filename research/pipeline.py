@@ -101,10 +101,14 @@ async def run_research(
         from research.manifold_research import scrape_manifold
         from research.polymarket_research import scrape_polymarket
 
-    async def run_provider(name: str, research_call) -> tuple[str, str | None]:
+    async def run_provider(name: str, research_call, feeds: list[str] | None = None,
+                           lane: str | None = None) -> tuple[str, str | None]:
         started = time.monotonic()
         try:
-            result = await research_call()
+            # Lineage: steps traced inside take this provider as their lane and
+            # read ``feeds`` first; its section later reads what they produced.
+            with research_trace.scope(name, feeds=feeds, lane=lane):
+                result = await research_call()
             elapsed = time.monotonic() - started
             if result is None or not str(result).strip():
                 logger.info("[research] %s: no usable result (%.1fs)", name, elapsed)
@@ -317,16 +321,15 @@ async def run_research(
     other_provider_tasks = []
     if resolution_task is not None:
         other_provider_tasks.append(resolution_task)
+    plan_feeds = [research_trace.ref_doc("plan")]
+    search_feeds = plan_feeds + ([research_trace.ref_doc("asknews_filtered")] if usable_asknews_research else [])
     if ENABLE_PREDICTION_MARKET_RESEARCH:
-        other_provider_tasks.append(
-            asyncio.create_task(run_provider("Kalshi", lambda: kalshi_call(market_question)))
-        )
-        other_provider_tasks.append(
-            asyncio.create_task(run_provider("Manifold", lambda: manifold_call(market_question)))
-        )
-        other_provider_tasks.append(
-            asyncio.create_task(run_provider("Polymarket", lambda: polymarket_call(market_question)))
-        )
+        other_provider_tasks.append(asyncio.create_task(
+            run_provider("Kalshi", lambda: kalshi_call(market_question), feeds=plan_feeds)))
+        other_provider_tasks.append(asyncio.create_task(
+            run_provider("Manifold", lambda: manifold_call(market_question), feeds=plan_feeds)))
+        other_provider_tasks.append(asyncio.create_task(
+            run_provider("Polymarket", lambda: polymarket_call(market_question), feeds=plan_feeds)))
 
     # Search providers run as a priority fallback CHAIN (SerpAPI -> Tavily ->
     # Firecrawl), not in parallel, to conserve credits: the bot uses the first
@@ -344,7 +347,7 @@ async def run_research(
     chosen_search_result, search_provider_errors = await _run_search_chain(
         ordered_search_providers,
         asknews_research=search_asknews_research,
-        run_provider=run_provider,
+        run_provider=lambda name, call: run_provider(name, call, feeds=search_feeds),
         should_include=should_include_provider_result,
     )
 
@@ -391,11 +394,15 @@ async def run_research(
     for name, content in results:
         if name == "Evidence Plan":
             continue
+        # The AskNews section is the filtered block, produced outside its provider.
+        section_reads = ([research_trace.ref_doc("asknews_filtered")]
+                         if name == "AskNews" and usable_asknews_research else research_trace.outputs_of(name))
         research_trace.emit(
             "provider",
             name,
             content or "",
             status="included" if should_include_provider_result(name, content) else "excluded",
+            reads=section_reads, writes=[research_trace.ref_section(name)], kind="code", lane=name,
         )
 
     if not included_results:
@@ -428,6 +435,8 @@ async def run_research(
         "artifact check v1 (pre-retry)",
         artifact_check or {},
         meta={"chain": "artifact_check", "version": 1},
+        reads=[research_trace.ref_doc("plan")] + [research_trace.ref_section(n) for n, _ in included_results],
+        writes=[research_trace.ref_doc("artifact_check:v1")], kind="model", lane="*",
     )
 
     # Stage 5: focused retry aimed only at the missing artifact. Reuse the search
@@ -482,6 +491,7 @@ async def run_research(
                 "retry_provider": retry_label,
             },
             status="skipped",
+            reads=[research_trace.ref_doc("artifact_check:v1")], writes=[], kind="note", lane="*",
         )
     elif wants_artifact_retry:
         retry_queries = [
@@ -507,7 +517,9 @@ async def run_research(
             source_ledger.set_source_context(retry_label, "artifact retry")
             retry_result = await run_provider(
                 f"Focused Artifact Retry ({retry_label})",
-                lambda: asyncio.wait_for(
+                feeds=[research_trace.ref_doc("artifact_check:v1")],
+                lane=retry_label,
+                research_call=lambda: asyncio.wait_for(
                     run_retry_search(
                         title=title,
                         resolution_criteria=resolution_criteria,
@@ -523,6 +535,12 @@ async def run_research(
             )
             retry_included = should_include_provider_result(*retry_result)
             research_trace.emit(
+                "provider", retry_result[0], retry_result[1] or "",
+                status="included" if retry_included else "excluded",
+                reads=research_trace.outputs_of(retry_result[0]),
+                writes=[research_trace.ref_section(retry_result[0])], kind="code", lane=retry_label,
+            )
+            research_trace.emit(
                 "retry_decision",
                 "focused artifact retry",
                 {
@@ -534,6 +552,7 @@ async def run_research(
                     "retry_provider": retry_label,
                 },
                 status="ok" if retry_included else "no-usable-result",
+                reads=[research_trace.ref_doc("artifact_check:v1")], writes=[], kind="note", lane="*",
             )
             if retry_included:
                 included_results.append((retry_result[0], retry_result[1] or ""))
@@ -566,6 +585,7 @@ async def run_research(
                 "artifact_status": (retry_basis or {}).get("status"),
                 "retry_queries": (retry_basis or {}).get("retry_queries") or [],
             },
+            reads=[research_trace.ref_doc("artifact_check:v1")], writes=[], kind="note", lane="*",
         )
 
     # Stage 5.5: if the focused retry actually added evidence, re-run the
@@ -589,6 +609,10 @@ async def run_research(
             refreshed_check or {},
             status="ok" if refreshed_check is not None else "failed",
             meta={"chain": "artifact_check", "version": 2},
+            reads=[research_trace.ref_doc("artifact_check:v1")]
+            + [research_trace.ref_section(n) for n, _ in included_results[pre_retry_result_count:]],
+            writes=[research_trace.ref_doc("artifact_check:v2")] if refreshed_check is not None else [],
+            kind="model", lane="*",
         )
 
     # Stage 6: compile everything into the forecast-ready brief.
@@ -607,7 +631,11 @@ async def run_research(
         "compiler output (pre-banner)",
         compiled_report,
         meta={"chain": "brief"},
+        reads=[research_trace.ref_doc("compiler_input")], writes=[research_trace.ref_doc("brief:draft")],
+        kind="model", lane="*",
     )
+    final_check_ref = research_trace.ref_doc(
+        "artifact_check:v2" if len(included_results) > pre_retry_result_count else "artifact_check:v1")
     compiled_report = _apply_artifact_status_banner(compiled_report, artifact_check)
     compiled_report = _apply_degradation_warning(compiled_report, degraded_search_providers)
     research_trace.emit(
@@ -615,6 +643,8 @@ async def run_research(
         "compiled brief (as sent to forecasters)",
         compiled_report,
         meta={"chain": "brief"},
+        reads=[research_trace.ref_doc("brief:draft"), final_check_ref],
+        writes=[research_trace.ref_doc("brief")], kind="code", lane="*",
     )
 
     # Deliberately the UNFITTED sections. Feeding the raw member the compiler's
@@ -637,6 +667,12 @@ async def run_research(
         meta={"chars": len(raw_research_view),
               "uncapped_chars": sum(len(c or "") for _, c in included_results),
               "cap": _RAW_VIEW_MAX_CHARS},
+        reads=[research_trace.ref_section(n) for n, _ in included_results] + [final_check_ref],
+        writes=[research_trace.ref_doc("raw_view")],
+        cuts=[{"kept": _RAW_VIEW_MAX_CHARS, "of": sum(len(c or "") for _, c in included_results),
+               "reason": "raw view cap"}]
+        if sum(len(c or "") for _, c in included_results) > _RAW_VIEW_MAX_CHARS else None,
+        kind="code", lane="*",
     )
 
     return ResearchBundle(
@@ -748,6 +784,7 @@ async def _run_search_chain(
                     "\n".join(f"- {label}: no usable results" for label in errored),
                     status="fell-through",
                     meta={"fell_through": list(errored), "chosen": name},
+                    reads=[], writes=[], kind="note", lane=name,
                 )
             return result, errored
         errored.append(f"{name} ({_search_failure_reason(content)})")
@@ -763,6 +800,7 @@ async def _run_search_chain(
             "\n".join(f"- {label}" for label in errored),
             status="failed",
             meta={"failed": list(errored)},
+            reads=[], writes=[], kind="note", lane="*",
         )
     return None, errored
 

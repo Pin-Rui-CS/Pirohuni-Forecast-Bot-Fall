@@ -797,6 +797,10 @@ async def _scrape_resolution_urls(
             status="ok" if result.success else "failed",
             error="" if result.success else result.error,
             meta={"engine": result.provider_used, "phase": "resolution"},
+            # The URLs come from the question's own text.
+            reads=["input:question"],
+            writes=[research_trace.ref_page(result.url)] if result.success else [],
+            kind="fetch",
         )
     return results
 

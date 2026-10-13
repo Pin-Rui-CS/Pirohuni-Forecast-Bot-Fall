@@ -26,6 +26,7 @@ import logging
 from typing import Any
 
 import apiagent_bridge
+import call_log
 import llm_provider
 import research_trace
 import source_ledger
@@ -89,6 +90,24 @@ def _parse_args(raw: str) -> Any:
         return json.loads(raw) if raw else {}
     except json.JSONDecodeError:
         return raw  # the kit's schema check turns this into a readable error
+
+
+def _log_data_call(call: dict[str, Any], output: dict[str, Any]) -> None:
+    """One data-API call into the question's call log (the Node agent's HTTP
+    is invisible to call_log's httpx hook)."""
+    args = call.get("args") or {}
+    error = str(output.get("error") or "")
+    status = output.get("httpStatus")
+    if status is None:
+        status = None if error else 200
+    ms = output.get("ms")
+    call_log.record(
+        service=str(output.get("api") or args.get("api") or "api"), kind="data",
+        request=json.dumps(args.get("params") or {k: v for k, v in args.items() if k != "api"},
+                           ensure_ascii=False, default=str),
+        status=status, duration_s=ms / 1000 if isinstance(ms, (int, float)) else None,
+        returned=f"{output['rowCount']} rows" if "rowCount" in output else None, error=error,
+        target=output.get("url"))
 
 
 def _call_line(call: dict[str, Any], output: dict[str, Any]) -> str | None:
@@ -162,6 +181,7 @@ async def run_apiagent_research(
             label=LABEL, model=route.model_id, route=route,
             request_payload=payload, validate_response=_validate)
 
+    last_step: int | None = None
     for step in range(max_steps):
         last = step == max_steps - 1
         try:
@@ -219,10 +239,18 @@ async def run_apiagent_research(
                         engine=f"apiagent:{output.get('api', '')}", ok=True,
                         chars=len(json.dumps(output.get("rows") or [])),
                         round_label="single pass")
+        for call in calls:
+            if call["name"] == "call_api":
+                _log_data_call(call, outputs.get(call["id"]) or {})
         research_trace.emit(
             "apiagent", f"step {step}",
             {"calls": calls, "outputs": outputs, "chars_spent": chars_spent},
-            meta={"step": step, "calls": len(calls)})
+            meta={"step": step, "calls": len(calls)},
+            reads=[research_trace.ref_doc(f"apiagent:{last_step}")] if last_step is not None
+            else research_trace.feeds(),
+            writes=[research_trace.ref_doc(f"apiagent:{step}")], kind="model")
+        last_step = step
+        research_trace.mark_output([research_trace.ref_doc(f"apiagent:{step}")])
 
     if not fetched:
         logger.info("[apiagent] no section: no successful data call (answer=%d chars)",
