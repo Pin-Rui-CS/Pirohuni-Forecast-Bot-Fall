@@ -8,6 +8,7 @@ from typing import Any
 
 from config import (
     FORECAST_MAX_OUTPUT_TOKENS,
+    FORECASTER_BACKUP_MODEL,
     FORECASTER_MODELS,
     HETEROGENEOUS_RUN_ENABLED,
     HETEROGENEOUS_RUN_MODEL,
@@ -62,6 +63,7 @@ class ForecastRun:
     repaired: bool = False
     valid: bool = True
     error: str | None = None
+    backup_for: str | None = None  # the model this run stood in for, when it is a backup
 
 
 # A validator returns None when a response is usable, or a short error string
@@ -119,6 +121,7 @@ async def gather_forecast_runs(
     validate: Validator | None = None,
     repair_instruction: str | None = None,
     run_prompts: list[str] | None = None,
+    backup: str | None = None,
 ) -> list[ForecastRun]:
     """Run the forecast prompt ``num_runs`` times in parallel across an ensemble
     of models — one model per run, cycling the pool.
@@ -145,8 +148,14 @@ async def gather_forecast_runs(
     the runs) — used by the heterogeneous ensemble member, which reads the raw
     research instead of the compiled brief. When omitted, every run uses
     ``prompt``.
+
+    ``backup`` (default FORECASTER_BACKUP_MODEL): a brief run that still fails
+    after the steps above is redone once on this model, which then takes the
+    run's place. Not for the raw-research run, and not when the failed run
+    was already on the backup model.
     """
     assigned = models_for_runs(num_runs, models)
+    backup = FORECASTER_BACKUP_MODEL if backup is None else backup
     prompts = list(run_prompts) if run_prompts is not None else [prompt] * len(assigned)
     if len(prompts) != len(assigned):
         raise ValueError(
@@ -179,21 +188,37 @@ async def gather_forecast_runs(
 
     async def one_run(index: int, model: str) -> ForecastRun:
         run = await _one_run(index, model)
+        raw = prompts[index] != prompt
+        if not run.valid and backup and not raw and model != backup:
+            # The failed attempt keeps its own lineage node (it writes nothing);
+            # the backup's node is the one that produces this run's forecast.
+            _emit(index, model, run, raw, final=False)
+            logger.warning(
+                "[ensemble] %s run %d/%d (%s) failed (%s) — redoing it on backup %s.",
+                label, index + 1, len(assigned), model, run.error, backup,
+            )
+            run = await _one_run(index, backup)
+            run.backup_for = model
+        _emit(index, run.model, run, raw, final=True)
+        return run
+
+    def _emit(index: int, model: str, run: ForecastRun, raw: bool, *, final: bool) -> None:
         # Lineage: one node per run, reading the brief or (the heterogeneous
         # member) the raw research view.
-        raw = prompts[index] != prompt
+        name = short_model_name(model)
+        if run.backup_for:
+            name += f" (backup for {short_model_name(run.backup_for)})"
         research_trace.emit(
             "forecast",
-            f"{label} run {index + 1} · {short_model_name(model)}" + (" (raw research)" if raw else ""),
+            f"{label} run {index + 1} · {name}" + (" (raw research)" if raw else ""),
             run.transcript or "",
             status="ok" if run.valid else "failed",
             error=run.error or "",
-            meta={"model": model, "repaired": run.repaired},
+            meta={"model": model, "repaired": run.repaired, "backup_for": run.backup_for},
             reads=[research_trace.ref_doc("raw_view" if raw else "brief")],
-            writes=[research_trace.ref_doc(f"forecast:{label}:{index + 1}")],
+            writes=[research_trace.ref_doc(f"forecast:{label}:{index + 1}")] if final else [],
             kind="model", lane="*",
         )
-        return run
 
     async def _one_run(index: int, model: str) -> ForecastRun:
         tag = short_model_name(model)

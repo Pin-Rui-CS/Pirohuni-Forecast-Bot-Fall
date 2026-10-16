@@ -283,6 +283,8 @@ async def get_binary_gpt_prediction(
     for i, run in enumerate(runs):
         transcripts.append(run.transcript)
         record = {"model": run.model, "valid": run.valid, "repaired": run.repaired}
+        if run.backup_for:
+            record["backup_for"] = run.backup_for
         if not run.valid:
             logger.warning(
                 "[ensemble] binary run %d (%s) dropped — no parseable probability: %s",
@@ -298,6 +300,8 @@ async def get_binary_gpt_prediction(
         probabilities.append(probability)
         models.append(run.model)
         repaired_note = " _(repaired)_" if run.repaired else ""
+        if run.backup_for:
+            repaired_note += f" _(backup for {short_model_name(run.backup_for)})_"
         comments.append(
             f"**Model: {run.model}**{repaired_note}\n\n"
             f"Extracted Probability: {probability}%\n\nAnswer: {run.response}\n\n\n"

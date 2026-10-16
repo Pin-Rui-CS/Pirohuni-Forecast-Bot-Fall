@@ -23,6 +23,11 @@ name: Test Metaculus Cup questions
       # SETTING 2 - forecasters. Each ticked model makes one forecast from the
       # compiled brief; raw_research_forecaster adds one run on the raw research.
       # Defaults reproduce the original ensemble: Opus + Sol (brief), Sonnet (raw).
+      forecaster_gemini4_argon:
+        description: "Forecaster (reads the brief): Gemini 4 Argon (replaced GPT-6 Astra in scheduled runs 2026-10-16)"
+        required: true
+        default: false
+        type: boolean
       forecaster_gpt6_astra:
         description: "Forecaster (reads the brief): GPT-6 Astra (~5x Opus per token)"
         required: true
@@ -58,6 +63,7 @@ name: Test Metaculus Cup questions
           - "Claude Opus 5.5"
           - "GPT-6.1 Sol"
           - "GPT-6 Astra"
+          - "Gemini 4 Argon"
           - "Qwen 3.8 27B (free)"
           - "none"
       question_id:
@@ -159,6 +165,7 @@ jobs:
           # HETEROGENEOUS_RUN_MODEL with the raw research, so that run is added as
           # run N+1 rather than replacing a ticked model.
           MODELS=()
+          [ "$FC_GEMINI4_ARGON" = "true" ] && MODELS+=("google/gemini-4-argon")
           [ "$FC_GPT6_ASTRA" = "true" ] && MODELS+=("openai/gpt-6-astra")
           [ "$FC_CLAUDE_OPUS" = "true" ] && MODELS+=("anthropic/claude-opus-5.5")
           [ "$FC_GPT56_SOL" = "true" ] && MODELS+=("openai/gpt-6.1-sol")
@@ -170,6 +177,7 @@ jobs:
             "Claude Opus 5.5") RAW_MODEL="anthropic/claude-opus-5.5" ;;
             "GPT-6.1 Sol") RAW_MODEL="openai/gpt-6.1-sol" ;;
             "GPT-6 Astra") RAW_MODEL="openai/gpt-6-astra" ;;
+            "Gemini 4 Argon") RAW_MODEL="google/gemini-4-argon" ;;
             "Qwen 3.8 27B (free)") RAW_MODEL="qwen3.8:27b" ;;
             "none") RAW_MODEL="" ;;
             *) echo "Unknown raw_research_forecaster: $RAW_FORECASTER" >&2; exit 1 ;;
@@ -347,6 +355,7 @@ jobs:
           QUESTION_ID: ${{ inputs.question_id }}
           POST_ID: ${{ inputs.post_id }}
           SUBMIT_PREDICTION: ${{ inputs.submit }}
+          FC_GEMINI4_ARGON: ${{ inputs.forecaster_gemini4_argon }}
           FC_GPT6_ASTRA: ${{ inputs.forecaster_gpt6_astra }}
           FC_CLAUDE_OPUS: ${{ inputs.forecaster_claude_opus }}
           FC_GPT56_SOL: ${{ inputs.forecaster_gpt56_sol }}
@@ -393,7 +402,6 @@ jobs:
           QWEN_RESEARCH_LABELS: ${{ inputs.research_models == 'qwen' && 'recommended' || '' }}
           QWEN_LADDER: ${{ inputs.research_models == 'qwen' && '1' || '' }}
           QWEN_START_EFFORT: ${{ inputs.research_models == 'qwen' && 'serp-scrape-extract=medium,asknews-filter=medium' || '' }}
-          QWEN_BRIEF_PROMPT: ${{ inputs.research_models == 'qwen' && 'v3' || '' }}
           SOCLAAS_PRECOMPRESS_MODE: ${{ inputs.research_models == 'qwen' && 'experimental' || 'off' }}
           SOCLAAS_PRECOMPRESS_OVERFLOW: ${{ inputs.research_models == 'qwen' && 'truncate' || 'pause' }}
           SOCLAAS_PRECOMPRESS_CHECKS: ${{ inputs.research_models == 'qwen' && 'advisory' || 'strict' }}

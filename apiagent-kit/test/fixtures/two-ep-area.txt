@@ -1,0 +1,27 @@
+ABPZ20 KNHC 142329
+TWOEP 
+
+Tropical Weather Outlook
+NWS National Hurricane Center Miami FL
+500 PM PDT Wed Oct 14 2026
+
+For the eastern and central North Pacific east of 180 longitude:
+
+Active Systems:
+The National Hurricane Center is issuing advisories on Hurricane 
+Simon, located a few hundred miles south-southeast of the southern 
+tip of the Baja California Peninsula, and on Tropical Storm Trudy, 
+located several hundred miles south of Acapulco, Mexico.
+
+South of Southern Mexico:
+An area of low pressure is forecast to form offshore of southern 
+Mexico during the early to middle part of next week. Environmental 
+conditions appear conducive for some gradual development thereafter 
+while the system moves generally westward to west-northwestward.
+* Formation chance through 48 hours...low...near 0 percent. 
+* Formation chance through 7 days...low...20 percent.
+
+$$
+Forecaster Gibbs
+
+

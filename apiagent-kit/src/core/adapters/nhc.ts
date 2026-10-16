@@ -76,12 +76,15 @@ export const nhc = defineAdapter({
     "'is there an active hurricane right now' and for what NHC has classified " +
     "a storm as. It is a SNAPSHOT of what is active — it holds no history, so " +
     "it cannot answer questions about past seasons or storms that have already " +
-    "dissipated.",
+    "dissipated (use nhc_history) or formation chances (use nhc_outlook).",
+  // Domain-only words. "season", "advisory", "depression", "atlantic" and the
+  // like matched F1, NFL, CDC-advisory and shark-tracking questions (all 13 such
+  // false offers in test/fixtures/needs.json came from them).
   keywords: [
-    "hurricane", "hurricanes", "storm", "storms", "cyclone", "tropical",
-    "typhoon", "depression", "landfall", "nhc", "atlantic", "pacific",
-    "basin", "winds", "advisory", "category", "season", "sustained",
+    "hurricane", "hurricanes", "cyclone", "cyclones", "tropical", "typhoon",
+    "landfall", "nhc",
   ],
+  keywordsRequired: true,
   paramsSchema: params,
   paramsHelp:
     "Everything is optional — call it with no parameters for every active " +

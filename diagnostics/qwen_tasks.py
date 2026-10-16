@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import unicodedata
 
 import llm_provider
 from diagnostics.checks_condensation import _numbers
@@ -53,9 +54,23 @@ def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[*`_|]", " ", str(text or ""))).strip().lower()
 
 
+def _words(text: str) -> list[str]:
+    """Lower-case words with accents stripped; punctuation dropped."""
+    text = unicodedata.normalize("NFKD", str(text or "")).lower()
+    return re.findall(r"[a-z0-9]+", "".join(c for c in text if not unicodedata.combining(c)))
+
+
 def _quoted(quote: str, source: str) -> bool:
-    q = _norm(quote)
-    return len(q) >= 8 and q in _norm(source)
+    """The quote's words appear, in order and contiguously, in the source.
+
+    Compared word by word rather than character by character: Qwen copies the
+    words faithfully but often straightens typography (’ to ', − to -), which
+    failed a quarter of genuine quotes in the brief-loss dry run.
+    """
+    words = _words(quote)
+    if len("".join(words)) < 8:
+        return False
+    return f" {' '.join(words)} " in f" {' '.join(_words(source))} "
 
 
 async def plan_items(a: RunArtifacts) -> Check:
@@ -314,3 +329,55 @@ Reply with JSON only: [{{"id": <number>, "relevant": true|false}}]""", max_token
 
 
 TASKS = (plan_items, history_rows, calculations, dropped_numbers)
+
+
+# Used by eval_tools/brief_loss_study.py, not by the per-run checklist.
+FACT_CATEGORIES = {
+    1: "current: the latest observed value or state of what the question resolves on",
+    2: "history: earlier values of that same thing (base rate, trend, past seasons or cycles)",
+    3: "mechanism: a rule, schedule, deadline or process that governs the outcome before it resolves",
+    4: "projection: a forecast, projection or plan by a named institution or expert",
+    5: "market: a prediction-market or betting price on this or a related question",
+    6: "driver: the state of a factor that affects the outcome (a related indicator, polls, weather pattern)",
+    7: "not relevant: does not bear on this question",
+}
+
+
+async def classify_facts(question: str, claims: list[str]) -> list[dict]:
+    """Put each fact into one category by what it says about the question.
+
+    Classification, not grading. For categories 1-6 Qwen must quote the words
+    of the QUESTION the fact bears on, and code checks the quote is there; a
+    label whose quote fails is returned with verified=False and is not counted.
+    Returns one dict per claim, in order: {category, quote, verified}.
+    """
+    listing = "\n".join(f"{i}. {claim}" for i, claim in enumerate(claims))
+    categories = "\n".join(f"{k}. {v}" for k, v in FACT_CATEGORIES.items())
+    answer = await _ask("classify-facts", f"""Classify each FACT by what it tells a forecaster about the QUESTION.
+
+QUESTION (title, resolution criteria, fine print, background):
+<<<
+{question[:_MAX_SOURCE_CHARS]}
+>>>
+
+CATEGORIES (pick exactly one per fact):
+{categories}
+
+For categories 1-6, copy 3 to 12 consecutive words from the QUESTION text above that the fact bears on.
+For category 7, leave the quote empty.
+
+FACTS:
+{listing}
+
+Reply with JSON only: [{{"fact": <number>, "category": <1-7>, "quote": "<verbatim words from the QUESTION, or empty>"}}]""")
+    by_index = {}
+    for row in answer if isinstance(answer, list) else []:
+        try:
+            idx, cat = int(row.get("fact")), int(row.get("category"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if cat not in FACT_CATEGORIES:
+            continue
+        quote = str(row.get("quote") or "")[:200]
+        by_index[idx] = {"category": cat, "quote": quote, "verified": cat == 7 or _quoted(quote, question)}
+    return [by_index.get(i, {"category": None, "quote": "", "verified": False}) for i in range(len(claims))]

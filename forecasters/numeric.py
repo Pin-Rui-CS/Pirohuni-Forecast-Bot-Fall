@@ -2662,6 +2662,8 @@ async def get_numeric_gpt_prediction(
 
     for run in runs:
         record = {"model": run.model, "valid": run.valid, "repaired": run.repaired}
+        if run.backup_for:
+            record["backup_for"] = run.backup_for
         if not run.valid:
             note_event(
                 "[ensemble] numeric run (%s) dropped — unparseable forecast: %s",
@@ -2794,6 +2796,8 @@ async def get_numeric_gpt_prediction(
         transcripts.append(run.transcript)
         run_values.append(parsed)
         repaired_note = " (repaired)" if run.repaired else ""
+        if run.backup_for:
+            repaired_note += f" (backup for {short_model_name(run.backup_for)})"
         comments.append(
             f"**Model: {run.model}**{repaired_note}\n"
             f"Forecast: {json.dumps(parsed, default=str)[:800]}\n"

@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "A research agent over 24 public data APIs, with tiered provenance. Provider-neutral: no LLM SDK required.",
+  "description": "A research agent over 28 public data APIs, with tiered provenance. Provider-neutral: no LLM SDK required.",
   "license": "MIT",
   "main": "./src/index.ts",
   "exports": {
@@ -15,7 +15,8 @@
   "scripts": {
     "ask": "node --env-file-if-exists=../.env examples/ask.ts",
     "tools": "node --env-file-if-exists=../.env examples/tools-only.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/*.test.ts\""
   },
   "dependencies": {
     "zod": "^4.5.4"

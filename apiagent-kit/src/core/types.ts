@@ -97,6 +97,13 @@ export type AdapterSpec<P> = {
    * the keyless majority.
    */
   available?: () => boolean;
+  /**
+   * Offer this adapter only when one of its `keywords` (or their roots) is in
+   * the need; domain and `answers` words then only rank it. For narrow-domain
+   * adapters whose prose shares everyday words ("list", "forecast", "weather")
+   * with unrelated needs. Opt-in, so existing adapters keep their behaviour.
+   */
+  keywordsRequired?: boolean;
   run(params: P, signal: AbortSignal): Promise<AdapterResult>;
 };
 
@@ -131,6 +138,7 @@ export function defineAdapter<P>(spec: AdapterSpec<P>): ApiAdapter {
     keywords: spec.keywords,
     paramsHelp: spec.paramsHelp,
     available: spec.available,
+    keywordsRequired: spec.keywordsRequired,
     paramsSchema: spec.paramsSchema as z.ZodType<unknown>,
     run: (params, signal) => spec.run(spec.paramsSchema.parse(params), signal),
   };

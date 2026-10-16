@@ -64,6 +64,7 @@ eval_tools/*
 !eval_tools/score_forecasts.py
 !eval_tools/supabase_rest.py
 !eval_tools/diagnose_run.py
+!eval_tools/brief_loss_study.py
 CAPABILITIES.md
 INCIDENTS.md
 SOCLAAS.md

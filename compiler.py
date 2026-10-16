@@ -14,6 +14,7 @@ from monetary_cost_manager import (
     HardLimitExceededError,
     MonetaryCostManager,
 )
+from facts import DROPPED_SILENTLY, brief_state, claims, split_excluded, text_values
 from utils import _truncate_text
 import research_trace
 
@@ -158,7 +159,8 @@ async def compile_research_report(
     ranked evidence table of decision-relevant items (each with exact values,
     dates, source, and URL), collapses syndicated duplicates into one item,
     and drops background color. If the LLM pass fails, it falls back to a
-    deterministic cleaned brief rather than blocking the forecast.
+    deterministic cleaned brief rather than blocking the forecast. On the
+    Qwen path the draft then gets one audit pass (_audit_brief).
     """
     cleaned_sections = _prepare_sections(provider_results, raw_research)
     if not cleaned_sections:
@@ -207,7 +209,18 @@ async def compile_research_report(
             reads=[research_trace.ref_doc("compiler_input")], writes=[], kind="note", lane="*",
         )
         llm_report = None
-    return llm_report or heuristic_report
+    brief, source = llm_report or (heuristic_report, "compiler_input")
+    # The brief before the pipeline adds its banners. It reads the step that
+    # last wrote it: the brief call itself, or the audit pass on the Qwen path.
+    research_trace.emit(
+        "brief",
+        "compiler output (pre-banner)",
+        brief,
+        meta={"chain": "brief"},
+        reads=[research_trace.ref_doc(source)], writes=[research_trace.ref_doc("brief:draft")],
+        kind="model" if source == "compiler_input" else "code", lane="*",
+    )
+    return brief
 
 
 def _prepare_sections(
@@ -760,7 +773,8 @@ async def _try_llm_compile(
     cleaned_sections: list[ProviderResult],
     model: str,
     artifact_check: dict | None = None,
-) -> str | None:
+) -> tuple[str, str] | None:
+    """(brief, the trace doc it was last written to), or None to fall back."""
     # The key that matters is the one for THIS model's endpoint, which under a
     # mixed routing profile is not necessarily "the" provider's.
     route = llm_provider.route_for(model, label="compiler/research-brief")
@@ -808,6 +822,7 @@ async def _try_llm_compile(
         kind="code", lane="*",
     )
 
+    qwen = route.endpoint.name == llm_provider.ENDPOINT_SOCLAAS.name
     prompt = _build_compiler_prompt(
         title=title,
         resolution_criteria=resolution_criteria,
@@ -815,53 +830,20 @@ async def _try_llm_compile(
         fine_print=fine_print,
         cleaned_sections=cleaned_sections,
         artifact_check=artifact_check,
+        qwen_rules=qwen,
     )
-    if route.endpoint.name == llm_provider.ENDPOINT_SOCLAAS.name:
-        prompt = apply_brief_variant(prompt, os.getenv("QWEN_BRIEF_PROMPT", "").strip() or "base")
-
-    client = llm_provider.async_client_for(route)
     messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a research compiler for a forecasting bot. You filter raw "
-                "research into a detailed evidence showcase. You select only "
-                "decision-relevant items, keep exact values, dates, source names, "
-                "and URLs, collapse syndicated duplicates into one item, and never "
-                "estimate probabilities or invent facts."
-            ),
-        },
+        {"role": "system", "content": _COMPILER_SYSTEM},
         {"role": "user", "content": prompt},
     ]
-    usage_handle = None
     try:
-        await llm_provider.gate_for(route).wait_async()
-        async with llm_rate_limiter:
-            usage_handle = MonetaryCostManager.start_openrouter_call(
-                "compiler/research-brief",
-                model,
-                {"messages": messages, "max_tokens": _COMPILER_MAX_OUTPUT_TOKENS},
-            )
-            response = await client.chat.completions.create(
-                **llm_provider.build_kwargs(
-                    route,
-                    {
-                        "messages": messages,
-                        "temperature": 0.1,
-                        "max_tokens": _COMPILER_MAX_OUTPUT_TOKENS,
-                        "stream": False,
-                    },
-                )
-            )
-        usage_handle.record_response(response)
+        content, finish_reason = await _chat(route, messages, "compiler/research-brief")
         logger.info(
             "research-compiler | model=%s | %s usage recorded",
             model,
             route.endpoint.label,
         )
-        choice = response.choices[0]
-        content = choice.message.content
-        if not content or not content.strip():
+        if not content.strip():
             # 44880: 123,704 tokens in, 0 out, $0.00 — the brief was swapped
             # for the heuristic fallback with no log line anywhere, detectable
             # only from an all-zeros audit row. Unlike call_llm, this path
@@ -871,14 +853,14 @@ async def _try_llm_compile(
                 "research-compiler | model=%s returned an EMPTY brief "
                 "(finish_reason=%s); falling back to the deterministic brief.",
                 model,
-                getattr(choice, "finish_reason", "unknown"),
+                finish_reason or "unknown",
             )
             research_trace.emit(
                 "brief",
                 "compiler returned an empty brief",
                 "",
                 status="failed",
-                error=f"empty content, finish_reason={getattr(choice, 'finish_reason', 'unknown')}",
+                error=f"empty content, finish_reason={finish_reason or 'unknown'}",
                 meta={"chain": "brief", "model": model},
                 reads=[research_trace.ref_doc("compiler_input")], writes=[], kind="note", lane="*",
             )
@@ -889,7 +871,7 @@ async def _try_llm_compile(
         # of Derived Implications and the whole Market Signals section that an
         # evidence item pointed at. finish_reason is the only signal that
         # distinguishes that from a brief the model chose to end.
-        if str(getattr(choice, "finish_reason", "") or "").lower() == "length":
+        if finish_reason == "length":
             logger.warning(
                 "research-compiler | brief hit the %d-token output cap and is TRUNCATED "
                 "(%d chars). Raise _COMPILER_MAX_OUTPUT_TOKENS or shrink the input.",
@@ -906,13 +888,10 @@ async def _try_llm_compile(
                 reads=[research_trace.ref_doc("compiler_input")], writes=[], kind="note", lane="*",
             )
             content = content.rstrip() + _TRUNCATION_NOTICE
-        return _normalise_compiled_report(content)
     except HardLimitExceededError:
         raise
     except Exception as exc:
         logger.warning("Research compiler LLM pass failed: %s: %s", type(exc).__name__, exc)
-        if usage_handle is not None:
-            usage_handle.record_failure(f"{type(exc).__name__}: {exc}")
         # Without this the trace shows only "compiler output: ok" for what is
         # really the deterministic fallback brief (Q46024).
         research_trace.emit(
@@ -925,56 +904,83 @@ async def _try_llm_compile(
             reads=[research_trace.ref_doc("compiler_input")], writes=[], kind="note", lane="*",
         )
         return None
+    brief = _normalise_compiled_report(content)
+    if not qwen:
+        return brief, "compiler_input"
+    research_trace.emit(
+        "brief", "compiler draft (before audit)", brief, meta={"chain": "brief", "model": model},
+        reads=[research_trace.ref_doc("compiler_input")], writes=[research_trace.ref_doc("brief:pre-audit")],
+        kind="model", lane="*",
+    )
+    return await _audit_brief(
+        route, brief, cleaned_sections,
+        title=title, resolution_criteria=resolution_criteria, fine_print=fine_print,
+    )
 
 
-# Qwen-only additions to the brief prompt (QWEN_BRIEF_PROMPT=v2; the Opus path
-# never sees them). Each rule targets a judgment failure seen in the 2026-09-21/22
-# research A/B, written as a general rule: dropping a dated primary value as
-# "conflicting", leaving out evidence present in the input, "no bound" on markets
-# whose condition is entailed, one-sided or unreasoned Balance Checks, and
-# missing named-institution projections toward the resolution date.
+_COMPILER_SYSTEM = (
+    "You are a research compiler for a forecasting bot. You filter raw "
+    "research into a detailed evidence showcase. You select only "
+    "decision-relevant items, keep exact values, dates, source names, "
+    "and URLs, collapse syndicated duplicates into one item, and never "
+    "estimate probabilities or invent facts."
+)
+
+
+async def _chat(route: llm_provider.Route, messages: list[dict], label: str) -> tuple[str, str]:
+    """One call on the brief writer's route: (content, finish_reason).
+
+    Shared by the brief and its audit, so both go through the same gate, rate
+    limiter and cost accounting. A failed call is recorded against ``label``
+    and re-raised; the caller decides what a failure costs.
+    """
+    client = llm_provider.async_client_for(route)
+    usage_handle = None
+    try:
+        await llm_provider.gate_for(route).wait_async()
+        async with llm_rate_limiter:
+            usage_handle = MonetaryCostManager.start_openrouter_call(
+                label,
+                route.model_id,
+                {"messages": messages, "max_tokens": _COMPILER_MAX_OUTPUT_TOKENS},
+            )
+            response = await client.chat.completions.create(
+                **llm_provider.build_kwargs(
+                    route,
+                    {
+                        "messages": messages,
+                        "temperature": 0.1,
+                        "max_tokens": _COMPILER_MAX_OUTPUT_TOKENS,
+                        "stream": False,
+                    },
+                )
+            )
+        usage_handle.record_response(response)
+    except HardLimitExceededError:
+        raise
+    except Exception as exc:
+        if usage_handle is not None:
+            usage_handle.record_failure(f"{type(exc).__name__}: {exc}")
+        raise
+    choice = response.choices[0]
+    return choice.message.content or "", str(getattr(choice, "finish_reason", "") or "").lower()
+
+
+# --- The Qwen brief writer --------------------------------------------------
+# Qwen gets these rules on top of the shared prompt (the Opus path never sees
+# them), then one audit pass over its draft. Each rule targets a judgment
+# failure seen in the 2026-09-21/22 research A/B: dropping a dated primary value
+# as "conflicting", leaving out evidence present in the input, "no bound" on
+# markets whose condition is entailed, one-sided or unreasoned Balance Checks,
+# and missing named-institution projections.
+#
+# More rules did not help the brief keep facts. Three more (read every section
+# to its end, a Data Table of past values outside the 15 items, a line per
+# driver) were measured on 12 held-out questions (data/brief-experiment): the
+# draft dropped 35% of decision-relevant facts silently against 32% without
+# them, and briefs grew ~40%. The audit pass alone took the v3 draft from 32%
+# to 15%. Retired rule sets: eval_tools/brief_variants.py.
 _QWEN_BRIEF_RULES = """
-Additional selection rules (these refine the rules above; where they conflict, these win):
-1. INVENTORY BEFORE SELECTING. Before writing, go through the whole input and note every
-   candidate item that bears on the resolution value: the latest reading of the target
-   and its date; readings of the same series at other dates; rules, schedules and
-   mechanisms; projections or estimates by named institutions for dates at or near the
-   resolution date; market prices; precedents from prior comparable cycles; base rates.
-   Every candidate must end up either as an [E#] item or named, with its URL and a reason,
-   under "Decision-relevant items EXCLUDED" in the Balance Check. Nothing decision-relevant
-   may disappear silently.
-2. A CONFLICT IS NOT A REASON TO EXCLUDE. When dated values of the same measure disagree
-   or look inconsistent (for example an earlier value higher than a later one), keep them
-   as separate items with their own dates and sources and state the discrepancy — movement
-   in both directions is itself evidence about how the series behaves. Exclude a value only
-   when its source is unreliable (unsourced, mislabeled, or contradicted by the
-   authoritative source for the SAME date), and say which.
-3. FORWARD-LOOKING ANCHORS. If the input contains dated projections, milestone forecasts,
-   schedules or issuance/borrowing plans from named institutions that bear on the value at
-   the resolution date, include the most relevant as items, with each projection's date and
-   basis.
-4. PRECEDENTS. If the input describes how the same event, market or series behaved in a
-   prior comparable cycle, include the most relevant such precedent as an item even when it
-   carries no number.
-5. MARKET BOUNDS — CHECK BOTH DIRECTIONS. For each market whose condition differs from this
-   question's, write one line of entailment before the verdict: if this question's outcome
-   implies the market's event, the market price is a CEILING on that outcome's probability;
-   if the market's event implies the outcome, it is a FLOOR. Example: question "Will team T
-   win the final?", market "Will team T reach the final?" — winning requires reaching, so
-   the market price is a ceiling on P(T wins). Write "no bound" only after checking both
-   directions and finding neither holds.
-6. BALANCE CHECK WITH REASONS. After each [E#] in the Balance Check, add a short clause
-   saying why it points that way. An item may appear on only one side; if it cuts both
-   ways, place it where it weighs most and say so.
-""".rstrip()
-
-# v3 = v2 with the wording that leaned on the questions v2 was developed on made
-# neutral, so it can be tested on questions it has not seen: rule 1 no longer
-# frames evidence as a numeric time series, rule 2's example is not the 45412
-# month-end debt value, and rule 3 says "announced plans" instead of the fiscal
-# "issuance/borrowing plans". Rules 4-6 are unchanged. v2 stays for comparison
-# with the 2026-09-22 brief prompt A/B (data/brief-prompt-ab/results.md).
-_QWEN_BRIEF_RULES_V3 = """
 Additional selection rules (these refine the rules above; where they conflict, these win):
 1. INVENTORY BEFORE SELECTING. Before writing, go through the whole input and note every
    candidate item that bears on the resolution: the most recent observed state of whatever
@@ -1006,23 +1012,152 @@ Additional selection rules (these refine the rules above; where they conflict, t
    directions and finding neither holds.
 6. BALANCE CHECK WITH REASONS. After each [E#] in the Balance Check, add a short clause
    saying why it points that way. An item may appear on only one side; if it cuts both
-   ways, place it where it weighs most and say so.
-""".rstrip()
+   ways, place it where it weighs most and say so.""".rstrip()
 
-_BRIEF_VARIANT_RULES = {"v2": _QWEN_BRIEF_RULES, "v3": _QWEN_BRIEF_RULES_V3}
-_BRIEF_OUTPUT_ANCHOR = "\nOutput exactly these Markdown sections:"
+# --- Audit pass ----------------------------------------------------------------
+# A rule telling the writer to inventory everything did not stop it dropping
+# facts, so the check is done outside the model: code lists the value-bearing
+# lines of the input that the draft neither uses nor names as excluded
+# (facts.py), and one more call adds the ones that bear on the question. Code
+# decides what is MISSING; the model only judges what MATTERS.
+_AUDIT_MAX_LINES = 80
+_AUDIT_MAX_VALUES = 20  # more values than this on one line is a squashed table, not a claim
+_AUDIT_REQUIRED = ("## Key Evidence", "## Balance Check", "## Gaps And Cautions")
+_AUDIT_MIN_KEPT = 0.8   # a revision shorter than this share of the draft has lost content
+
+_AUDIT_PROMPT = """Today's date is {today}.
+
+Forecast question:
+{title}
+
+Resolution criteria:
+{criteria}
+
+Fine print:
+{fine_print}
+
+Below is a draft evidence brief for a forecaster, written from a large body of research,
+followed by an automatic check. The check lists lines of the research that state values
+which appear NOWHERE in the draft: not in any section and not under
+"Decision-relevant items EXCLUDED". Many of them are noise (navigation, unrelated figures,
+duplicates of what the draft already says another way). Some may be decision-relevant
+evidence the draft missed.
+
+DRAFT BRIEF:
+<<<
+{draft}
+>>>
+
+RESEARCH LINES MISSING FROM THE DRAFT ({n}):
+{missing}
+
+Revise the draft. For each missing line that bears on the resolution (a value of the
+target now or earlier, a rule or schedule, a named projection, a market price, the state of
+a driver, a precedent), add it where it belongs: an [E#] item (at most 15 in all), a row
+of Extracted Artifact Rows, another section it fits, or the "Decision-relevant items
+EXCLUDED" line with a reason.
+Ignore the lines that do not bear on the resolution; do not add noise. Keep everything in
+the draft that is correct, keep its format and section headings, keep exact values, dates,
+sources and URLs, and never estimate a probability. Output the complete revised brief and
+nothing else.
+"""
 
 
-def apply_brief_variant(prompt: str, variant: str) -> str:
-    """Return the brief prompt for a named variant ("base" leaves it unchanged)."""
-    if variant == "base":
-        return prompt
-    rules = _BRIEF_VARIANT_RULES.get(variant)
-    if rules is None:
-        raise ValueError(f"Unknown QWEN_BRIEF_PROMPT variant {variant!r}")
-    if prompt.count(_BRIEF_OUTPUT_ANCHOR) != 1:
-        raise ValueError("Brief prompt output anchor not found exactly once")
-    return prompt.replace(_BRIEF_OUTPUT_ANCHOR, "\n" + rules + "\n" + _BRIEF_OUTPUT_ANCHOR, 1)
+def missing_value_lines(
+    sections: list[ProviderResult], brief: str, limit: int = _AUDIT_MAX_LINES
+) -> list[str]:
+    """Input lines stating values the brief neither holds nor lists as excluded.
+
+    One line per fact, in section order, tagged with its section and nearest
+    source. When there are more than ``limit``, they are taken round-robin
+    across sections, so the cap never falls only on the last sections (the
+    position effect this audit exists to undo). The evidence plan is skipped:
+    it holds requests, not evidence.
+    """
+    body, excluded = split_excluded(brief)
+    held, held_excluded = text_values(body), text_values(excluded)
+    seen: set = set()
+    per_section: list[list[str]] = []
+    for name, content in sections:
+        if name.lower().startswith("evidence plan"):
+            continue
+        lines = []
+        for fact in claims(content or "", seen=seen):
+            if len(fact.key) > _AUDIT_MAX_VALUES:
+                continue
+            state = brief_state(fact.key, held, held_excluded, source=fact.source, excluded_text=excluded)
+            if state == DROPPED_SILENTLY:
+                lines.append(f"- [{name}] {fact.claim}" + (f" — {fact.source}" if fact.source else ""))
+        per_section.append(lines)
+    take = [0] * len(per_section)
+    total = 0
+    while total < limit and any(take[i] < len(lines) for i, lines in enumerate(per_section)):
+        for i, lines in enumerate(per_section):
+            if take[i] < len(lines) and total < limit:
+                take[i] += 1
+                total += 1
+    return [line for i, lines in enumerate(per_section) for line in lines[:take[i]]]
+
+
+def _audit_problem(draft: str, revised: str, finish_reason: str) -> str | None:
+    """Why a revision cannot replace the draft, or None when it can."""
+    if finish_reason == "length":
+        return "revision hit the output cap"
+    lacking = [heading for heading in _AUDIT_REQUIRED if heading not in revised]
+    if lacking:
+        return f"revision lacks {', '.join(lacking)}"
+    if len(revised) < _AUDIT_MIN_KEPT * len(draft):
+        return f"revision is {len(revised):,} chars against a {len(draft):,}-char draft"
+    return None
+
+
+async def _audit_brief(
+    route: llm_provider.Route,
+    draft: str,
+    sections: list[ProviderResult],
+    *,
+    title: str,
+    resolution_criteria: str,
+    fine_print: str,
+) -> tuple[str, str]:
+    """(brief, the trace doc it was written to): the draft revised to take in the
+    decision-relevant facts it lost, or the draft itself when nothing is missing
+    or the revision fails. The audit never costs a question its brief."""
+    missing = missing_value_lines(sections, draft)
+    research_trace.emit(
+        "brief", "audit: input lines missing from the draft", "\n".join(missing) or "(none)",
+        meta={"chain": "brief", "lines": len(missing)},
+        reads=[research_trace.ref_doc("compiler_input"), research_trace.ref_doc("brief:pre-audit")],
+        writes=[research_trace.ref_doc("brief:audit-list")], kind="code", lane="*",
+    )
+    if not missing:
+        return draft, "brief:pre-audit"
+    prompt = _AUDIT_PROMPT.format(
+        today=datetime.date.today().isoformat(), title=title,
+        criteria=resolution_criteria or "Not provided.", fine_print=fine_print or "Not provided.",
+        draft=draft, n=len(missing), missing="\n".join(missing),
+    )
+    messages = [{"role": "system", "content": _COMPILER_SYSTEM}, {"role": "user", "content": prompt}]
+    reads = [research_trace.ref_doc("brief:pre-audit"), research_trace.ref_doc("brief:audit-list")]
+    try:
+        revised, finish_reason = await _chat(route, messages, "compiler/brief-audit")
+        problem = _audit_problem(draft, revised, finish_reason)
+    except Exception as exc:  # noqa: BLE001 - incl. a refused budget: the draft stands
+        revised, problem = "", f"{type(exc).__name__}: {exc}"
+    if problem:
+        logger.warning("research-compiler | audit pass not used (%s); keeping the draft brief.", problem)
+        research_trace.emit(
+            "brief", "audit pass failed; draft kept", revised, status="failed", error=problem,
+            meta={"chain": "brief"}, reads=reads, writes=[], kind="model", lane="*",
+        )
+        return draft, "brief:pre-audit"
+    revised = _normalise_compiled_report(revised)
+    research_trace.emit(
+        "brief", "audit pass (revised brief)", revised, input=prompt,
+        meta={"chain": "brief", "lines": len(missing), "chars_added": len(revised) - len(draft)},
+        reads=reads, writes=[research_trace.ref_doc("brief:audited")], kind="model", lane="*",
+    )
+    return revised, "brief:audited"
 
 
 def _format_artifact_check(artifact_check: dict | None) -> str:
@@ -1057,7 +1192,11 @@ def _build_compiler_prompt(
     fine_print: str,
     cleaned_sections: list[ProviderResult],
     artifact_check: dict | None = None,
+    qwen_rules: bool = False,
 ) -> str:
+    """The brief writer's prompt. ``qwen_rules`` adds the Qwen brief writer's
+    rules; without it the prompt is the shared one the Opus path uses."""
+    rules_block = "\n" + _QWEN_BRIEF_RULES + "\n" if qwen_rules else ""
     resolution_sections = [
         (provider, content)
         for provider, content in cleaned_sections
@@ -1120,7 +1259,7 @@ items against each other and against the resolution source. Flag every failure i
 - Impossible superlative: if a claim like "N-month high/low" is inconsistent with the values in the extracted series, flag it.
 - Wrong-era drivers: if the reasons given for a supposedly current datapoint describe events from a different period, treat that datapoint's date as suspect.
 - ALREADY IN THE BASELINE? When the resolution source shows a confirmed current value (a count, total, list, or standing "as of" some date), every evidence item that implies movement toward or away from that value must be reconciled against it: does the item describe something that happened BEFORE the baseline's "as of" date (its effect is already inside the current value) or AFTER it (a genuine pending change)? Say which on the item. Watch especially for follow-up coverage of an old event (implementing decrees, anniversary pieces, secondary rollouts of an already-enacted law) dressed as new movement. If the research does not let you place an entity inside or outside the current value (e.g. the source's row-level breakdown was not retrieved), the item must say "(position vs. baseline unverified)" and must NOT be presented as the strongest candidate to change the value — and flag the unretrieved breakdown in Gaps And Cautions as the blocking gap.
-
+{rules_block}
 Output exactly these Markdown sections:
 
 # Compiled Research Brief

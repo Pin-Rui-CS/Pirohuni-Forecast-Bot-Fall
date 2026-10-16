@@ -26,6 +26,7 @@ import re
 from collections import defaultdict
 
 from diagnostics import lineage_legacy
+from facts import claims, text_values
 from diagnostics.loader import RunArtifacts, _read
 
 SCHEMA_VERSION = 1
@@ -34,11 +35,6 @@ _STATUS = {"ok": _PASS, "included": _PASS, "experimental": _PASS,
            "failed": _FAIL, "rejected": _FAIL, "error": _FAIL,
            "excluded": _UNUSED}
 _NO_LANE = {"", "unknown", None}
-_NUMBER = re.compile(r"(?<![\w.])(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+\.\d+|\d{3,})(?![\w])")
-_HOST = re.compile(r"\b((?:[a-z0-9-]+\.)+(?:com|org|gov|net|edu|io|co|uk|us|int|info|br|de|fr|news|tv))\b", re.I)
-_LINKISH = re.compile(r"https?://\S+|(?:[a-z0-9-]+\.)+[a-z]{2,}/\S*", re.I)
-_PCT = re.compile(r"(?<![\w.])(\d{1,3}(?:\.\d+)?)\s?%")
-_LEAD = re.compile(r"^\s*(?:[-*•>|]|\d+[.)]|\[E\d+\])\s*")
 _MAX_FACTS = 200
 # Credentials that can ride along in a logged request URL or error message.
 _SECRET = re.compile(r"((?:api[_-]?key|apikey|key|token|access_token|secret|auth|signature|sig)=)[^&\s'\"<>]+", re.I)
@@ -225,19 +221,6 @@ def _calls(art: RunArtifacts, nodes: list[dict], events: list[dict]) -> list[dic
 
 
 # --------------------------------------------------------------------------- facts
-def _numbers(text: str) -> set[str]:
-    """Values worth following: grouped or 3+ digit integers, decimals and
-    percentages. Years are dates, not values."""
-    out = set()
-    for token in _NUMBER.findall(text or ""):
-        clean = token.replace(",", "")
-        if re.fullmatch(r"(19|20)\d\d", token):  # a bare year; "2,088" is a value
-            continue
-        out.add(clean.rstrip("0").rstrip(".") if "." in clean else clean)
-    out.update(m.group(1) + "%" for m in _PCT.finditer(text or ""))
-    return out
-
-
 def _facts(nodes: list[dict], edges: dict, texts: dict) -> list[dict]:
     """Every line that states a value, followed through the graph.
 
@@ -254,7 +237,7 @@ def _facts(nodes: list[dict], edges: dict, texts: dict) -> list[dict]:
     order = {n["id"]: i for i, n in enumerate(nodes)}
     # JSON outputs are records about a step (a decision, a check), not the text
     # it passed on, so they cannot show whether a fact survived.
-    values = {nid: _numbers(_LINKISH.sub(" ", t)) for nid, t in texts.items()
+    values = {nid: text_values(t) for nid, t in texts.items()
               if not str((by_id[nid]["output"] or {}).get("file", "")).endswith(".json")}
 
     def holds(nid: str, key: frozenset):
@@ -270,25 +253,8 @@ def _facts(nodes: list[dict], edges: dict, texts: dict) -> list[dict]:
         if (node["kind"] not in ("model", "code") or nid not in texts
                 or str((node["output"] or {}).get("file", "")).endswith(".json")):
             continue
-        source = ""
-        for line in texts[nid].splitlines():
-            if line.lstrip().startswith("#"):
-                source = ""
-            host = _HOST.search(line)
-            if host:
-                source = host.group(1).lower().removeprefix("www.")
-            nums = _numbers(_LINKISH.sub(" ", line))
-            strong = [n for n in nums if "." in n or "%" in n or len(n) >= 4]
-            words = re.sub(r"[^A-Za-zÀ-ÿ ]+", " ", _LINKISH.sub(" ", line))
-            if not nums or (len(nums) < 2 and not strong) or len(words.replace(" ", "")) < 15:
-                continue  # a bare value ("Score: 0.87") is not a claim
-            key = frozenset(nums)
-            if key in seen:
-                continue
-            seen.add(key)
-            found.append((nid, _LEAD.sub("", line).strip()[:240], source, key))
-            if len(found) >= _MAX_FACTS:
-                break
+        for fact in claims(texts[nid], seen=seen, limit=_MAX_FACTS - len(found)):
+            found.append((nid, fact.claim, fact.source, fact.key))
         if len(found) >= _MAX_FACTS:
             break
 

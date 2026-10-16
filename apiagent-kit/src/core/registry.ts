@@ -3,6 +3,7 @@ import { arxiv } from "./adapters/arxiv.ts";
 import { cboeVix } from "./adapters/cboe-vix.ts";
 import { cisaKev } from "./adapters/cisa-kev.ts";
 import { clinicalTrials } from "./adapters/clinicaltrials.ts";
+import { cpcEnso } from "./adapters/cpc-enso.ts";
 import { coinbase } from "./adapters/coinbase.ts";
 import { fdic } from "./adapters/fdic.ts";
 import { federalRegister } from "./adapters/federal-register.ts";
@@ -14,6 +15,8 @@ import { launchLibrary } from "./adapters/launch-library.ts";
 import { kalshi } from "./adapters/kalshi.ts";
 import { metaculus } from "./adapters/metaculus.ts";
 import { nhc } from "./adapters/nhc.ts";
+import { nhcHistory } from "./adapters/nhc-history.ts";
+import { nhcOutlook } from "./adapters/nhc-outlook.ts";
 import { openFda } from "./adapters/openfda.ts";
 import { pageviews } from "./adapters/pageviews.ts";
 import { polymarket } from "./adapters/polymarket.ts";
@@ -34,15 +37,14 @@ import { worldBank } from "./adapters/worldbank.ts";
  * here — no prompt change, no tool-schema change, because the model never sees
  * this list. It sees only what `find` returns.
  *
- * Twenty-four adapters. Twenty-two are keyless; FRED and Metaculus self-disable
- * without a key and are simply absent until one is set.
- *
- * Not all of them come from `api-registry-crossref.md`. Seven were added to
- * close domains the document does not cover at all — earthquakes, international
- * statistics, prediction markets, software releases, public attention and
- * tropical cyclones. Kalshi in particular exists because Metaculus, the
- * document's only forecasting source, closed public access after it was
- * written, which would otherwise leave that domain empty.
+ * Twenty-eight adapters. Twenty-six are keyless; FRED and Metaculus self-disable
+ * without a key and are simply absent until one is set. The three tropical and
+ * climate adapters (nhc_history, nhc_outlook, cpc_enso) were added after Q46147,
+ * whose decisive evidence (HURDAT2 base rates split by ENSO, the NHC outlook,
+ * CPC's ENSO and weeks 2-3 discussions) search could not reach. They and
+ * nhc_storms set `keywordsRequired` with domain-only keywords (no "season",
+ * "outlook", "historical"): test/matcher.test.ts checks every real need the agent
+ * has written so far and fails if they are offered for anything else.
  *
  * Still absent and worth adding: BLS, EIA, Census, Congress.gov, CourtListener,
  * LegiScan, Regulations.gov. Each needs a free key, which is the only reason
@@ -70,6 +72,9 @@ export const adapters: ApiAdapter[] = [
   usgsEarthquakes,
   worldBank,
   nhc,
+  nhcHistory,
+  nhcOutlook,
+  cpcEnso,
   github,
   polymarket,
   kalshi,
@@ -111,7 +116,10 @@ const STOPWORDS = new Set([
 ]);
 
 function tokenise(text: string): string[] {
+  // Accents stripped first, or "Niño" splits into "ni" + "o" and matches nothing.
   return text
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
     .toLowerCase()
     .split(/[^a-z0-9]+/)
     .filter((word) => word.length >= 3 && !STOPWORDS.has(word));
@@ -209,6 +217,37 @@ function score(adapter: ApiAdapter, tokens: string[]): number {
  */
 const MIN_SCORE = 3;
 
+/**
+ * For adapters with `keywordsRequired`: keywords route, domain and `answers`
+ * prose only rank. Without it, prose words alone reached MIN_SCORE on real
+ * needs: "TOP500 list ... systems ... latest" offered the hurricane outlook,
+ * and "weather" (a domain) plus "forecast" in the prose offered every weather
+ * adapter for a Denver game-day forecast. Other adapters are unaffected.
+ */
+function routed(adapter: ApiAdapter, tokens: string[]): boolean {
+  if (!adapter.keywordsRequired) return true;
+  const index = indexOf(adapter);
+  return tokens.some((token) => index.keywords.has(token) || index.stems.has(stem(token)));
+}
+
+/**
+ * Why `find` would (or would not) offer one adapter for a need: each token's
+ * contribution. Used by the matcher regression test to explain a failure.
+ */
+export function explainScore(need: string, id: string): { total: number; hits: string[] } {
+  const adapter = adapters.find((entry) => entry.id === id);
+  if (!adapter) return { total: 0, hits: [] };
+  const index = indexOf(adapter);
+  const hits: string[] = [];
+  for (const token of tokenise(need)) {
+    if (index.keywords.has(token)) hits.push(`${token}:keyword+3`);
+    else if (index.stems.has(stem(token))) hits.push(`${token}:stem+2`);
+    if (adapter.domain === token) hits.push(`${token}:domain+2`);
+    if (index.answers.has(token)) hits.push(`${token}:answers+1`);
+  }
+  return { total: score(adapter, tokenise(need)), hits };
+}
+
 export type Candidate = {
   id: string;
   name: string;
@@ -238,7 +277,7 @@ export function find(need: string): Candidate[] {
 
   const ranked = activeAdapters()
     .map((adapter) => ({ adapter, points: score(adapter, tokens) }))
-    .filter((entry) => entry.points >= MIN_SCORE)
+    .filter((entry) => entry.points >= MIN_SCORE && routed(entry.adapter, tokens))
     .sort((a, b) => b.points - a.points)
     .slice(0, MAX_CANDIDATES)
     .map((entry) => entry.adapter);

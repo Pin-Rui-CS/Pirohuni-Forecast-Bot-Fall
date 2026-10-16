@@ -702,6 +702,30 @@ def _gpt6_openrouter_route(model_id: str) -> Route:
     )
 
 
+def _gemini_openrouter_route(model_id: str) -> Route:
+    """A Gemini thinking model (gemini-4-argon) reached through OpenRouter.
+
+    Same two guards as the GPT-6 route, for the same reasons. Gemini thinks by
+    default and its thinking tokens count against max_tokens, so without the
+    headroom a 20k forecast cap could be spent before any answer. And the one
+    caller that sets cache_static_prefix (the binary tiebreaker) sends a prompt
+    unique to its question: a cache write ($0.1875/1M on top of input) could
+    never be read back. The 24k headroom keeps a 20k forecast call at 44k,
+    inside the 65,536-token output limit of Google's endpoint on OpenRouter.
+    """
+    return Route(
+        endpoint=ENDPOINT_OPENROUTER,
+        model_id=model_id,
+        accepts_temperature=True,
+        uses_max_completion_tokens=False,
+        reasoning_headroom_tokens=24_000,
+        max_output_tokens_ceiling=65_536,
+        supports_cache_control=False,
+        sends_usage_accounting=True,
+        cost_source="native",
+    )
+
+
 def _soclaas_route(model_id: str) -> Route:
     """An open-weight model on the gateway: free in money, metered in quota.
 
@@ -747,6 +771,8 @@ def route_for_model(model_id: str) -> Route:
         return _soclaas_route(name)
     if "gpt-6" in name or "gpt-5" in name:
         return _gpt6_openrouter_route(name)
+    if name.startswith("google/gemini-"):
+        return _gemini_openrouter_route(name)
     return _openrouter_route(name)
 
 

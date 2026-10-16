@@ -1,0 +1,101 @@
+name: Brief writer loss study
+
+# Manual. Measures, across every forecast stored in the library (Supabase), what
+# the brief writer did with each fact it was given, then has Qwen label a
+# stratified sample by what each fact means for its question. Never forecasts.
+# The only model it may call is Qwen on SoCLaaS; no OpenRouter or OpenAI key is
+# passed to this job. Results: a workflow artifact (facts, labels, report.md).
+# Nothing is written to Supabase.
+
+"on":
+  workflow_dispatch:
+    inputs:
+      concurrency:
+        description: "Parallel Qwen calls"
+        required: false
+        default: "4"
+        type: string
+      limit_runs:
+        description: "Label only the first N runs (blank = all)"
+        required: false
+        default: ""
+        type: string
+      skip_plan:
+        description: "Skip the evidence-plan coverage check (saves ~1 Qwen call per run)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  study:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+          installer-parallel: true
+
+      - name: Load cached venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('**/poetry.lock') }}
+
+      - name: Install Python dependencies (Poetry)
+        run: poetry install --no-interaction --no-root
+
+      - name: Measure (code only)
+        env:
+          PYTHONUNBUFFERED: "1"
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: poetry run python eval_tools/brief_loss_study.py measure
+
+      - name: Classify (Qwen on SoCLaaS)
+        env:
+          PYTHONUNBUFFERED: "1"
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SOCLAAS_API_KEY: ${{ secrets.SOCLAAS_API_KEY }}
+          QWEN_LADDER: "1"
+        run: |
+          set -o pipefail
+          args=(classify --concurrency "${{ inputs.concurrency }}")
+          if [ -n "${{ inputs.limit_runs }}" ]; then
+            args+=(--limit-runs "${{ inputs.limit_runs }}")
+          fi
+          if [ "${{ inputs.skip_plan }}" = "true" ]; then
+            args+=(--skip-plan)
+          fi
+          poetry run python eval_tools/brief_loss_study.py "${args[@]}"
+
+      - name: Report
+        if: always()
+        run: |
+          poetry run python eval_tools/brief_loss_study.py report > /dev/null || true
+          if [ -f data/brief-loss-study/report.md ]; then
+            cat data/brief-loss-study/report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: brief-loss-study-${{ github.run_id }}
+          path: data/brief-loss-study/
+          if-no-files-found: ignore
+          retention-days: 30

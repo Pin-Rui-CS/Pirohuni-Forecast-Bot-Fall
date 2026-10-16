@@ -626,14 +626,7 @@ async def run_research(
         provider_results=included_results,
         artifact_check=artifact_check,
     )
-    research_trace.emit(
-        "brief",
-        "compiler output (pre-banner)",
-        compiled_report,
-        meta={"chain": "brief"},
-        reads=[research_trace.ref_doc("compiler_input")], writes=[research_trace.ref_doc("brief:draft")],
-        kind="model", lane="*",
-    )
+    # compile_research_report has emitted the pre-banner brief (brief:draft).
     final_check_ref = research_trace.ref_doc(
         "artifact_check:v2" if len(included_results) > pre_retry_result_count else "artifact_check:v1")
     compiled_report = _apply_artifact_status_banner(compiled_report, artifact_check)

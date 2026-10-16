@@ -205,6 +205,7 @@ def check_complete(state: StreamState) -> None:
 # forecast question ..." -- a complete stream that is not a brief at all.
 REQUIRED_OUTPUT: dict[str, str] = {
     "compiler/research-brief": "## Key Evidence",
+    "compiler/brief-audit": "## Key Evidence",
 }
 
 

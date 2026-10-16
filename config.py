@@ -70,6 +70,10 @@ FORECASTER_MODELS = _env_list("FORECASTER_MODELS", list(_profile.forecaster_pool
 FORECASTER_TIEBREAKER_MODEL = os.getenv(
     "FORECASTER_TIEBREAKER_MODEL", DEFAULT_FORECASTER_MODEL
 )
+# Stand-in for a brief run that fails (call error, or still unusable after its
+# repair): the run is redone once on this model, so one provider's outage does
+# not shrink the ensemble. Empty = off. The raw-research run is not covered.
+FORECASTER_BACKUP_MODEL = (os.getenv("FORECASTER_BACKUP_MODEL") or "").strip()
 
 # --- Heterogeneous ensemble run ----------------------------------------------
 # When enabled (and NUM_RUNS_PER_QUESTION >= 2), the LAST ensemble run reads the

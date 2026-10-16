@@ -1,6 +1,6 @@
 # apiagent-kit
 
-A research agent that answers factual questions from **24 public data APIs**, with
+A research agent that answers factual questions from **28 public data APIs**, with
 tiered provenance on every claim. Extracted from a Next.js app into a folder you
 can drop into any repo.
 
@@ -207,7 +207,7 @@ export function claude(model = "claude-opus-5"): ChatModel {
 
 ## Configuration
 
-Everything is optional except your LLM credentials. **22 of the 24 APIs need no
+Everything is optional except your LLM credentials. **26 of the 28 APIs need no
 credential at all.** See [`.env.example`](.env.example) for the annotated list.
 
 | Variable | Effect if unset |
@@ -281,7 +281,7 @@ src/
   models/
     openai-compatible.ts   reference ChatModel over plain fetch
   core/
-    registry.ts            the 24 adapters + the deterministic matcher
+    registry.ts            the 28 adapters + the deterministic matcher
     types.ts               ApiAdapter, defineAdapter, Tier, Domain
     http.ts                shape-checked fetch, caps, rate gates, CSV
     adapters/*.ts          one file per API
@@ -331,6 +331,19 @@ Two rules the `http.ts` helpers enforce, both from a real incident:
 2. **Fail loudly.** A shape mismatch throws `ShapeError` carrying the first 200
    characters of what actually arrived, so the tool layer can hand the model a
    real explanation instead of an empty result set.
+3. **Never parse a cut body.** A response over the body cap (8 MiB, or the
+   adapter's `maxBytes`) throws `TooLargeError` instead of being silently
+   truncated. Whole-file sources are listed in `test/live-sizes.ts`.
+
+Then run `npm test`. `test/matcher.test.ts` runs `find()` over every real need the
+agent has written (`test/fixtures/needs.json`) and fails if any candidate list
+changes. If the change is intended, review the diff and refresh the snapshot with
+`node test/find-snapshot.ts > test/fixtures/find-expected.json`. A narrow-domain
+adapter whose `answers` prose shares everyday words with unrelated needs should
+set `keywordsRequired: true`.
+
+Large, slow-changing files go through `getTextCached`: the bot starts one Node
+process per agent step, so in-memory caches don't outlive a step.
 
 ---
 
@@ -365,5 +378,5 @@ Both exist for the bot's measured-series path (`known_series.py`). Re-syncing
 upstream means re-applying these two.
 
 Not carried over (available upstream if you want them): the smoke-test harness
-that live-checks all 24 adapters with a worker pool, and the React tool-call
+that live-checks all 28 adapters with a worker pool, and the React tool-call
 rendering components.

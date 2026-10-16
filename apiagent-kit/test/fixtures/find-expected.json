@@ -1,0 +1,2103 @@
+{
+ "Will Ken Paxton lead James Talarico in the Texas Senate race polling on October 31, 2026?": [
+  "wikipedia",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will under 58% of the contiguous U.S. be in drought on October 27, 2026?": [
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "How many daily average PLA incursions into Taiwan's ADIZ will occur for the week of October 19-25, 2026?": [
+  "imf_portwatch",
+  "metaculus",
+  "gdelt_doc",
+  "wikipedia"
+ ],
+ "What will happen next with respect to the 30-year U.S. Treasury yield?": [
+  "fred",
+  "treasury_fiscal",
+  "gdelt_doc",
+  "metaculus"
+ ],
+ "Will Haiti hold the first round of its presidential election before December 14, 2026?": [
+  "gdelt_doc",
+  "wikipedia",
+  "metaculus"
+ ],
+ "Which month will have the highest officially reported TSMC consolidated net revenue among September, October, and November 2026?": [
+  "gdelt_doc",
+  "sec_edgar",
+  "treasury_fiscal",
+  "metaculus"
+ ],
+ "How many different drivers will win a Grand Prix in the 2026 F1 season?": [
+  "metaculus",
+  "fdic_failures",
+  "gdelt_doc"
+ ],
+ "How many named storms will there be in the 2026 Atlantic Hurricane Season?": [
+  "nhc_history",
+  "nhc_storms",
+  "nhc_outlook",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "How many US circuit court judges will be confirmed during November 2026?": [
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "How many systems on the November 2026 TOP500 list will be exascale?": [
+  "metaculus",
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "Will Grok 4.8 appear on SpaceXAI's release notes before November 15, 2026?": [
+  "github",
+  "fred",
+  "treasury_fiscal",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "How much in digital advertising revenues will the New York Times Company report in its Q3 2026 earnings release?": [
+  "sec_edgar",
+  "github",
+  "fred",
+  "who_outbreaks",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "What will the United States national average gas price be on November 3, 2026?": [
+  "world_bank",
+  "treasury_fiscal",
+  "polymarket",
+  "coinbase_candles",
+  "fred",
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "How many confirmed measles cases will Peru's CDC-MINSA report nationally for 2026 as of mid-October 2026?": [
+  "who_outbreaks",
+  "sec_edgar",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "How many jobs will the U.S. economy add in October 2026?": [
+  "fred",
+  "metaculus",
+  "world_bank",
+  "gdelt_doc"
+ ],
+ "How many Falcon 9 or Falcon Heavy orbital launches will SpaceX have in the second half of October 2026?": [
+  "launch_library",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "How many mass shootings will the U.S. experience in October 2026?": [
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will any North American country have a CDC travel advisory issued in October 2026?": [
+  "cisa_kev",
+  "world_bank",
+  "federal_register",
+  "who_outbreaks",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Where will the great white shark Percy be on November 1, 2026?": [
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "What will be Donald Trump's approval rating on Election Day 2026?": [
+  "wikipedia",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will José Mourinho still be the manager for Real Madrid on December 31, 2026?": [
+  "polymarket",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "What will be the total OpenRouter token usage December 21-27, 2026?": [
+  "coinbase_candles",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "What will be the official water level of Panama's Gatun Lake on October 31, 2026?": [
+  "imf_portwatch",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will the US approve a $10B exchange stabilisation facility for Pakistan before 2027?": [
+  "fred",
+  "kalshi",
+  "coinbase_candles",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "How many clinicaltrials.gov studies with an LLM-based Chatbot as the intervention/treatment will be recruiting on November 1, 2026?": [
+  "clinicaltrials",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will Donald Trump and Vladimir Putin meet in person before December 1, 2026?": [
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "What will be the winning margin in Brazil’s 2026 presidential election runoff?": [
+  "wikipedia",
+  "gdelt_doc",
+  "metaculus"
+ ],
+ "Will Donald Trump's approval rating reach a new low in the second half of October 2026?": [
+  "metaculus",
+  "coinbase_candles",
+  "wikipedia",
+  "fred",
+  "gdelt_doc"
+ ],
+ "How many license plate readers mapped in the USA will be displayed by DeFlock.org on November 1, 2026?": [
+  "wikipedia_pageviews",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Which Oct 16–17, 2026 Bundesliga Matchday 6 fixture will produce the most total goals?": [
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will the winning pumpkin at the 2026 Terminator weigh-off be greater than or equal to 2,000 pounds?": [
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will Russian and Ukrainian officials hold a round of negotiations on an energy-infrastructure ceasefire between October 15 and October 17, 2026?": [
+  "fred",
+  "gdelt_doc",
+  "metaculus"
+ ],
+ "What will Bitcoin's price (USD) be on October 17, 2026?": [
+  "coinbase_candles",
+  "polymarket",
+  "fred",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will a hurricane be active in the Eastern Pacific at any point between October 15 and October 17, 2026?": [
+  "nhc_storms",
+  "nhc_history",
+  "nhc_outlook",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Who will win the 2026 Brazilian Presidential election?": [
+  "wikipedia",
+  "gdelt_doc",
+  "metaculus"
+ ],
+ "Will Anthropic have publicly released Claude Haiku 5.5 by October 16, 2026?": [
+  "github",
+  "sec_edgar",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will Zcash (ZEC) reach $2,000 or more between October 15 and October 16, 2026?": [
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "On how many of the two trading days October 15–16, 2026 will US spot Bitcoin ETFs record a net daily inflow?": [
+  "coinbase_candles",
+  "metaculus",
+  "cboe_vix",
+  "imf_portwatch",
+  "wikipedia",
+  "world_bank",
+  "gdelt_doc"
+ ],
+ "What will the series score of the 2026 ALCS be after Game 4 (October 16)?": [
+  "fred",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "How many of three recommended judges (Agarwal, Upadhyaya, Singh) will be serving Supreme Court of India judges by October 17, 2026?": [
+  "metaculus",
+  "world_bank",
+  "gdelt_doc"
+ ],
+ "Will Texas have filed a notice of appeal of Judge Pitman's prison air-conditioning injunction as of October 16, 2026?": [
+  "federal_register",
+  "sec_edgar",
+  "clinicaltrials",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will Russian, Ukrainian, and US officials hold a trilateral negotiation meeting between October 15 and 17, 2026?": [
+  "gdelt_doc",
+  "metaculus"
+ ],
+ "Will Ukraine's Zaporizhzhia Nuclear Power Plant be connected to offsite grid power on October 17, 2026?": [
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will Judge McCaslin order the State to produce additional discovery at the October 16, 2026 Murdaugh retrial hearing?": [
+  "federal_register",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "What will Trump's net approval (approve minus disapprove) be in the RealClearPolitics average on October 15, 2026?": [
+  "wikipedia",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will the housing-protest encampment at Madrid's Puerta del Sol still be physically present on October 15, 2026?": [
+  "gdelt_doc",
+  "fred",
+  "metaculus"
+ ],
+ "Will PJM have announced a new start date for its Reliability Backstop Procurement auction as of October 15, 2026?": [
+  "sec_edgar",
+  "clinicaltrials",
+  "who_outbreaks",
+  "cisa_kev",
+  "arxiv",
+  "treasury_fiscal",
+  "gdelt_doc"
+ ],
+ "What will be the closing price of Xtend AI Robotics (XTND) on October 15, 2026?": [
+  "coinbase_candles",
+  "polymarket",
+  "cboe_vix",
+  "fdic_failures",
+  "fred",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will the Verkhovna Rada vote to extend martial law or general mobilization between October 15 and 17, 2026?": [
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will Bo Nix throw for at least 250 passing yards against the Seahawks on October 15, 2026?": [
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "How many of Peru's 25 regions will show no gubernatorial ticket at 30%+ of valid votes in ONPE's official count as of October 15, 2026?": [
+  "metaculus",
+  "fdic_failures",
+  "gdelt_doc"
+ ],
+ "Will Delta Air Lines (DAL) stock close above $85.00 on October 15, 2026?": [
+  "cboe_vix",
+  "sec_edgar",
+  "coinbase_candles",
+  "fdic_failures",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will Osaka Metropolitan University's online classes have officially resumed as of October 15, 2026?": [
+  "openfda",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will MSCI's non-operating company consultation results identify Strategy (MSTR) as a company to be made ineligible for its Global Investable Market Indexes?": [
+  "sec_edgar",
+  "cboe_vix",
+  "metaculus",
+  "who_outbreaks",
+  "polymarket",
+  "kalshi",
+  "gdelt_doc"
+ ],
+ "Will the S&P 500 set a new record closing high on October 15 or October 16, 2026?": [
+  "coinbase_candles",
+  "cboe_vix",
+  "fdic_failures",
+  "wikipedia",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will Bolivia's Supreme Decree 5716 (the diesel subsidy cut) be abrogated or suspended by October 17, 2026?": [
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will Piura's cumulative 2026 dengue death toll exceed 8 by October 15, 2026?": [
+  "who_outbreaks",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will the Seahawks beat the Broncos on Thursday Night Football in Week 6 (October 15, 2026)?": [
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will Zcash (ZEC) be ranked in the top 10 cryptocurrencies by market capitalization on CoinGecko on October 15, 2026?": [
+  "metaculus",
+  "polymarket",
+  "cboe_vix",
+  "kalshi",
+  "gdelt_doc"
+ ],
+ "How many total points will be scored in the Seahawks–Broncos Thursday Night Football game on October 15, 2026?": [
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "How many confirmed human West Nile virus cases will RIVM report in the Netherlands for 2026 as of its mid-October update?": [
+  "who_outbreaks",
+  "sec_edgar",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will anyone besides Gianni Infantino have publicly declared a candidacy for the 2027 FIFA presidency as of October 15, 2026?": [
+  "sec_edgar",
+  "wikipedia_pageviews",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "What will Zcash (ZEC) close at on October 15, 2026?": [
+  "cboe_vix",
+  "coinbase_candles",
+  "fdic_failures",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "What global growth rate for 2026 will the IMF's October 2026 World Economic Outlook project?": [
+  "fred",
+  "world_bank",
+  "metaculus",
+  "github",
+  "who_outbreaks",
+  "arxiv",
+  "gdelt_doc"
+ ],
+ "Will the US conduct a new military strike inside Iranian territory between October 15 and October 16, 2026?": [
+  "gdelt_doc",
+  "metaculus"
+ ],
+ "What will be the closing price of the iShares China Large-Cap ETF (FXI) on October 15, 2026?": [
+  "coinbase_candles",
+  "polymarket",
+  "cboe_vix",
+  "fdic_failures",
+  "fred",
+  "world_bank",
+  "gdelt_doc"
+ ],
+ "Will UODO publish an announcement specifically about the FELG Dent breach by October 16, 2026?": [
+  "federal_register",
+  "cisa_kev",
+  "gdelt_doc",
+  "arxiv",
+  "metaculus"
+ ],
+ "What will the front-month Brent crude futures settlement price be on October 16, 2026 (USD/barrel)?": [
+  "coinbase_candles",
+  "fred",
+  "kalshi",
+  "polymarket",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "What will be the voter turnout percentage reported for Phase 1 of Rajasthan's 2026 Zila Parishad and Panchayat Samiti member elections (voting October 13, 2026)?": [
+  "gdelt_doc",
+  "clinicaltrials",
+  "sec_edgar",
+  "metaculus"
+ ],
+ "Will the DFB formally and institutionally come out against Infantino's FIFA presidency before October 16, 2026?": [
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will La Jolla's tide gauge record an observed water level above 6.0 ft MLLW on October 15 or 16, 2026?": [
+  "iem_asos",
+  "wikipedia",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "What will the Alternative.me Crypto Fear & Greed Index value be on October 16, 2026?": [
+  "cboe_vix",
+  "coinbase_candles",
+  "fred",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will in-person school classes be officially suspended in the city of Valencia, Spain on any day during October 15–16, 2026?": [
+  "openfda",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "What will the AAA national average price of regular gasoline be on October 15, 2026?": [
+  "treasury_fiscal",
+  "polymarket",
+  "coinbase_candles",
+  "fred",
+  "wikipedia",
+  "world_bank",
+  "gdelt_doc"
+ ],
+ "What will WastewaterSCAN's national norovirus (GII) level category be on October 15, 2026?": [
+  "treasury_fiscal",
+  "world_bank",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "What will U.S. spot Bitcoin ETFs' cumulative net inflow be as of the October 15, 2026 session?": [
+  "coinbase_candles",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will the National Assembly confirmation hearing for SCIA chief nominee Kim Ji-yong be held on October 15 or 16, 2026?": [
+  "treasury_fiscal",
+  "world_bank",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will the Belfast Court of Appeal deliver its judgment on the Garvaghy Road Residents' Coalition appeal before October 16, 2026?": [
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "What will CBOT December 2026 wheat futures settle at on October 15, 2026?": [
+  "kalshi",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will a new federal lawsuit over the 2025–2026 Texas DPS voter-registration transmission failure be on file as of October 15, 2026?": [
+  "sec_edgar",
+  "federal_register",
+  "fdic_failures",
+  "who_outbreaks",
+  "cboe_vix",
+  "fred",
+  "gdelt_doc"
+ ],
+ "As of October 15, 2026, will TEPCO report that the Unit 2 robotic arm operation at Fukushima Daiichi is suspended due to a problem?": [
+  "sec_edgar",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will OpenAI publicly release or announce a new GPT model on October 15 or 16, 2026?": [
+  "github",
+  "arxiv",
+  "fred",
+  "sec_edgar",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "How many bitcoin will Strategy report buying for the week ending October 11, 2026?": [
+  "sec_edgar",
+  "metaculus",
+  "coinbase_candles",
+  "gdelt_doc"
+ ],
+ "Will the Supreme Court of India have at least three sitting women judges by October 17, 2026?": [
+  "world_bank",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "What will the BIST 100 index closing level be on October 16, 2026?": [
+  "cboe_vix",
+  "coinbase_candles",
+  "fdic_failures",
+  "fred",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "How many European countries will ECDC report with locally-acquired human West Nile virus cases in the 2026 season as of its mid-October weekly update?": [
+  "who_outbreaks",
+  "sec_edgar",
+  "world_bank",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will ISRO launch the GSLV-F18 / NVS-03 (IRNSS-1L) mission on October 15 or 16, 2026?": [
+  "launch_library",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "What will be the total spending by all Senate candidates in the 2026 US election cycle?": [
+  "treasury_fiscal",
+  "wikipedia",
+  "gdelt_doc",
+  "fred",
+  "metaculus"
+ ],
+ "How many games will the 2026 World Chess Championship last?": [
+  "metaculus",
+  "world_bank",
+  "gdelt_doc"
+ ],
+ "How many politicians will leave their cabinet positions in the UK government before 2027?": [
+  "metaculus",
+  "treasury_fiscal",
+  "gdelt_doc"
+ ],
+ "What will be the highest intraday value of the VIX between October 1 and December 24, 2026?": [
+  "cboe_vix",
+  "coinbase_candles",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will any country other than the DRC have more than 100 confirmed cases of Bundibugyo ebolavirus during 2026?": [
+  "who_outbreaks",
+  "world_bank",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Will Trump demolish the Kennedy Center before January 1, 2027?": [
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "What will be the margin of seats won by Labour over National in the 2026 New Zealand general election?": [
+  "wikipedia",
+  "gdelt_doc",
+  "treasury_fiscal",
+  "world_bank",
+  "metaculus"
+ ],
+ "How many Major Atlantic Hurricanes will occur in the 2026 Atlantic hurricane season?": [
+  "nhc_history",
+  "nhc_storms",
+  "nhc_outlook",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Who will win the 2026 World Chess Championship?": [
+  "metaculus",
+  "world_bank",
+  "gdelt_doc"
+ ],
+ "Will Venezuela announce a presidential election before 2027?": [
+  "wikipedia",
+  "gdelt_doc",
+  "metaculus"
+ ],
+ "What will be the US national debt on December 31, 2026?": [
+  "treasury_fiscal",
+  "fred",
+  "world_bank",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Which party will win the most seats in the 2026 Israeli election?": [
+  "wikipedia",
+  "gdelt_doc",
+  "metaculus"
+ ],
+ "[PRACTICE] What will the average \"new forecasters per day\" be on this question before this question closes?": [
+  "cboe_vix",
+  "metaculus",
+  "coinbase_candles",
+  "wikipedia",
+  "world_bank",
+  "polymarket",
+  "gdelt_doc"
+ ],
+ "What will be the open market US Dollar/Iranian Toman exchange rate on December 31, 2026?": [
+  "metaculus",
+  "kalshi",
+  "coinbase_candles",
+  "fred",
+  "cboe_vix",
+  "polymarket",
+  "gdelt_doc"
+ ],
+ "Texas Senate 2026 race polling Paxton vs Talarico RaceToTheWH polling average": [
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "U.S. Drought Monitor weekly data for CONUS area percentage in D1-D4 drought categories, October 2026": [
+  "gdelt_doc"
+ ],
+ "US Drought Monitor 2026 drought monitor data valid date October 27": [
+  "gdelt_doc"
+ ],
+ "Drought Monitor percentage of US land area in drought D1 D2 D3 D4 categories by date": [
+  "gdelt_doc"
+ ],
+ "USDA NASS crop drought report drought percentage of US land area": [
+  "sec_edgar",
+  "gdelt_doc"
+ ],
+ "PLA incursions into Taiwan's ADIZ (Air Defense Identification Zone) daily count from Ministry of National Defense reports, October 2026": [
+  "imf_portwatch",
+  "treasury_fiscal",
+  "world_bank",
+  "gdelt_doc",
+  "sec_edgar"
+ ],
+ "prediction market price for PLA Taiwan ADIZ incursions October 2026": [
+  "polymarket",
+  "kalshi",
+  "metaculus",
+  "imf_portwatch",
+  "coinbase_candles",
+  "cboe_vix",
+  "gdelt_doc"
+ ],
+ "30-year U.S. Treasury yield (^TYX) closing price, current value and recent daily history": [
+  "fred",
+  "coinbase_candles",
+  "treasury_fiscal",
+  "cboe_vix",
+  "imf_portwatch",
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "U.S. 30-year Treasury yield historical time series, daily closing yields": [
+  "fred",
+  "treasury_fiscal",
+  "cboe_vix",
+  "coinbase_candles",
+  "imf_portwatch",
+  "gdelt_doc"
+ ],
+ "Haiti 2026 presidential election schedule status cancellation postponement": [
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "Haiti election official announcement CONAP 2026": [
+  "gdelt_doc",
+  "wikipedia"
+ ],
+ "Haiti gang violence security situation 2026 election": [
+  "cisa_kev",
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "Metaculus prediction market Haiti election 2026": [
+  "metaculus",
+  "polymarket",
+  "kalshi",
+  "wikipedia",
+  "gdelt_doc",
+  "cboe_vix"
+ ],
+ "TSMC official monthly consolidated net revenue for 2026, by month (September, October, November 2026), from the TSMC investor relations monthly revenue page": [
+  "treasury_fiscal",
+  "fred",
+  "gdelt_doc"
+ ],
+ "2026 F1 Formula One World Championship race winners / Grand Prix results 2026": [
+  "wikipedia",
+  "world_bank",
+  "gdelt_doc"
+ ],
+ "2026 Atlantic hurricane season named storms count NHC current named storm total": [
+  "nhc_history",
+  "nhc_storms",
+  "nhc_outlook",
+  "gdelt_doc"
+ ],
+ "NOAA Atlantic hurricane season outlook prediction 2026 named storms forecast": [
+  "nhc_history",
+  "nhc_outlook",
+  "nhc_storms",
+  "polymarket",
+  "kalshi",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Atlantic hurricane season historical named storm counts recent years": [
+  "nhc_history",
+  "nhc_storms",
+  "nhc_outlook",
+  "gdelt_doc"
+ ],
+ "list of named tropical storms that formed in the 2026 Atlantic season season summary": [
+  "nhc_history",
+  "wikipedia",
+  "nhc_storms",
+  "nhc_outlook",
+  "gdelt_doc"
+ ],
+ "NOAA seasonal statistics named storms accumulated 2026 Atlantic basin cumulative count": [
+  "world_bank",
+  "nhc_history",
+  "fred",
+  "treasury_fiscal",
+  "gdelt_doc"
+ ],
+ "Number of United States circuit court judges confirmed by the US Senate in November 2026, per uscourts.gov confirmation listing / judicial vacancies data": [
+  "world_bank",
+  "iem_asos",
+  "gdelt_doc"
+ ],
+ "US Senate judicial nominations and confirmations of federal appellate / circuit court judges, recent history and official figures": [
+  "treasury_fiscal",
+  "federal_register",
+  "fred",
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "Prediction market prices on number of US circuit court / federal appellate judges confirmed in November 2026": [
+  "polymarket",
+  "kalshi",
+  "fred",
+  "metaculus",
+  "federal_register",
+  "cboe_vix",
+  "gdelt_doc"
+ ],
+ "TOP500 supercomputer list, number of exascale systems, Rmax performance per system, latest 2026 release": [
+  "fred",
+  "github",
+  "wikipedia",
+  "world_bank",
+  "gdelt_doc"
+ ],
+ "TOP500 list of fastest supercomputers, Rmax performance of each system, number of exascale systems above 1000 petaflops, June 2026 list": [
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "xAI Grok release notes, model versions, Grok 4.8 release date": [
+  "github",
+  "fred",
+  "arxiv",
+  "treasury_fiscal",
+  "gdelt_doc"
+ ],
+ "xAI Grok 4.7 Grok 4.8 model release announcements": [
+  "fred",
+  "github",
+  "gdelt_doc",
+  "arxiv"
+ ],
+ "New York Times Company Q3 2026 earnings digital advertising revenue": [
+  "sec_edgar",
+  "treasury_fiscal",
+  "gdelt_doc"
+ ],
+ "NYT quarterly earnings digital advertising revenue history 2025 2026": [
+  "sec_edgar",
+  "fred",
+  "treasury_fiscal",
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "prediction market odds on New York Times Q3 2026 earnings digital advertising revenue": [
+  "polymarket",
+  "kalshi",
+  "metaculus",
+  "treasury_fiscal",
+  "sec_edgar",
+  "cboe_vix",
+  "gdelt_doc"
+ ],
+ "AAA national average retail price for a gallon of regular gasoline in the United States, current value and recent weekly history": [
+  "wikipedia",
+  "world_bank",
+  "fred",
+  "treasury_fiscal",
+  "coinbase_candles",
+  "polymarket",
+  "gdelt_doc"
+ ],
+ "EIA national average retail regular gasoline price per gallon, weekly history 2026": [
+  "wikipedia",
+  "world_bank",
+  "coinbase_candles",
+  "treasury_fiscal",
+  "fred",
+  "polymarket",
+  "gdelt_doc"
+ ],
+ "prediction market prices for US gasoline price on November 3 2026": [
+  "polymarket",
+  "kalshi",
+  "fred",
+  "coinbase_candles",
+  "metaculus",
+  "cboe_vix",
+  "gdelt_doc"
+ ],
+ "Peru confirmed measles cases 2026 CDC-MINSA national cumulative total, Sala Situacional Sarampión-Rubéola, epidemiological week 2026": [
+  "who_outbreaks",
+  "treasury_fiscal",
+  "world_bank",
+  "gdelt_doc"
+ ],
+ "US nonfarm payroll employment data, total nonfarm employees seasonally adjusted, BLS Employment Situation, October 2026, monthly job gains, FRED PAYEMS series": [
+  "fred",
+  "treasury_fiscal",
+  "gdelt_doc"
+ ],
+ "BLS Employment Situation release schedule for November 2026, when is the October 2026 jobs report released": [
+  "fred",
+  "github",
+  "sec_edgar",
+  "gdelt_doc"
+ ],
+ "Prediction market prices or forecasts for US nonfarm payrolls October 2026": [
+  "polymarket",
+  "kalshi",
+  "metaculus",
+  "fred",
+  "cboe_vix",
+  "coinbase_candles",
+  "gdelt_doc"
+ ],
+ "Scheduled Falcon 9 and Falcon Heavy orbital launch dates in October and November 2026, including upcoming and recent launches": [
+  "launch_library",
+  "gdelt_doc"
+ ],
+ "SpaceX Falcon 9 Falcon Heavy launch schedule 2026 upcoming launches and launch cadence history": [
+  "launch_library",
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "Mass shootings in the United States in 2026, from the Mass Shooting Tracker database, monthly counts": [
+  "fred",
+  "world_bank",
+  "gdelt_doc"
+ ],
+ "Mass Shooting Tracker website monthly US mass shooting counts for 2026": [
+  "fred",
+  "gdelt_doc"
+ ],
+ "US mass shootings by month 2026 and recent months, count of incidents": [
+  "fred",
+  "gdelt_doc"
+ ],
+ "prediction market prices on number of US mass shootings in 2026": [
+  "polymarket",
+  "kalshi",
+  "metaculus",
+  "cboe_vix",
+  "fred",
+  "coinbase_candles",
+  "gdelt_doc"
+ ],
+ "CDC Travel Health Notices (THN) issued in October 2026, North American countries, travel notices list": [
+  "federal_register",
+  "who_outbreaks",
+  "world_bank",
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "Great white shark Percy Ocearch tracker location ping data 2026": [
+  "gdelt_doc"
+ ],
+ "Ocearch shark Percy GPS location coordinates Atlantic November 2026": [
+  "gdelt_doc"
+ ],
+ "Percy great white shark tagged 2026 location position where is it": [
+  "gdelt_doc"
+ ],
+ "Ocearch shark tracker API coordinates latitude longitude": [
+  "gdelt_doc"
+ ],
+ "Donald Trump current approval rating and recent daily/weekly history from polling aggregators (FiveThirtyEight, 538/Silver, RealClearPolitics, Gallup, approval ratings tracker) as of October 2026": [
+  "wikipedia",
+  "fred",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Nate Silver Silver Bulletin Trump approval rating tracker value, csv data, approve column, recent values October 2026": [
+  "fred",
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "2026 US midterm election prediction market prices for House/Senate control, and any prediction markets on Trump approval rating": [
+  "polymarket",
+  "kalshi",
+  "metaculus",
+  "fred",
+  "cboe_vix",
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "Current manager of Real Madrid CF football club and recent managerial changes, October 2026": [
+  "gdelt_doc"
+ ],
+ "Real Madrid CF La Liga 2026-27 current league standings and recent results": [
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "Prediction market odds on whether Jose Mourinho remains Real Madrid manager December 2026, Metaculus": [
+  "metaculus",
+  "polymarket",
+  "kalshi",
+  "cboe_vix",
+  "gdelt_doc"
+ ],
+ "OpenRouter total weekly token usage across models, as reported on the OpenRouter rankings top-models weekly usage chart": [
+  "gdelt_doc",
+  "arxiv",
+  "coinbase_candles"
+ ],
+ "OpenRouter token usage volume per week history, tokens processed per week": [
+  "coinbase_candles",
+  "world_bank",
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "OpenRouter rankings API token usage JSON, top models weekly usage, tokens per week": [
+  "coinbase_candles",
+  "wikipedia",
+  "world_bank",
+  "gdelt_doc"
+ ],
+ "Panama Canal Gatun Lake official water level, daily, October 2026, feet, Panama Canal Authority": [
+  "imf_portwatch",
+  "gdelt_doc"
+ ],
+ "Panama Canal drought water level transit restrictions 2026": [
+  "imf_portwatch",
+  "gdelt_doc"
+ ],
+ "Gatun Lake lake water level gauge reading in feet hydrology daily observation": [
+  "gdelt_doc"
+ ],
+ "US approval of $10 billion exchange stabilization facility or currency swap for Pakistan, 2026": [
+  "fred",
+  "kalshi",
+  "coinbase_candles",
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "Pakistan rupee exchange rate and foreign reserves, currency swap lines with US, recent history 2025-2026": [
+  "fred",
+  "kalshi",
+  "coinbase_candles",
+  "wikipedia",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Number of recruiting clinicaltrials.gov studies with LLM-based Chatbot intervention, current count and history": [
+  "clinicaltrials",
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "clinicaltrials.gov search LLM-based chatbot recruiting studies count": [
+  "clinicaltrials",
+  "gdelt_doc"
+ ],
+ "Whether Donald Trump and Vladimir Putin met in person in 2026, any summit or bilateral meeting between the US president and Russian president scheduled or occurred in 2026": [
+  "gdelt_doc"
+ ],
+ "Russia attendance at APEC 2026 summit in China November 18-19 2026, whether Putin will attend": [
+  "gdelt_doc",
+  "metaculus",
+  "world_bank"
+ ],
+ "Prediction market prices for Trump Putin meeting before December 2026, metaculus or poll forecast on Trump-Putin meeting 2026": [
+  "polymarket",
+  "kalshi",
+  "metaculus",
+  "gdelt_doc",
+  "cboe_vix",
+  "fred"
+ ],
+ "Brazil 2026 presidential election first round official results, vote share by candidate, TSE Tribunal Superior Eleitoral": [
+  "wikipedia",
+  "gdelt_doc",
+  "sec_edgar"
+ ],
+ "Brazil 2026 presidential election runoff opinion polls Lula Flávio Bolsonaro second round": [
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "prediction market odds Brazil 2026 presidential election Lula Flávio Bolsonaro winner": [
+  "polymarket",
+  "kalshi",
+  "metaculus",
+  "wikipedia",
+  "gdelt_doc",
+  "cboe_vix"
+ ],
+ "Donald Trump approval rating current and recent values from Nate Silver tracker or similar polling aggregate": [
+  "wikipedia",
+  "fred",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Trump approval rating October 2026 polling data": [
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "DeFlock.org number of license plate readers (LPRs) mapped in the USA, OpenStreetMap license plate reader cameras count": [
+  "wikipedia_pageviews",
+  "gdelt_doc"
+ ],
+ "OpenStreetMap license plate reader cameras in USA, traffic monitoring cameras, ALPR database count": [
+  "wikipedia_pageviews",
+  "imf_portwatch",
+  "gdelt_doc"
+ ],
+ "OpenStreetMap Overpass API query camera=license_plate_reader highway traffic monitoring": [
+  "wikipedia_pageviews",
+  "imf_portwatch",
+  "gdelt_doc"
+ ],
+ "DeFlock license plate reader database statistics count United States": [
+  "world_bank",
+  "treasury_fiscal",
+  "gdelt_doc"
+ ],
+ "DeFlock.org website statistics, number of ALPR cameras mapped": [
+  "world_bank",
+  "treasury_fiscal",
+  "gdelt_doc"
+ ],
+ "automated license plate reader count United States 2025 2026": [
+  "gdelt_doc"
+ ],
+ "query OpenStreetMap Overpass API for tagged features in a country bounding box": [
+  "world_bank",
+  "gdelt_doc"
+ ],
+ "web scraping a website to read displayed statistics, or HTTP GET a URL": [
+  "world_bank",
+  "treasury_fiscal",
+  "gdelt_doc"
+ ],
+ "OpenStreetMap data, osm, overpass, tags, nodes, ways, relations": [
+  "gdelt_doc"
+ ],
+ "deflock license plate reader map": [
+  "gdelt_doc"
+ ],
+ "Bundesliga 2026/27 Matchday 6 fixtures and results, October 16-17 2026, full-time scores": [
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "German Bundesliga schedule 2026-27 season matchday 6 fixture list and scores": [
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "2026 Terminator Weigh-Off pumpkin competition winner weight results": [
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "pumpkin weighing competition 2026 winner pound record": [
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "Status of US-mediated Russia-Ukraine talks on an energy-infrastructure ceasefire in October 2026; any scheduled or confirmed negotiating round between October 15 and October 17 2026; statements from Ukraine, Russia, or US envoys (Kushner, Witkoff)": [
+  "gdelt_doc",
+  "fred"
+ ],
+ "Prediction market prices for a Russia-Ukraine energy ceasefire negotiation meeting in mid-October 2026, e.g. Metaculus, Polymarket, or Kalshi": [
+  "polymarket",
+  "kalshi",
+  "metaculus",
+  "fred",
+  "gdelt_doc",
+  "cboe_vix"
+ ],
+ "Bitcoin BTC USD price current and historical daily close price recent days 2026": [
+  "coinbase_candles",
+  "fred",
+  "polymarket",
+  "cboe_vix",
+  "imf_portwatch",
+  "gdelt_doc"
+ ],
+ "Current and forecast active tropical cyclones in the Eastern Pacific, National Hurricane Center advisories and tropical weather outlook for October 2026": [
+  "nhc_storms",
+  "nhc_outlook",
+  "nhc_history",
+  "iem_asos",
+  "kalshi",
+  "treasury_fiscal",
+  "gdelt_doc"
+ ],
+ "NHC tropical cyclone track and forecast data, current named storms in Eastern Pacific and Central Pacific October 2026": [
+  "nhc_history",
+  "nhc_storms",
+  "nhc_outlook",
+  "polymarket",
+  "kalshi",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "NHC tropical cyclone forecast track cone, forecast positions and wind speeds for an active storm, 7-day forecast": [
+  "nhc_outlook",
+  "nhc_storms",
+  "nhc_history",
+  "polymarket",
+  "kalshi",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "2026 Brazilian presidential election results, first round October 4 2026, Flávio Bolsonaro vs Lula vote counts and percentages": [
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "2026 Brazilian presidential election prediction market prices, betting odds for run-off winner": [
+  "polymarket",
+  "kalshi",
+  "metaculus",
+  "cboe_vix",
+  "fred",
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "Brazilian presidential election run-off history, second round winner take rate, past 40 years": [
+  "wikipedia",
+  "gdelt_doc",
+  "fred",
+  "metaculus"
+ ],
+ "Anthropic Claude Haiku 5.5 model release, Anthropic API release notes, model availability claude-haiku-5-5": [
+  "fred",
+  "github",
+  "arxiv",
+  "treasury_fiscal",
+  "gdelt_doc"
+ ],
+ "Anthropic Claude model release schedule October 2026, Claude 5.5 family launch dates": [
+  "launch_library",
+  "arxiv",
+  "fred",
+  "github",
+  "gdelt_doc"
+ ],
+ "Zcash ZEC current price and recent daily price history in USD": [
+  "coinbase_candles",
+  "fred",
+  "polymarket",
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "Zcash ZEC 30-day price history high low open close": [
+  "coinbase_candles",
+  "cboe_vix",
+  "fred",
+  "imf_portwatch",
+  "wikipedia",
+  "github",
+  "gdelt_doc"
+ ],
+ "cryptocurrency prediction market price or odds for Zcash ZEC reaching 2000 dollars": [
+  "polymarket",
+  "kalshi",
+  "metaculus",
+  "coinbase_candles",
+  "cboe_vix",
+  "fred",
+  "gdelt_doc"
+ ],
+ "US spot Bitcoin ETF daily net fund flows (creations/redemptions), aggregate total across all funds, most recent available data": [
+  "coinbase_candles",
+  "gdelt_doc"
+ ],
+ "Bitcoin price and recent market history for context on spot ETF flows, October 2026": [
+  "polymarket",
+  "coinbase_candles",
+  "kalshi",
+  "fred",
+  "cboe_vix",
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "Bitcoin ETF flows, IBIT FBTC GBTC daily net creations redemptions, Farside Investors data": [
+  "coinbase_candles",
+  "gdelt_doc"
+ ],
+ "2026 MLB American League Division Series results, standings, and ALCS participants": [
+  "wikipedia",
+  "fred",
+  "gdelt_doc"
+ ],
+ "2026 MLB postseason schedule and results": [
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "2026 MLB ALCS prediction market odds or forecast": [
+  "polymarket",
+  "kalshi",
+  "metaculus",
+  "cboe_vix",
+  "gdelt_doc"
+ ],
+ "Supreme Court of India judges appointment notifications 2026, oath ceremony for Justice Sunita Agarwal, Justice Devendra Kumar Upadhyaya, Justice Aparesh Kumar Singh": [
+  "world_bank",
+  "gdelt_doc"
+ ],
+ "India Supreme Court new judges sworn in October 2026, appointment under Article 124": [
+  "gdelt_doc",
+  "world_bank"
+ ],
+ "Federal court docket for Tiede v. Collier / Texas Citizens United for Rehabilitation of Errants v. Lumpkin, No. 1:23-cv-01004, Western District of Texas — any notice of appeal filed after September 22, 2026, including filing dates and docket entries": [
+  "federal_register",
+  "sec_edgar",
+  "fred",
+  "treasury_fiscal",
+  "gdelt_doc"
+ ],
+ "Fifth Circuit notice of appeal TDCJ Texas prison air conditioning injunction Judge Pitman September 2026": [
+  "federal_register",
+  "gdelt_doc"
+ ],
+ "News reporting on Texas TDCJ appeal of Judge Pitman prison heat air-conditioning injunction, October 2026": [
+  "gdelt_doc"
+ ],
+ "PACER CourtListener RECAP federal court case docket entries search by case number 1:23-cv-01004 Western District of Texas": [
+  "federal_register",
+  "who_outbreaks",
+  "fred",
+  "treasury_fiscal",
+  "gdelt_doc"
+ ],
+ "Russia Ukraine US trilateral negotiation meeting October 2026 schedule date venue": [
+  "gdelt_doc"
+ ],
+ "prediction market Russia Ukraine war trilateral talks October 2026": [
+  "polymarket",
+  "kalshi",
+  "gdelt_doc",
+  "metaculus",
+  "cboe_vix"
+ ],
+ "IAEA Director General statements and updates on the situation in Ukraine, especially Zaporizhzhia Nuclear Power Plant offsite grid power connection status, 2026": [
+  "gdelt_doc"
+ ],
+ "Current status of Zaporizhzhia Nuclear Power Plant (ZNPP) offsite power supply and grid connection as of October 2026": [
+  "fred",
+  "gdelt_doc"
+ ],
+ "IAEA news releases, press releases, statements on Ukraine nuclear safety, Zaporizhzhia plant status": [
+  "github",
+  "gdelt_doc",
+  "fred",
+  "federal_register",
+  "openfda"
+ ],
+ "Nuclear power plant outage, reactor status, spent fuel cooling, Zaporizhzhia ZNPP October 2026": [
+  "gdelt_doc"
+ ],
+ "Alex Murdaugh retrial October 16 2026 hearing Judge McCaslin discovery motion ruling": [
+  "gdelt_doc"
+ ],
+ "Metaculus prediction market price Alex Murdaugh October 2026 hearing discovery": [
+  "polymarket",
+  "kalshi",
+  "metaculus",
+  "coinbase_candles",
+  "cboe_vix",
+  "fred",
+  "gdelt_doc"
+ ],
+ "FITSNews Alex Murdaugh October 2026 pretrial hearing Lexington County": [
+  "gdelt_doc"
+ ],
+ "Current RealClearPolitics RCP Average for President Trump job approval, approve and disapprove percentages and spread, as of early October 2026": [
+  "wikipedia",
+  "who_outbreaks",
+  "gdelt_doc"
+ ],
+ "Prediction market odds/price for Trump RealClearPolitics approval rating or net approval in mid-October 2026": [
+  "polymarket",
+  "kalshi",
+  "metaculus",
+  "wikipedia",
+  "fred",
+  "coinbase_candles",
+  "gdelt_doc"
+ ],
+ "Madrid Puerta del Sol housing protest encampment acampada Sindicato de Inquilinas tents 2026 status eviction": [
+  "gdelt_doc",
+  "fred"
+ ],
+ "Madrid Puerta del Sol acampada vivienda October 2026 eviction court order TSJM": [
+  "federal_register",
+  "gdelt_doc"
+ ],
+ "PJM Reliability Backstop Procurement RBP auction new start date announcement October 2026 FERC ER26-3380": [
+  "gdelt_doc",
+  "treasury_fiscal"
+ ],
+ "PJM Interconnection news announcements RPM capacity market October 2026": [
+  "gdelt_doc",
+  "polymarket",
+  "kalshi",
+  "cboe_vix",
+  "metaculus"
+ ],
+ "FERC docket ER26-3380 suspension order PJM reliability backstop": [
+  "federal_register",
+  "gdelt_doc"
+ ],
+ "Historical daily closing price of Xtend AI Robotics (XTND) NYSE stock, recent closes in October 2026": [
+  "coinbase_candles",
+  "cboe_vix",
+  "imf_portwatch",
+  "fdic_failures",
+  "fred",
+  "polymarket",
+  "gdelt_doc"
+ ],
+ "Verkhovna Rada Ukraine plenary sitting schedule October 2026 martial law mobilization extension vote": [
+  "gdelt_doc"
+ ],
+ "Ukraine martial law extension bill October 2026 Verkhovna Rada vote results": [
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "Ukraine general mobilization extension 2026 parliamentary vote status": [
+  "gdelt_doc"
+ ],
+ "Bo Nix 2026 season passing statistics game log, Denver Broncos quarterback passing yards per game 2026": [
+  "world_bank",
+  "treasury_fiscal",
+  "gdelt_doc"
+ ],
+ "Denver Broncos vs Seattle Seahawks game scheduled October 15 2026 Week 6, game schedule and status": [
+  "gdelt_doc"
+ ],
+ "prediction market odds for Bo Nix passing yards over 250 against Seattle October 2026": [
+  "polymarket",
+  "kalshi",
+  "metaculus",
+  "cboe_vix",
+  "gdelt_doc"
+ ],
+ "Peru regional elections October 2026 ONPE official results gubernatorial vote percentages by region": [
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "Peru 2026 regional gubernatorial election results vote share by department 25 regions": [
+  "wikipedia",
+  "gdelt_doc",
+  "sec_edgar"
+ ],
+ "prediction market Peru 2026 regional elections runoff second round gubernatorial": [
+  "polymarket",
+  "kalshi",
+  "metaculus",
+  "cboe_vix",
+  "gdelt_doc"
+ ],
+ "Delta Air Lines (DAL) stock current price and recent daily closing prices, October 2026": [
+  "coinbase_candles",
+  "fred",
+  "cboe_vix",
+  "polymarket",
+  "sec_edgar",
+  "imf_portwatch",
+  "gdelt_doc"
+ ],
+ "Delta Air Lines DAL Q3 2026 earnings results, reported October 9 2026, adjusted EPS": [
+  "sec_edgar",
+  "gdelt_doc",
+  "wikipedia",
+  "fred"
+ ],
+ "DAL Delta Air Lines NYSE stock price history daily close 2026": [
+  "coinbase_candles",
+  "cboe_vix",
+  "sec_edgar",
+  "fred",
+  "imf_portwatch",
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "prediction market for Delta Air Lines stock price October 2026": [
+  "polymarket",
+  "kalshi",
+  "metaculus",
+  "cboe_vix",
+  "sec_edgar",
+  "coinbase_candles",
+  "gdelt_doc"
+ ],
+ "Delta Air Lines Q3 2026 earnings 8-K filing SEC": [
+  "sec_edgar",
+  "federal_register",
+  "gdelt_doc"
+ ],
+ "Osaka Metropolitan University (OMU) announcement that online/remote classes resumed after the October 2, 2026 information-systems outage; status of online classes resumption as of mid-October 2026": [
+  "openfda",
+  "gdelt_doc"
+ ],
+ "MSCI consultation results announcement on eligibility of non-operating companies for Global Investable Market Indexes 2026, Strategy MSTR eligibility decision": [
+  "cboe_vix",
+  "kalshi",
+  "wikipedia",
+  "polymarket",
+  "gdelt_doc",
+  "who_outbreaks"
+ ],
+ "MSTR MicroStrategy MSCI index inclusion status October 2026": [
+  "cboe_vix",
+  "fred",
+  "gdelt_doc"
+ ],
+ "S&P 500 index (^GSPC) recent daily closing prices and current level, October 2026": [
+  "cboe_vix",
+  "fred",
+  "coinbase_candles",
+  "imf_portwatch",
+  "gdelt_doc"
+ ],
+ "S&P 500 all-time record high closing price 2026": [
+  "coinbase_candles",
+  "cboe_vix",
+  "fred",
+  "wikipedia",
+  "polymarket",
+  "gdelt_doc"
+ ],
+ "prediction market price for S&P 500 new record high October 2026": [
+  "polymarket",
+  "kalshi",
+  "coinbase_candles",
+  "metaculus",
+  "cboe_vix",
+  "fred",
+  "gdelt_doc"
+ ],
+ "Bolivia Supreme Decree 5716 diesel subsidy repeal abrogation suspension October 2026": [
+  "federal_register",
+  "gdelt_doc"
+ ],
+ "Bolivia diesel price decree 5716 news October 2026 government announcement": [
+  "gdelt_doc",
+  "coinbase_candles",
+  "fred",
+  "treasury_fiscal",
+  "polymarket"
+ ],
+ "Bolivia political crisis mobilization protest October 2026 Evo Morales transport strike": [
+  "gdelt_doc",
+  "fdic_failures"
+ ],
+ "Peru Piura dengue deaths 2026 cumulative CDC-MINSA DGE sala situacional": [
+  "who_outbreaks",
+  "gdelt_doc"
+ ],
+ "Peru dengue deaths by department 2026 epidemiological surveillance data": [
+  "who_outbreaks",
+  "gdelt_doc"
+ ],
+ "Zcash ZEC current price, market cap, and market cap rank on CoinGecko as of October 2026": [
+  "polymarket",
+  "kalshi",
+  "cboe_vix",
+  "metaculus",
+  "coinbase_candles",
+  "fred",
+  "gdelt_doc"
+ ],
+ "Zcash ZEC recent price history and market cap history for late September and October 2026": [
+  "polymarket",
+  "wikipedia",
+  "kalshi",
+  "fred",
+  "coinbase_candles",
+  "cboe_vix",
+  "gdelt_doc"
+ ],
+ "Top 10 cryptocurrencies by market cap on CoinGecko as of early October 2026": [
+  "polymarket",
+  "kalshi",
+  "cboe_vix",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "NFL box score / final score for Seattle Seahawks at Denver Broncos Thursday Night Football game October 15 2026": [
+  "federal_register",
+  "gdelt_doc"
+ ],
+ "NFL sportsbook betting line over/under total points for Seahawks vs Broncos October 15 2026 game": [
+  "polymarket",
+  "kalshi",
+  "gdelt_doc"
+ ],
+ "Denver Colorado weather forecast for October 15 2026, Empower Field at Mile High": [
+  "iem_asos",
+  "coinbase_candles",
+  "polymarket",
+  "kalshi",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "NFL 2026 season team statistics and standings for Seattle Seahawks and Denver Broncos through week 3": [
+  "world_bank",
+  "treasury_fiscal",
+  "gdelt_doc"
+ ],
+ "RIVM Netherlands West Nile virus confirmed human cases 2026 cumulative total weekly update": [
+  "who_outbreaks",
+  "gdelt_doc"
+ ],
+ "Netherlands West Nile fever westnijlkoorts outbreak 2026 patient count RIVM": [
+  "who_outbreaks",
+  "openfda",
+  "gdelt_doc"
+ ],
+ "Netherlands West Nile virus October 2026 news RIVM update case count": [
+  "who_outbreaks",
+  "gdelt_doc"
+ ],
+ "Netherlands 2026 West Nile virus outbreak epidemiology statistics": [
+  "who_outbreaks",
+  "world_bank",
+  "openfda",
+  "treasury_fiscal",
+  "gdelt_doc"
+ ],
+ "Public declarations of candidacy for the 2027 FIFA presidential election (March 2027, 77th FIFA Congress, Rabat Morocco); who besides Gianni Infantino has announced they are running; as of October 2026": [
+  "sec_edgar",
+  "treasury_fiscal",
+  "wikipedia",
+  "wikipedia_pageviews",
+  "gdelt_doc"
+ ],
+ "Prediction market odds on whether a challenger to Gianni Infantino will run in the 2027 FIFA presidential election; Metaculus or Polymarket FIFA president 2027": [
+  "metaculus",
+  "polymarket",
+  "kalshi",
+  "gdelt_doc",
+  "cboe_vix",
+  "wikipedia"
+ ],
+ "Zcash (ZEC) current price and recent daily historical price in USD, with daily close values, for October 2026": [
+  "coinbase_candles",
+  "fred",
+  "cboe_vix",
+  "polymarket",
+  "imf_portwatch",
+  "gdelt_doc"
+ ],
+ "Zcash ZEC prediction market prices or odds for the price on October 15 2026": [
+  "polymarket",
+  "kalshi",
+  "metaculus",
+  "fred",
+  "coinbase_candles",
+  "cboe_vix",
+  "gdelt_doc"
+ ],
+ "IMF World Economic Outlook October 2026 projected global GDP growth rate for 2026": [
+  "fred",
+  "world_bank",
+  "metaculus",
+  "who_outbreaks",
+  "gdelt_doc"
+ ],
+ "IMF WEO 2026 global growth projection history revisions January April July 2026": [
+  "world_bank",
+  "who_outbreaks",
+  "fred",
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "US military strikes on Iran October 2026, US Central Command announcements, DoD statements on Iran operations": [
+  "gdelt_doc"
+ ],
+ "US-Iran conflict 2026 military strikes air campaign timeline recent events": [
+  "gdelt_doc",
+  "wikipedia"
+ ],
+ "prediction market odds US strike Iran October 2026": [
+  "polymarket",
+  "kalshi",
+  "metaculus",
+  "gdelt_doc",
+  "cboe_vix"
+ ],
+ "FXI iShares China Large-Cap ETF closing price historical data recent trades": [
+  "coinbase_candles",
+  "imf_portwatch",
+  "world_bank",
+  "fred",
+  "polymarket",
+  "gdelt_doc"
+ ],
+ "Chinese stock market CSI 300 index or FTSE China 50 recent performance": [
+  "cboe_vix",
+  "fred",
+  "polymarket",
+  "kalshi",
+  "sec_edgar",
+  "world_bank",
+  "gdelt_doc"
+ ],
+ "US-China trade tariff news October 2026": [
+  "world_bank",
+  "gdelt_doc",
+  "imf_portwatch",
+  "coinbase_candles"
+ ],
+ "UODO Polish data protection office announcements news about FELG Dent data breach October 2026": [
+  "gdelt_doc",
+  "cisa_kev"
+ ],
+ "FELG Dent breach news September October 2026 Poland dental data breach": [
+  "cisa_kev",
+  "gdelt_doc"
+ ],
+ "UODO medical sector data breach announcements inspections 2026": [
+  "gdelt_doc",
+  "openfda",
+  "cisa_kev"
+ ],
+ "ICE Brent Crude futures settlement price for December 2026 contract CBZ26 on October 16, 2026 (historical futures settlement)": [
+  "kalshi",
+  "coinbase_candles",
+  "fred",
+  "polymarket",
+  "gdelt_doc"
+ ],
+ "Barchart historical futures price data for Brent crude CBZ26": [
+  "coinbase_candles",
+  "fred",
+  "polymarket",
+  "gdelt_doc"
+ ],
+ "current Brent crude oil futures price October 2026": [
+  "fred",
+  "coinbase_candles",
+  "polymarket",
+  "gdelt_doc"
+ ],
+ "Rajasthan 2026 Panchayat Zila Parishad Panchayat Samiti election Phase 1 voter turnout October 13 2026": [
+  "clinicaltrials",
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "Rajasthan State Election Commission 2026 panchayat election schedule phases dates": [
+  "wikipedia",
+  "gdelt_doc",
+  "clinicaltrials"
+ ],
+ "Rajasthan panchayat election historical voter turnout percentage 2020 2021 Zila Parishad Panchayat Samiti": [
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "DFB German Football Association official statement against Infantino FIFA presidency October 2026": [
+  "gdelt_doc"
+ ],
+ "FIFA presidency Infantino opposition European federations DFB formal statement 2026": [
+  "gdelt_doc"
+ ],
+ "German news DFB Präsidium Infantino statement October 2026": [
+  "gdelt_doc"
+ ],
+ "FIFA congress 2027 Infantino election nomination candidates October 2026": [
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "KNVB Austria France football association Infantino support withdrawal October 2026": [
+  "gdelt_doc"
+ ],
+ "NOAA CO-OPS station 9410230 La Jolla CA observed 6-minute water level MLLW datum for October 15 and 16, 2026": [
+  "iem_asos",
+  "gdelt_doc"
+ ],
+ "NOAA tide and current water levels station 9410230 La Jolla tide predictions and observed sea level": [
+  "iem_asos",
+  "gdelt_doc"
+ ],
+ "Southern California sea level anomaly El Nino marine heat wave October 2026 NOAA sea level": [
+  "cpc_enso",
+  "gdelt_doc"
+ ],
+ "tide gauge sea level observation station feet MLLW daily high tide water level record": [
+  "iem_asos",
+  "coinbase_candles",
+  "cboe_vix",
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "Alternative.me Crypto Fear and Greed Index historical data and recent values, including the API at api.alternative.me/fng": [
+  "cboe_vix",
+  "coinbase_candles",
+  "fred",
+  "gdelt_doc"
+ ],
+ "crypto fear and greed index daily value 0 to 100 alternative.me sentiment gauge bitcoin": [
+  "coinbase_candles",
+  "cboe_vix",
+  "fred",
+  "gdelt_doc"
+ ],
+ "alternative me fng historical readings limit 0 fear greed index October 2026": [
+  "cboe_vix",
+  "fred",
+  "gdelt_doc"
+ ],
+ "Ayuntamiento de València school closure announcement October 2026, suspension of in-person classes Valencia city": [
+  "gdelt_doc"
+ ],
+ "AEMET weather warning Valencia Spain October 15-16 2026 rainfall storm DANA": [
+  "iem_asos",
+  "openfda",
+  "gdelt_doc"
+ ],
+ "News reports Las Provincias Levante-EMV Valencia school suspension October 2026": [
+  "gdelt_doc",
+  "sec_edgar"
+ ],
+ "AEMET forecast weather warning Spain Mediterranean coastal rain DANA medium-range forecast": [
+  "iem_asos",
+  "kalshi",
+  "polymarket",
+  "metaculus",
+  "openfda",
+  "gdelt_doc"
+ ],
+ "prediction market price weather DANA Valencia school closure": [
+  "polymarket",
+  "kalshi",
+  "iem_asos",
+  "metaculus",
+  "coinbase_candles",
+  "cboe_vix",
+  "gdelt_doc"
+ ],
+ "AAA national average retail price of regular unleaded gasoline in the United States, daily, October 2026": [
+  "world_bank",
+  "treasury_fiscal",
+  "coinbase_candles",
+  "fred",
+  "wikipedia",
+  "polymarket",
+  "gdelt_doc"
+ ],
+ "US regular gasoline retail price history, national average, recent weeks, 2026": [
+  "wikipedia",
+  "fred",
+  "treasury_fiscal",
+  "coinbase_candles",
+  "world_bank",
+  "polymarket",
+  "gdelt_doc"
+ ],
+ "WTI and Brent crude oil futures prices, current and recent, October 2026": [
+  "fred",
+  "coinbase_candles",
+  "gdelt_doc"
+ ],
+ "U.S. spot Bitcoin ETF cumulative net inflow SoSoValue Farside daily flows October 2026": [
+  "coinbase_candles",
+  "gdelt_doc"
+ ],
+ "Bitcoin ETF daily net flows cumulative total October 2026": [
+  "coinbase_candles",
+  "gdelt_doc"
+ ],
+ "Bitcoin ETF fund flows Farside sosovalue IBIT cumulative inflow data": [
+  "coinbase_candles",
+  "gdelt_doc"
+ ],
+ "SoSoValue Bitcoin ETF dashboard net flow": [
+  "coinbase_candles",
+  "gdelt_doc"
+ ],
+ "South Korean National Assembly confirmation hearing schedule for Kim Ji-yong SCIA chief nominee October 2026": [
+  "treasury_fiscal",
+  "world_bank",
+  "gdelt_doc"
+ ],
+ "South Korea National Assembly Public Administration and Security Committee meeting schedule October 2026": [
+  "treasury_fiscal",
+  "cisa_kev",
+  "sec_edgar",
+  "wikipedia_pageviews",
+  "gdelt_doc",
+  "federal_register"
+ ],
+ "Kim Ji-yong Serious Crimes Investigation Agency nomination confirmation hearing date": [
+  "federal_register",
+  "gdelt_doc"
+ ],
+ "South Korea news reporting Yonhap October 2026 legislative committee hearing schedule": [
+  "gdelt_doc"
+ ],
+ "Northern Ireland Court of Appeal judgment on Garvaghy Road Residents' Coalition appeal against Parades Commission Drumcree parade determination, October 2026": [
+  "gdelt_doc"
+ ],
+ "judiciaryni.uk judicial decisions Northern Ireland Court of Appeal October 2026": [
+  "gdelt_doc"
+ ],
+ "Belfast Telegraph Irish News BBC NI reporting on Drumcree Garvaghy Road Court of Appeal hearing October 5 2026": [
+  "gdelt_doc"
+ ],
+ "CBOT ZWZ26 Soft Red Winter Wheat futures December 2026 contract settlement price price history": [
+  "kalshi",
+  "coinbase_candles",
+  "fred",
+  "polymarket",
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "CME Group CBOT wheat futures settlement prices historical quotes 2026": [
+  "kalshi",
+  "coinbase_candles",
+  "fred",
+  "gdelt_doc"
+ ],
+ "Federal lawsuit filed in US district court regarding Texas DPS voter registration transmission failure, filed on or after October 2025, involving Stringer v. Hughs settlement or NVRA motor voter claims": [
+  "sec_edgar",
+  "federal_register",
+  "fdic_failures",
+  "kalshi",
+  "who_outbreaks",
+  "fred",
+  "gdelt_doc"
+ ],
+ "Texas Tribune reporting on Texas DPS voter registration transmission failure lawsuit October 2026": [
+  "sec_edgar",
+  "fdic_failures",
+  "gdelt_doc",
+  "who_outbreaks"
+ ],
+ "Democracy Docket federal court cases Texas voter registration 2026": [
+  "federal_register",
+  "sec_edgar",
+  "who_outbreaks",
+  "fred",
+  "treasury_fiscal",
+  "gdelt_doc"
+ ],
+ "TEPCO Fukushima Daiichi decommissioning news releases October 2026 robotic arm Unit 2 PCV X-6": [
+  "gdelt_doc",
+  "github"
+ ],
+ "Fukushima Daiichi Unit 2 robotic arm operation status suspension October 2026": [
+  "gdelt_doc"
+ ],
+ "Japan nuclear news search Fukushima TEPCO October 2026 news articles": [
+  "gdelt_doc"
+ ],
+ "news article search API for TEPCO Fukushima decommissioning October 2026": [
+  "gdelt_doc",
+  "wikipedia_pageviews"
+ ],
+ "OpenAI ChatGPT release notes recent entries October 2026, new GPT model announcements": [
+  "gdelt_doc",
+  "fred",
+  "github",
+  "arxiv",
+  "treasury_fiscal"
+ ],
+ "OpenAI news page recent announcements GPT model releases 2026": [
+  "gdelt_doc",
+  "arxiv",
+  "fred",
+  "github"
+ ],
+ "prediction market prices for OpenAI new GPT model release October 2026": [
+  "polymarket",
+  "kalshi",
+  "fred",
+  "metaculus",
+  "cboe_vix",
+  "github",
+  "gdelt_doc"
+ ],
+ "Strategy Inc MSTR bitcoin purchases weekly 8-K filings SEC October 2026": [
+  "sec_edgar",
+  "federal_register",
+  "coinbase_candles",
+  "gdelt_doc"
+ ],
+ "Strategy bitcoin ledger purchases October 2026": [
+  "coinbase_candles",
+  "gdelt_doc"
+ ],
+ "Supreme Court of India sitting judges list, current composition, women judges": [
+  "wikipedia",
+  "world_bank",
+  "gdelt_doc"
+ ],
+ "Supreme Court of India Judge Sunita Agarwal appointment oath swearing in 2026": [
+  "world_bank",
+  "gdelt_doc"
+ ],
+ "India Supreme Court new judge appointment notification October 2026": [
+  "world_bank",
+  "gdelt_doc"
+ ],
+ "BIST 100 index XU100 closing level historical data recent values October 2026": [
+  "cboe_vix",
+  "coinbase_candles",
+  "fred",
+  "imf_portwatch",
+  "gdelt_doc"
+ ],
+ "Turkey Borsa Istanbul holiday calendar October 2026 market closures": [
+  "polymarket",
+  "kalshi",
+  "cboe_vix",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "prediction market prices forecast BIST 100 Turkish stock index level": [
+  "polymarket",
+  "kalshi",
+  "cboe_vix",
+  "metaculus",
+  "fred",
+  "sec_edgar",
+  "gdelt_doc"
+ ],
+ "ECDC weekly surveillance update for West Nile virus in humans 2026 season, number of European countries with locally-acquired WNV cases": [
+  "who_outbreaks",
+  "world_bank",
+  "gdelt_doc"
+ ],
+ "ECDC West Nile virus disease data surveillance 2026 weekly update countries affected": [
+  "who_outbreaks",
+  "world_bank",
+  "clinicaltrials",
+  "gdelt_doc"
+ ],
+ "Eurosurveillance ECDC disease surveillance weekly data West Nile virus 2026 season Europe countries": [
+  "who_outbreaks",
+  "world_bank",
+  "clinicaltrials",
+  "gdelt_doc"
+ ],
+ "West Nile virus cases Europe 2026 October latest update number of countries affected": [
+  "who_outbreaks",
+  "world_bank",
+  "gdelt_doc"
+ ],
+ "ISRO GSLV-F18 NVS-03 IRNSS-1L launch date October 2026 from Satish Dhawan Space Centre": [
+  "launch_library",
+  "gdelt_doc"
+ ],
+ "space launch schedule upcoming launches October 2026 India ISRO GSLV": [
+  "launch_library",
+  "world_bank",
+  "gdelt_doc"
+ ],
+ "Total campaign spending by all US Senate candidates in the 2026 election cycle, from the Federal Election Commission, cumulative spending by cycle": [
+  "treasury_fiscal",
+  "fred",
+  "wikipedia",
+  "gdelt_doc",
+  "federal_register"
+ ],
+ "Federal Election Commission campaign finance data, total spending and expenditures by Senate candidates, election cycle spending by the numbers": [
+  "fred",
+  "treasury_fiscal",
+  "wikipedia",
+  "gdelt_doc",
+  "federal_register"
+ ],
+ "US Senate election 2026 candidates spending campaign contributions total": [
+  "treasury_fiscal",
+  "wikipedia",
+  "gdelt_doc",
+  "fred"
+ ],
+ "UK government cabinet members as of July 2026 and any changes or resignations in cabinet positions between September 2026 and end of 2026": [
+  "treasury_fiscal",
+  "gdelt_doc"
+ ],
+ "News of UK cabinet minister resignations or removals September 2026": [
+  "gdelt_doc"
+ ],
+ "VIX index historical intraday high values, recent history": [
+  "coinbase_candles",
+  "cboe_vix",
+  "fred",
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "Prediction market prices for VIX volatility index high in October-December 2026": [
+  "cboe_vix",
+  "polymarket",
+  "kalshi",
+  "coinbase_candles",
+  "fred",
+  "metaculus",
+  "gdelt_doc"
+ ],
+ "Confirmed cases of Bundibugyo ebolavirus by country in 2026, WHO situation reports for the Congo Basin/DRC Ebola outbreak": [
+  "who_outbreaks",
+  "openfda",
+  "world_bank",
+  "sec_edgar",
+  "gdelt_doc"
+ ],
+ "Ebola outbreak case counts by country outside DRC in 2026, WHO AFRO external situation reports": [
+  "who_outbreaks",
+  "openfda",
+  "world_bank",
+  "sec_edgar",
+  "gdelt_doc"
+ ],
+ "Kennedy Center demolition plans, Trump demolition of Kennedy Center, Washington DC building demolition permits 2025 2026": [
+  "gdelt_doc"
+ ],
+ "prediction market odds on Kennedy Center demolition Trump 2027": [
+  "polymarket",
+  "kalshi",
+  "metaculus",
+  "cboe_vix",
+  "gdelt_doc"
+ ],
+ "2026 New Zealand general election date, results, party seats won by Labour and National Party": [
+  "wikipedia",
+  "gdelt_doc",
+  "treasury_fiscal",
+  "world_bank"
+ ],
+ "New Zealand election 2023 final results party seats Labour National": [
+  "wikipedia",
+  "gdelt_doc",
+  "federal_register",
+  "treasury_fiscal",
+  "world_bank"
+ ],
+ "2026 Atlantic hurricane season status so far: named storms, hurricanes, major hurricanes (Category 3+), ACE, as of late September 2026, from NHC/CPC data": [
+  "nhc_history",
+  "nhc_outlook",
+  "nhc_storms",
+  "cpc_enso",
+  "gdelt_doc"
+ ],
+ "Noaa/CPC official hurricane outlook for 2026 season, updated September 2026, probabilities for named storms, hurricanes, major hurricanes, ACE": [
+  "nhc_history",
+  "nhc_outlook",
+  "nhc_storms",
+  "cpc_enso",
+  "gdelt_doc"
+ ],
+ "Prediction market price (Polymarket, Metaculus, Manifold) for number of major Atlantic hurricanes in 2026 season": [
+  "polymarket",
+  "kalshi",
+  "metaculus",
+  "nhc_history",
+  "nhc_storms",
+  "nhc_outlook",
+  "gdelt_doc"
+ ],
+ "2026 Atlantic hurricane season: list of named storms so far (Arlene, Beryl, ...), which reached hurricane or major hurricane status, NHC advisory archive and season-to-date ACE": [
+  "nhc_history",
+  "nhc_storms",
+  "nhc_outlook",
+  "cisa_kev",
+  "wikipedia",
+  "gdelt_doc"
+ ],
+ "FIDE World Chess Championship 2026 match status and results, Gukesh vs Sindarov, official FIDE news on match progress": [
+  "wikipedia",
+  "gdelt_doc",
+  "world_bank"
+ ],
+ "Prediction market prices / odds for who will win the 2026 FIDE World Chess Championship": [
+  "polymarket",
+  "kalshi",
+  "metaculus",
+  "cboe_vix",
+  "fred",
+  "coinbase_candles",
+  "gdelt_doc"
+ ],
+ "Venezuela presidential election announcement, scheduled election date, 2026-2027": [
+  "gdelt_doc",
+  "wikipedia"
+ ],
+ "Prediction market prices on Venezuelan elections or Venezuela political outcomes 2026 2027": [
+  "polymarket",
+  "kalshi",
+  "metaculus",
+  "cboe_vix",
+  "fred",
+  "coinbase_candles",
+  "gdelt_doc"
+ ]
+}

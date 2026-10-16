@@ -316,6 +316,8 @@ async def get_multiple_choice_gpt_prediction(
     for i, run in enumerate(runs):
         transcripts.append(run.transcript)
         record = {"model": run.model, "valid": run.valid, "repaired": run.repaired}
+        if run.backup_for:
+            record["backup_for"] = run.backup_for
         if not run.valid:
             logger.warning(
                 "[ensemble] mc run %d (%s) dropped — unparseable option probabilities: %s",
@@ -333,6 +335,8 @@ async def get_multiple_choice_gpt_prediction(
         models.append(run.model)
         ensemble.append(record)
         repaired_note = " _(repaired)_" if run.repaired else ""
+        if run.backup_for:
+            repaired_note += f" _(backup for {short_model_name(run.backup_for)})_"
         comments.append(
             f"**Model: {run.model}**{repaired_note}\n\n"
             f"EXTRACTED_PROBABILITIES: {option_probabilities}\n\nAnswer: "
