@@ -5,51 +5,51 @@ It fetches open tournament questions, researches each one, asks an ensemble of L
 ## Current project structure
 
 ```text
-forecasting_bot.py          - CLI entry point, arg parsing, startup validation
-orchestrator.py             - per-question flow: research -> forecast -> artifacts -> submit
-config.py                   - env vars, constants, tournament aliases, ensemble pool
-llm_provider.py             - every endpoint the bot can reach (OpenRouter, OpenAI, SoCLaaS):
+bot/run/forecasting_bot.py          - CLI entry point, arg parsing, startup validation
+bot/run/orchestrator.py             - per-question flow: research -> forecast -> artifacts -> submit
+bot/config.py                   - env vars, constants, tournament aliases, ensemble pool
+bot/llm/provider.py             - every endpoint the bot can reach (OpenRouter, OpenAI, SoCLaaS):
                               the route table, request shaping, rate gates, pricing, preflight
-llm_client.py               - shared async LLM client, retries, truncation detection, transcripts
-monetary_cost_manager.py    - per-call token / cost / quota ledger and hard-limit enforcement
-metaculus_client.py         - Metaculus API: list posts, fetch details, submit, comment
+bot/llm/client.py               - shared async LLM client, retries, truncation detection, transcripts
+bot/llm/cost_manager.py    - per-call token / cost / quota ledger and hard-limit enforcement
+bot/run/metaculus_client.py         - Metaculus API: list posts, fetch details, submit, comment
 
-research/pipeline.py        - the six-stage research pipeline (see Research below)
-research/asknews_research.py / asknews_filter.py - news retrieval, then relevance filter
-research/serp_research.py   - SerpAPI search + the shared scrape/extract cycle engine
-research/tavily_research.py / firecrawl_research.py / firecrawl_scrape.py
-research/kalshi_research.py / manifold_research.py / polymarket_research.py
-research/evidence_plan.py   - decides what evidence the question actually needs
-query_maker.py              - search-query generation
-resolution_criteria_scraper.py - scrapes URLs found in the question's own text
-series_gate.py              - deterministic parser: is this payload a historical series?
-series_discovery.py         - free ladder to find the data behind a JS-rendered page
-series_reduce.py            - reduce a retrieved series to a ~2KB forecast-ready table
-compiler.py                 - distills all provider output into one evidence brief
+bot/research/pipeline.py        - the six-stage research pipeline (see Research below)
+bot/research/news/asknews_research.py / asknews_filter.py - news retrieval, then relevance filter
+bot/research/search/serp_research.py   - SerpAPI search + the shared scrape/extract cycle engine
+bot/research/search/tavily_research.py / firecrawl_research.py
+bot/research/markets/kalshi_research.py / manifold_research.py / polymarket_research.py
+bot/research/evidence_plan.py   - decides what evidence the question actually needs
+bot/research/search/query_maker.py              - search-query generation
+bot/research/resolution/resolution_criteria_scraper.py - scrapes URLs found in the question's own text
+bot/research/resolution/series_gate.py              - deterministic parser: is this payload a historical series?
+bot/research/resolution/series_discovery.py         - free ladder to find the data behind a JS-rendered page
+bot/research/resolution/series_reduce.py            - reduce a retrieved series to a ~2KB forecast-ready table
+bot/brief/compiler.py                 - distills all provider output into one evidence brief
 
-forecasters/base.py         - ensemble runner, repair retry, heterogeneous run
-forecasters/binary.py       - binary prompt, parser, median + tiebreaker
-forecasters/numeric.py      - numeric/discrete: mixtures, guardrails, CDF standardisation
-forecasters/multiple_choice.py - multiple-choice prompt, parser, aggregation
+bot/forecasters/base.py         - ensemble runner, repair retry, heterogeneous run
+bot/forecasters/binary.py       - binary prompt, parser, median + tiebreaker
+bot/forecasters/numeric.py      - numeric/discrete: mixtures, guardrails, CDF standardisation
+bot/forecasters/multiple_choice.py - multiple-choice prompt, parser, aggregation
 
-apiagent_bridge.py          - Python access to apiagent-kit's 24 public data APIs
+bot/research/apiagent/apiagent_bridge.py          - Python access to apiagent-kit's 24 public data APIs
 apiagent-kit/               - TypeScript library (Node >= 22.6) wrapping those APIs;
                               cli.ts is the JSON shim the bridge drives
 
-Adapters/                   - per-host extractors (Metaculus, Wikipedia, PDF, Google
+bot/scrapers/adapters/                   - per-host extractors (Metaculus, Wikipedia, PDF, Google
                               Sheets, Google Trends, Yahoo Quotes, Wayback)
-Crawl4AI/crawl.py           - headless-browser markdown fallback + scrape dedupe registry
-artifacts.py                - per-question run folder writer
-provenance.py               - stamps each forecast.json with run id, commit, models, schema version
-source_ledger.py            - URL event ledger behind audit.md
-research_trace.py           - step-by-step research trace behind evolution.md
-run_logging.py / utils.py   - logging setup, shared helpers
+bot/scrapers/crawler/crawl.py           - headless-browser markdown fallback + scrape dedupe registry
+bot/scrapers/firecrawl_scrape.py      - shared Firecrawl single-page scraper with a per-question credit budget
+bot/run/artifacts.py                - per-question run folder writer
+bot/run/provenance.py               - stamps each forecast.json with run id, commit, models, schema version
+bot/trace/source_ledger.py            - URL event ledger behind audit.md
+bot/trace/research_trace.py           - step-by-step research trace behind evolution.md
+bot/trace/run_logging.py / bot/utils.py   - logging setup, shared helpers
 
 tests/                      - offline tests: request shaping, library publishing, outcome scoring
 eval_tools/                 - offline dry-run, replay, compile-replay, scoring
 eval_tools/publish_runs.py / score_outcomes.py / supabase_rest.py - the forecast library
 db/migrations/              - the forecast library's database schema
-prompts/                    - every prompt template, extracted verbatim from source
 SOCLAAS.md                  - reference for the NUS SoC LLM gateway
 ```
 
@@ -118,7 +118,7 @@ ensemble when you want something unusual.
 What is **not** configurable is how a request is shaped. Whether a model
 accepts `temperature`, needs extra room for hidden reasoning under
 `max_tokens`, understands `cache_control` breakpoints, or reports its own cost
-are facts about a model and endpoint, so they live in `llm_provider.py` rather
+are facts about a model and endpoint, so they live in `bot/llm/provider.py` rather
 than in config. Getting one wrong costs money or returns an empty completion.
 
 ### SoCLaaS
@@ -159,7 +159,7 @@ gitignored; the GitHub Actions workflows upload it as a build artifact instead.
 
 `MonetaryCostManager` records every LLM call. Before the call it estimates input
 tokens from the serialized request (`CHARACTERS_PER_TOKEN = 3.2`; every budget
-constant in `monetary_cost_manager.py` is in those units) and refuses the call
+constant in `bot/llm/cost_manager.py` is in those units) and refuses the call
 if it would breach the per-question hard limit. After the call it records what
 the endpoint reported.
 
@@ -188,7 +188,7 @@ visible output.
 
 ## Research
 
-Research is `research/pipeline.py:run_research()`, in six stages:
+Research is `bot/research/pipeline.py:run_research()`, in six stages:
 
 1. **AskNews + resolution sources.** The resolution-source scraper starts as a
    parallel task (it is the slowest provider and needs only the question text).
@@ -203,7 +203,7 @@ Research is `research/pipeline.py:run_research()`, in six stages:
    conserves credits rather than spending them in parallel.
 5. **Artifact check**, then a focused retry aimed only at what is missing, then
    a re-check if that retry added anything.
-6. **Compile.** `compiler.py` distills everything into one evidence brief, then
+6. **Compile.** `bot/brief/compiler.py` distills everything into one evidence brief, then
    two deterministic banners are applied that the compiler cannot soften.
 
 Scraping any URL walks a ladder: a per-host adapter if one claims it, then
@@ -211,10 +211,10 @@ Firecrawl `/v2/scrape`, then the local Crawl4AI headless browser, then a Wayback
 snapshot. Every outcome is recorded in `audit.md` and in the trace.
 
 For numeric and discrete questions the primary resolution URL additionally goes
-through a **free** series ladder (`series_discovery.py`): the page as served,
+through a **free** series ladder (`bot/research/resolution/series_discovery.py`): the page as served,
 JSON embedded in inline scripts, iframes one level deep, then data endpoints
 regexed out of the page's own JS bundles. Anything found is reduced at the point
-of retrieval (`series_reduce.py`) to a ~2 KB table of levels, period means and
+of retrieval (`bot/research/resolution/series_reduce.py`) to a ~2 KB table of levels, period means and
 empirical ahead-ratio quantiles. No LLM calls, no Firecrawl credits, no browser.
 
 ## apiagent-kit
@@ -224,7 +224,7 @@ USGS, Cboe VIX, Wikipedia pageviews, SEC EDGAR, Kalshi, Polymarket, Metaculus
 and others), each tagged with a provenance tier. 22 need no key; `fred` needs
 `FRED_API_KEY`, and `metaculus` reuses `METACULUS_TOKEN`.
 
-It is TypeScript, so `apiagent_bridge.py` runs `apiagent-kit/cli.ts` under Node
+It is TypeScript, so `bot/research/apiagent/apiagent_bridge.py` runs `apiagent-kit/cli.ts` under Node
 for each call and reads JSON back. It never raises into the pipeline: a missing
 Node install, a timeout or an API error comes back as a result with
 `ok=False`.
@@ -253,13 +253,13 @@ a separate website repo.
   under `runs/<run_id>/<question_id>/`. Tournament submissions, dry runs and
   manual tests are all recorded, told apart by `workflow` and `submitted`.
 - **Provenance.** Each `forecast.json` now records its run id, commit, workflow,
-  the resolved models and a `schema_version` (`provenance.py`). That is what
+  the resolved models and a `schema_version` (`bot/run/provenance.py`). That is what
   makes accuracy comparable across code versions; it cannot be added to old
   runs afterwards.
 - **Changing `forecast.json`.** The database stores each file verbatim in a
   `raw` JSON column and promotes only stable fields to columns. Adding a field
   needs nothing. Renaming or restructuring one means bumping `SCHEMA_VERSION` in
-  `provenance.py` and teaching `eval_tools/publish_runs.py` and the views in
+  `bot/run/provenance.py` and teaching `eval_tools/publish_runs.py` and the views in
   `db/migrations/` to read both shapes; stored rows are never rewritten. Records
   from before provenance existed are published as `schema_version` 1, with
   per-call costs recovered from the rendered usage table.
@@ -357,38 +357,38 @@ The workflows do not install Node yet, so apiagent-kit does not run in CI.
 Dry run with examples:
 
 ```bash
-poetry run python forecasting_bot.py --mode examples --no-submit
+poetry run python -m bot --mode examples --no-submit
 ```
 
 Dry run on the default tournament:
 
 ```bash
-poetry run python forecasting_bot.py --mode tournament --no-submit
+poetry run python -m bot --mode tournament --no-submit
 ```
 
 Dry run on specific tournaments:
 
 ```bash
-poetry run python forecasting_bot.py --mode tournament --tournament fall-2026-ai minibench --no-submit
+poetry run python -m bot --mode tournament --tournament fall-2026-ai minibench --no-submit
 ```
 
 Dry run with Astra and Qwen:
 
 ```bash
 TIER1_MODEL=openai/gpt-6-astra TIER2_MODEL=qwen3.8:27b \
-  poetry run python forecasting_bot.py --mode tournament --no-submit
+  poetry run python -m bot --mode tournament --no-submit
 ```
 
 Submit forecasts:
 
 ```bash
-poetry run python forecasting_bot.py --mode tournament --tournament fall-2026-ai
+poetry run python -m bot --mode tournament --tournament fall-2026-ai
 ```
 
 Use fewer runs while debugging:
 
 ```bash
-poetry run python forecasting_bot.py --mode tournament --tournament fall-2026-ai --num-runs 1 --no-submit
+poetry run python -m bot --mode tournament --tournament fall-2026-ai --num-runs 1 --no-submit
 ```
 
 ## CLI reference
@@ -429,7 +429,7 @@ python tests/test_score_outcomes.py
 
 `test_route_equivalence.py` checks that request shaping for the `openrouter`
 and `openai` presets still matches 550 saved request snapshots. Run it after any
-change to `llm_provider.py`; regenerate the snapshots (`--regenerate`) only when
+change to `bot/llm/provider.py`; regenerate the snapshots (`--regenerate`) only when
 a change to the requests is intended.
 
 The other two exercise the forecast library offline, with no network or

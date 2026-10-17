@@ -261,7 +261,7 @@ jobs:
             run_args+=(--no-submit)
           fi
 
-          poetry run python forecasting_bot.py "${run_args[@]}" 2>&1 | tee bot_run.log
+          poetry run python -m bot.run.forecasting_bot "${run_args[@]}" 2>&1 | tee bot_run.log
           echo "Clean LLM result files created:"
           find docs/runs -type f -print 2>/dev/null || true
         env:

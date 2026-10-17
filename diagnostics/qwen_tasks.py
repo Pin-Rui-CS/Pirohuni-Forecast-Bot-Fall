@@ -17,13 +17,13 @@ import logging
 import re
 import unicodedata
 
-import llm_provider
+from bot.llm import provider as llm_provider
 from diagnostics.checks_condensation import _numbers
 from diagnostics.checks_evidence import history_coverage
 from diagnostics.checks_forecast import _BASE_RATE, _evaluate
 from diagnostics.loader import RunArtifacts
 from diagnostics.result import FAIL, INFO, PASS, WARN, Check, skipped
-from llm_client import call_llm
+from bot.llm.client import call_llm
 
 logger = logging.getLogger(__name__)
 _MAX_SOURCE_CHARS = 60_000

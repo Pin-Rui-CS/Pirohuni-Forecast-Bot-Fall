@@ -1,0 +1,92 @@
+from __future__ import annotations
+
+import logging
+import os
+import sys
+
+_NOISY_LOGGERS = (
+    "crawl4ai",
+    "httpx",
+    "httpcore",
+    "hpack",
+    "h2",
+    "openai",
+    "LiteLLM",
+    "litellm",
+    "streamlit",
+    "asyncio",
+    "playwright",
+    "urllib3",
+    "filelock",
+    "huggingface_hub",
+    "sentence_transformers",
+    "transformers",
+)
+
+# Logger names (module paths) that belong to this project. Only these may write
+# DEBUG records (full prompts/responses) to the run log file; third-party
+# libraries are limited to INFO and above so the file stays readable.
+_PROJECT_LOGGER_PREFIXES = (
+    "__main__",
+    "bot.brief.compiler",
+    "bot.forecasters",
+    "bot.llm.client",
+    "bot.llm.cost_manager",
+    "bot.research",
+    "bot.research.resolution.resolution_criteria_scraper",
+    "bot.research.search.query_maker",
+    "bot.run.artifacts",
+    "bot.run.forecasting_bot",
+    "bot.run.metaculus_client",
+    "bot.run.orchestrator",
+    "bot.scrapers.adapters",
+    "bot.scrapers.crawler",
+    "bot.trace.run_logging",
+    "bot.utils",
+    "eval_tools",
+)
+
+_CONFIGURED = False
+_CONFIGURED_FILE_PATHS: set[str] = set()
+
+
+class _ProjectDebugOnlyFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.INFO:
+            return True
+        return any(record.name == p or record.name.startswith(p + ".") for p in _PROJECT_LOGGER_PREFIXES)
+
+
+def setup_run_logging(log_file_path: str | None = None) -> None:
+    """Configure logging for a bot run.
+
+    Console gets INFO and above in a compact format. The optional log file
+    gets DEBUG from project modules (full prompts/responses live there, not
+    on the console) but only INFO and above from third-party libraries.
+    Known-noisy third-party loggers are capped at WARNING entirely.
+    """
+    global _CONFIGURED
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+
+    if not _CONFIGURED:
+        console = logging.StreamHandler(sys.stdout)
+        console.setLevel(logging.INFO)
+        console.setFormatter(logging.Formatter("%(message)s"))
+        root.addHandler(console)
+        _CONFIGURED = True
+
+    if log_file_path:
+        resolved = os.path.abspath(log_file_path)
+        if resolved not in _CONFIGURED_FILE_PATHS:
+            file_handler = logging.FileHandler(resolved, encoding="utf-8")
+            file_handler.setLevel(logging.DEBUG)
+            file_handler.addFilter(_ProjectDebugOnlyFilter())
+            file_handler.setFormatter(
+                logging.Formatter("%(asctime)s %(levelname)s %(name)s | %(message)s")
+            )
+            root.addHandler(file_handler)
+            _CONFIGURED_FILE_PATHS.add(resolved)
+
+    for name in _NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)

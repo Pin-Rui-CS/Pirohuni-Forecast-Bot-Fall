@@ -193,7 +193,7 @@ def routing_leak(a: RunArtifacts) -> Check:
     """Paid calls on research labels the Qwen setup is meant to run for free."""
     title = "Research calls stayed on Qwen (no paid leak)"
     try:
-        import llm_provider
+        from bot.llm import provider as llm_provider
         qwen_labels = llm_provider.QWEN_RECOMMENDED_RESEARCH_LABELS
     except Exception:  # noqa: BLE001
         return skipped(f"{CAT}.routing_leak", CAT, title, "llm_provider not importable")

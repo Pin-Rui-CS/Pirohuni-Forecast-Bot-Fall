@@ -22,8 +22,8 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from forecasters.numeric import nominal_grid  # noqa: E402
-from metaculus_client import get_post_details  # noqa: E402
+from bot.forecasters.numeric import nominal_grid  # noqa: E402
+from bot.run.metaculus_client import get_post_details  # noqa: E402
 
 _DEFAULT_RUNS_ROOT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs", "runs"

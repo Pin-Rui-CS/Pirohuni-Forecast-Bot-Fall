@@ -44,7 +44,7 @@ import sys  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from facts import (  # noqa: E402
+from bot.brief.facts import (  # noqa: E402
     CHANGED, DROPPED_SILENTLY, DROPPED_WITH_REASON, KEPT, brief_state, claims, split_excluded, text_values,
 )
 from diagnostics.loader import load, long_path  # noqa: E402

@@ -36,7 +36,7 @@ dotenv.load_dotenv(os.path.join(_REPO_ROOT, ".env"))
 
 from eval_tools.score_forecasts import score_record  # noqa: E402
 from eval_tools.supabase_rest import SupabaseREST  # noqa: E402
-from metaculus_client import get_post_details  # noqa: E402
+from bot.run.metaculus_client import get_post_details  # noqa: E402
 
 DEFAULT_MAX_CHECKS = 150
 _PAGE = 200

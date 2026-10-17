@@ -196,12 +196,12 @@ jobs:
           import asyncio
           import os
 
-          from config import CURRENT_METACULUS_CUP_ID
-          from forecasting_bot import validate_runtime_configuration
-          from metaculus_client import get_open_question_ids_from_tournament
-          from metaculus_client import get_post_details
-          from orchestrator import forecast_is_already_made
-          from orchestrator import forecast_questions
+          from bot.config import CURRENT_METACULUS_CUP_ID
+          from bot.run.forecasting_bot import validate_runtime_configuration
+          from bot.run.metaculus_client import get_open_question_ids_from_tournament
+          from bot.run.metaculus_client import get_post_details
+          from bot.run.orchestrator import forecast_is_already_made
+          from bot.run.orchestrator import forecast_questions
 
 
           def parse_bool(value: str) -> bool:

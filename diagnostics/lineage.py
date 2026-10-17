@@ -26,7 +26,7 @@ import re
 from collections import defaultdict
 
 from diagnostics import lineage_legacy
-from facts import claims, text_values
+from bot.brief.facts import claims, text_values
 from diagnostics.loader import RunArtifacts, _read
 
 SCHEMA_VERSION = 1

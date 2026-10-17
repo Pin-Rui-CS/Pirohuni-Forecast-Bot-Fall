@@ -7,7 +7,7 @@ from collections import Counter
 
 from diagnostics.loader import RunArtifacts
 from diagnostics.result import FAIL, INFO, PASS, WARN, Check, skipped
-from research_trace import citation_match
+from bot.trace.research_trace import citation_match
 
 CAT = "sources"
 _URL = re.compile(r"https?://[^\s\)\]\'\"<>`]+")
