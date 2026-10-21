@@ -217,6 +217,7 @@ off the combined distribution. Output this JSON as the very last thing you write
 
 {{
   "reasoning_summary": "<one or two sentences on the regime structure and the dominant driver, citing key evidence IDs>",
+  "support": {{"min": <number or null>, "max": <number or null>}},
   "components": [
     {{
       "name": "<scenario label>",
@@ -257,6 +258,15 @@ How to build it:
    parameters are wrong rather than the derivation — widen them until the two agree, or name
    the phase whose evidence justifies the gap.
 4. **Weights.** Your probabilities over the scenarios; positive and summing to 1.
+5. **Hard limits ("support", optional).** If the quantity physically CANNOT go below (or
+   above) some value, set that limit and the harness cuts every component there and
+   rescales the rest, whatever family you chose. Typical cases: a cumulative count or
+   year-to-date total that already stands at N and cannot fall (min = N); a share that
+   cannot exceed 100% (max = 100); a total that already includes amounts known to be in.
+   Use null for a side with no limit, or leave "support" out entirely. Only impossible
+   values belong outside it — never use it to narrow a forecast; an outcome you merely
+   think unlikely belongs in a tail. Your components should already put most of their
+   mass inside the limits: if more than half falls outside, the limits are ignored.
 
 Parameter reference (params must match the chosen family exactly):
 - "normal": {{"mean": float, "std": float}}
@@ -274,6 +284,8 @@ Rules:
 - 1–3 components; weights positive and summing to 1; each component is smooth and single-peaked.
   Any multimodality comes from the MIXTURE, never from a single component.
 - The chosen family's support must contain every plausible outcome and violate no stated bound.
+  For a hard limit other than zero (a floor at the current count, a cap at 100%), set
+  "support" rather than hunting for a family that happens to stop there.
 - Do NOT output percentile lists (p5/p25/p50/...). Smoothness must come from the family you
   choose, never from listing quantile points.
 {discrete_pmf_note}
@@ -329,8 +341,104 @@ class ScaledBeta:
         return self.lower + self.beta.ppf(q) * (self.upper - self.lower)
 
 
+class Truncated:
+    """A distribution cut at hard limits [lo, hi] and rescaled to sum to 1.
+
+    This is how a run's optional ``support`` is applied: a quantity that
+    physically cannot go below (or above) some value — a cumulative count that
+    has already reached N, a share that cannot pass 100 — keeps the shape the
+    model chose inside the limits and loses only what lay outside them. Either
+    limit may be None (no limit on that side)."""
+    def __init__(self, base, lo: float | None, hi: float | None):
+        self.base, self.lo, self.hi = base, lo, hi
+        self.f_lo = float(base.cdf(lo)) if lo is not None else 0.0
+        self.f_hi = float(base.cdf(hi)) if hi is not None else 1.0
+        self.mass = self.f_hi - self.f_lo
+        if not self.mass > 0:
+            raise ValueError(f"support [{lo}, {hi}] excludes all of the distribution's mass")
+
+    def cdf(self, x):
+        x = np.asarray(x, dtype=float)
+        out = (np.asarray(self.base.cdf(x), dtype=float) - self.f_lo) / self.mass
+        if self.lo is not None:
+            out = np.where(x < self.lo, 0.0, out)
+        if self.hi is not None:
+            out = np.where(x >= self.hi, 1.0, out)
+        return np.clip(out, 0.0, 1.0)
+
+
+# A run's support is applied only when at least this share of its own
+# distribution already lies inside it. Below that the limits and the components
+# contradict each other (usually one of them is in the wrong units), and
+# cutting would throw away most of what the model said; the limits are ignored
+# and the run is kept as drawn.
+SUPPORT_MIN_KEPT_MASS = 0.5
+
+
+def parse_support(raw) -> tuple[dict | None, str | None]:
+    """A run's optional hard limits -> ({"min": float|None, "max": float|None}, None),
+    (None, None) when absent or both sides null, or (None, reason) when malformed."""
+    if raw is None:
+        return None, None
+    if not isinstance(raw, dict):
+        return None, f"support must be an object with min/max, got {type(raw).__name__}"
+
+    def side(*keys):
+        for key in keys:
+            if key in raw and raw[key] is not None:
+                value = raw[key]
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    try:
+                        value = float(str(value).replace(",", ""))
+                    except ValueError:
+                        raise ValueError(f"support {key}={raw[key]!r} is not a number")
+                value = float(value)
+                if not np.isfinite(value):
+                    raise ValueError(f"support {key} is not finite")
+                return value
+        return None
+
+    try:
+        lo, hi = side("min", "lower", "lo"), side("max", "upper", "hi")
+    except ValueError as exc:
+        return None, str(exc)
+    if lo is None and hi is None:
+        return None, None
+    if lo is not None and hi is not None and hi <= lo:
+        return None, f"support max ({hi:g}) must be above min ({lo:g})"
+    return {"min": lo, "max": hi}, None
+
+
+def support_mass(spec: dict, support: dict) -> float:
+    """Share of a spec's (uncut) distribution that lies inside ``support``."""
+    lo, hi = support.get("min"), support.get("max")
+    if spec.get("type") == "pmf":
+        p = spec.get("params") or {k: v for k, v in spec.items() if k not in ("type", "support")}
+        values, probabilities = _parse_pmf_params(p)
+        total = float(sum(probabilities)) or 1.0
+        inside = sum(q for v, q in zip(values, probabilities)
+                     if (lo is None or v >= lo) and (hi is None or v <= hi))
+        return float(inside) / total
+    base = _build_base({k: v for k, v in spec.items() if k != "support"})
+    f_lo = float(base.cdf(lo)) if lo is not None else 0.0
+    f_hi = float(base.cdf(hi)) if hi is not None else 1.0
+    return max(0.0, f_hi - f_lo)
+
+
 def build_distribution(spec: dict):
-    """Return a scipy-like object with a .cdf() method from a JSON spec."""
+    """Return a scipy-like object with a .cdf() method from a JSON spec.
+
+    A top-level ``support`` ({"min": .., "max": ..}) cuts the distribution at
+    those limits and rescales it (see Truncated)."""
+    dist = _build_base(spec)
+    support = spec.get("support")
+    if support and (support.get("min") is not None or support.get("max") is not None):
+        return Truncated(dist, support.get("min"), support.get("max"))
+    return dist
+
+
+def _build_base(spec: dict):
+    """build_distribution without the support cut."""
     t = spec["type"]
     p = spec.get("params") or {k: v for k, v in spec.items() if k != "type"}
     if t == "normal":
@@ -758,6 +866,20 @@ def pmf_spec_to_cdf(spec: dict, grid: np.ndarray) -> list[float]:
     probs = np.array(probabilities, dtype=float)
     if np.any(~np.isfinite(probs)) or np.any(probs < 0):
         raise ValueError(f"pmf: probabilities must be finite and nonnegative, got {probabilities}")
+    support = spec.get("support") or {}
+    lo, hi = support.get("min"), support.get("max")
+    if lo is not None or hi is not None:
+        # Hard limits: a value outside them is impossible, whatever was listed.
+        xs_all = np.array(values, dtype=float)
+        keep = np.ones(len(xs_all), dtype=bool)
+        if lo is not None:
+            keep &= xs_all >= lo
+        if hi is not None:
+            keep &= xs_all <= hi
+        values = [v for v, k in zip(values, keep) if k]
+        probs = probs[keep]
+        if not values:
+            raise ValueError(f"pmf: support [{lo}, {hi}] excludes every listed value")
     total = float(probs.sum())
     if total <= 0:
         raise ValueError("pmf: probabilities must sum to a positive number")
@@ -1355,7 +1477,9 @@ def distribution_guidance_for_question(
         + "Prefer this pmf form for count questions. List CONSECUTIVE outcome values with no "
         "skips — include every value between the lowest and highest you consider plausible, "
         "even when its probability is tiny. Never coarsen to every 2nd or 5th value: a "
-        "skipped value is treated as literally zero probability, not interpolated."
+        "skipped value is treated as literally zero probability, not interpolated. "
+        "A value that is physically impossible (below a count already reached) is simply "
+        "left out of the list; no \"support\" is needed in the pmf form."
     )
     return header, pmf_note
 
@@ -2130,18 +2254,27 @@ def parse_numeric_response(response: str) -> tuple[dict, str]:
 
     reasoning = str(parsed.get("reasoning") or parsed.get("reasoning_summary") or "")
 
+    spec = parsed.get("distribution")
+    # Optional hard limits, top level (or inside "distribution" for a pmf).
+    # Kept raw here; numeric_response_to_raw_cdf validates and applies them.
+    support = parsed.get("support")
+    if support is None and isinstance(spec, dict):
+        support = spec.get("support")
+    extra = {"support": support} if support is not None else {}
+
     components = parsed.get("components")
     if isinstance(components, list) and components:
-        return {"kind": "mixture", "components": components}, reasoning
+        return {"kind": "mixture", "components": components, **extra}, reasoning
 
-    spec = parsed.get("distribution")
     if isinstance(spec, dict):
         if spec.get("type") == "pmf":
-            return {"kind": "pmf", "pmf": spec.get("params") or spec}, reasoning
+            pmf = spec.get("params") or {k: v for k, v in spec.items() if k not in ("type", "support")}
+            return {"kind": "pmf", "pmf": pmf, **extra}, reasoning
         family = spec.get("type")
-        params = spec.get("params") or {k: v for k, v in spec.items() if k != "type"}
+        params = spec.get("params") or {k: v for k, v in spec.items() if k not in ("type", "support")}
         return (
-            {"kind": "mixture", "components": [{"family": family, "params": params, "weight": 1.0}]},
+            {"kind": "mixture", "components": [{"family": family, "params": params, "weight": 1.0}],
+             **extra},
             reasoning,
         )
 
@@ -2178,7 +2311,11 @@ def quantile_average_cdfs(cdfs: list[np.ndarray]) -> np.ndarray:
 
     size = len(cdfs[0])
     xs = np.arange(size, dtype=float)
-    levels = np.linspace(0.0, 1.0, 4 * size + 1)[1:-1]
+    # Levels run from 0 to 1 INCLUSIVE. With the endpoints left out, the mass
+    # between the outermost level and 0 or 1 (1/(4*size) of the in-grid shape)
+    # had no position to spread over and landed in a single grid cell: Q46308
+    # (2026-10-20) submitted a 0.12% spike at 608k with nothing after it.
+    levels = np.linspace(0.0, 1.0, 4 * size + 1)
 
     lower_masses: list[float] = []
     upper_masses: list[float] = []
@@ -2207,7 +2344,14 @@ def quantile_average_cdfs(cdfs: list[np.ndarray]) -> np.ndarray:
 
     average_positions = np.zeros_like(levels)
     for conditional in conditionals:
-        average_positions += np.interp(levels, _strictly_increasing(conditional), xs)
+        positions = np.interp(levels, _strictly_increasing(conditional), xs)
+        # The endpoints are where the run's in-grid shape starts and stops:
+        # the last cell still at 0 and the first cell at 1. interp cannot find
+        # the start (level 0 always maps to cell 0, however long the curve
+        # stays flat), so both are read off the curve directly.
+        positions[0] = float(np.searchsorted(conditional, 0.0, side="right") - 1)
+        positions[-1] = float(min(np.searchsorted(conditional, 1.0, side="left"), size - 1))
+        average_positions += positions
     average_positions /= len(conditionals)
 
     average_positions = np.maximum.accumulate(average_positions)
@@ -2363,6 +2507,40 @@ def build_numeric_prompt(question_details: dict, summary_report: str) -> tuple[s
     return prompt, geometry
 
 
+def _attach_support(parsed: dict, spec: dict, unit_scale: float) -> str | None:
+    """Validate a run's hard limits, convert them with the run's unit scale and
+    attach them to ``spec`` when the run's own distribution mostly lies inside.
+
+    ``parsed["support"]`` is overwritten with what was actually applied (None
+    when ignored), so the record carries one truth. Returns a note for the run's
+    record, or None when the run set no limits."""
+    support, problem = parse_support(parsed.get("support"))
+    if problem:
+        parsed["support"] = None
+        return f"support ignored: {problem}"
+    if support is None:
+        parsed.pop("support", None)
+        return None
+    if unit_scale != 1.0:
+        support = {k: (v * unit_scale if v is not None else None) for k, v in support.items()}
+    shown = "[{}, {}]".format(
+        "-inf" if support["min"] is None else f"{support['min']:g}",
+        "inf" if support["max"] is None else f"{support['max']:g}",
+    )
+    try:
+        kept = support_mass(spec, support)
+    except Exception as exc:  # noqa: BLE001 - a bad support never sinks the run
+        parsed["support"] = None
+        return f"support {shown} ignored: {exc}"
+    if kept < SUPPORT_MIN_KEPT_MASS:
+        parsed["support"] = None
+        return (f"support {shown} ignored: only {kept:.0%} of the run's own distribution "
+                f"lies inside it (needs {SUPPORT_MIN_KEPT_MASS:.0%})")
+    spec["support"] = support
+    parsed["support"] = support
+    return f"support {shown} applied: cut {1 - kept:.1%} of the run's mass outside it"
+
+
 def numeric_response_to_raw_cdf(
     response: str,
     geometry: dict,
@@ -2388,6 +2566,7 @@ def numeric_response_to_raw_cdf(
 
     if parsed["kind"] == "pmf":
         spec = {"type": "pmf", "params": parsed["pmf"]}
+        support_note = _attach_support(parsed, spec, 1.0)
         raw_cdf = np.asarray(pmf_spec_to_cdf(spec, grid))
         parsed["spec"] = spec
         # Guard against the staircase/comb failure: a PMF whose distinct values
@@ -2406,7 +2585,10 @@ def numeric_response_to_raw_cdf(
                 len(set(values)), outcome_count,
             )
         parsed["unit_scale"] = 1.0
-        return raw_cdf, parsed, reasoning, "PMF over outcome values; no unit conversion applied.", False
+        unit_note = "PMF over outcome values; no unit conversion applied."
+        if support_note:
+            unit_note += f" | {support_note}"
+        return raw_cdf, parsed, reasoning, unit_note, False
 
     # Mixture of smooth families (a single family is a 1-component mixture).
     #
@@ -2463,9 +2645,13 @@ def numeric_response_to_raw_cdf(
         logger.warning(
             "sanity check warning: count question used a continuous mixture; prefer pmf."
         )
+    # Hard limits go on last: they cut the mixture the guardrails produced.
+    support_note = _attach_support(parsed, spec, unit_scale)
     raw_cdf = np.asarray(spec_to_cdf(spec, grid))
     if notes:
         unit_note = unit_note + " | guardrails: " + "; ".join(notes)
+    if support_note:
+        unit_note += f" | {support_note}"
     return raw_cdf, parsed, reasoning, unit_note, used_fallback
 
 
@@ -2509,8 +2695,9 @@ def _assert_spec_matches_components(
 _NUMERIC_REPAIR_INSTRUCTION = (
     "End your reply with ONLY the final JSON object described above: a top-level "
     '"components" list of 1–3 items, each with "family", "params" (matching that '
-    'family exactly), and "weight". For a discrete/count question, use the "pmf" '
-    "form instead. Do not output percentile lists."
+    'family exactly), and "weight", plus an optional top-level "support" '
+    '({"min": <number or null>, "max": <number or null>}) for hard physical limits. '
+    'For a discrete/count question, use the "pmf" form instead. Do not output percentile lists.'
 )
 
 
@@ -2524,6 +2711,10 @@ def _make_numeric_validator(geometry: dict):
             parsed, _ = parse_numeric_response(response)
         except Exception as exc:  # noqa: BLE001 - any parse failure is a repair signal
             return f"could not parse forecast JSON: {exc}"
+        _support, support_problem = parse_support(parsed.get("support"))
+        if support_problem:
+            return (f'"support" is malformed ({support_problem}); use '
+                    '{"min": <number or null>, "max": <number or null>} or leave it out')
         if parsed["kind"] == "pmf":
             # Check the values here, not only at render time: a value the
             # parser cannot read used to pass as "valid" and then drop the run
@@ -2783,6 +2974,8 @@ async def get_numeric_gpt_prediction(
                 "[ensemble] numeric run (%s) had no valid components; used a broad-normal fallback.",
                 run.model,
             )
+        if parsed.get("support"):
+            record["support"] = parsed["support"]  # as applied (after any unit fix)
         ensemble.append(record)
         logger.info("question title: %s", title)
         logger.info("model: %s | grid x first/last: %s %s", run.model, float(grid[0]), float(grid[-1]))

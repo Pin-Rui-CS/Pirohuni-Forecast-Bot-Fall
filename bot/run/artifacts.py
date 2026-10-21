@@ -139,8 +139,12 @@ class QuestionArtifacts:
             **data,
         }
         path = os.path.join(self.dir, "forecast.json")
-        with open(path, "w", encoding="utf-8") as f:
+        # Written whole, then renamed into place: the forecast library's watcher
+        # (publish_runs.py --watch) reads this file while the run is going.
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(record, f, indent=2, default=_json_default)
+        os.replace(tmp, path)
         logger.info("[artifact saved] %s", path)
         return path
 

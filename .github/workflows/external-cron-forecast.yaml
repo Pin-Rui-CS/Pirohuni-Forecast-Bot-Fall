@@ -261,12 +261,26 @@ jobs:
             run_args+=(--no-submit)
           fi
 
+          # Publish each question to the forecast library as soon as it finishes,
+          # instead of only when the whole run ends (gh-39341977423 took 4 h, so
+          # finished questions waited hours). Best-effort: a no-op without the
+          # SUPABASE_* secrets, stopped when this step exits, and the "Publish run"
+          # step below still publishes everything plus the run log.
+          if [ -n "$SUPABASE_URL" ] && [ -n "$SUPABASE_SERVICE_KEY" ]; then
+            poetry run python eval_tools/publish_runs.py docs/runs --watch 60 > publish_watch.log 2>&1 &
+            WATCH_PID=$!
+            trap 'kill "$WATCH_PID" 2>/dev/null || true' EXIT
+          fi
+
           poetry run python -m bot.run.forecasting_bot "${run_args[@]}" 2>&1 | tee bot_run.log
           echo "Clean LLM result files created:"
           find docs/runs -type f -print 2>/dev/null || true
         env:
           PYTHONUNBUFFERED: "1"
           PYTHONFAULTHANDLER: "1"
+          # Only the per-question publisher started in this step reads these.
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
@@ -343,7 +357,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: external-cron-bot-run-log-${{ github.run_id }}
-          path: bot_run.log
+          path: |
+            bot_run.log
+            publish_watch.log
+          if-no-files-found: warn
           retention-days: 14
 
       - name: Upload clean LLM result logs as artifact
