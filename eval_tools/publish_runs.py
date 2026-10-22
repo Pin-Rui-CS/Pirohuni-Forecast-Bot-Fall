@@ -18,7 +18,11 @@ column name, which works across every column layout that table has had.
 Usage:
     poetry run python eval_tools/publish_runs.py [runs_root ...]
         [--run-id ID] [--code-sha SHA] [--workflow NAME] [--run-url URL]
-        [--dry-run]
+        [--dry-run] [--watch SECONDS]
+
+--watch keeps running beside the bot and publishes each question within
+SECONDS of its forecast.json being written (the workflow stops it when the
+bot exits; the end-of-run publish then adds the run log).
 
 The --run-id/--code-sha/--workflow/--run-url overrides fill in provenance only
 where a record has none, for backfilling artifacts written before it existed.
@@ -40,6 +44,7 @@ import os
 import re
 import sys
 import tarfile
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -308,12 +313,30 @@ def publish(
     out=sys.stdout,
 ) -> tuple[int, int]:
     """Publish every forecast.json under ``roots``. Returns (published, failed)."""
-    overrides = overrides or Overrides()
     files = find_forecast_files(roots)
     if not files:
         print(f"[publish] no forecast.json files under {roots}", file=out)
         return 0, 0
+    published, failed = publish_files(files, client, overrides, dry_run=dry_run, out=out)
+    print(f"[publish] done: {published} published, {failed} failed", file=out)
+    return published, failed
 
+
+def publish_files(
+    files: list[str],
+    client: SupabaseREST | None,
+    overrides: Overrides | None = None,
+    *,
+    dry_run: bool = False,
+    with_run_log: bool = True,
+    out=sys.stdout,
+) -> tuple[int, int]:
+    """Publish the given forecast.json files. Returns (published, failed).
+
+    ``with_run_log=False`` skips the run-level log, for publishing while the
+    run is still going and its log is incomplete.
+    """
+    overrides = overrides or Overrides()
     published = failed = 0
     runs_done: set[str] = set()
     for path in files:
@@ -325,7 +348,7 @@ def publish(
             continue
 
         run_log = os.path.join(os.path.dirname(os.path.dirname(path)), "run.log")
-        include_run_log = item.run_id not in runs_done and os.path.isfile(run_log)
+        include_run_log = with_run_log and item.run_id not in runs_done and os.path.isfile(run_log)
 
         if dry_run:
             size = sum(len(data) for _, data, _ in item.blobs)
@@ -366,8 +389,43 @@ def publish(
             file=out,
         )
 
-    print(f"[publish] done: {published} published, {failed} failed", file=out)
     return published, failed
+
+
+def watch(
+    roots: list[str],
+    client: SupabaseREST,
+    overrides: Overrides | None = None,
+    *,
+    interval: float = 60.0,
+    out=sys.stdout,
+) -> None:
+    """Publish each question as soon as its forecast.json is written, until killed.
+
+    Runs beside the bot so a question reaches the library minutes after it
+    finishes, not when the whole run does (gh-39341977423: one question
+    finished hours before the run ended at 03:54 UTC and only then appeared).
+    Only files written after the watcher started are taken, so leftovers from
+    an earlier run are ignored. A file that fails to publish (for example one
+    caught mid-write) is retried on the next pass. The end-of-run publish step
+    still runs and adds the run log.
+    """
+    started = time.time()
+    done: dict[str, float] = {}
+    print(f"[publish] watching {roots} every {interval:g}s", file=out, flush=True)
+    while True:
+        for path in find_forecast_files(roots):
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                continue
+            if mtime < started or done.get(path) == mtime:
+                continue
+            published, _ = publish_files([path], client, overrides, with_run_log=False, out=out)
+            if published:
+                done[path] = mtime
+            out.flush()
+        time.sleep(interval)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -379,6 +437,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run-url")
     parser.add_argument("--dry-run", action="store_true",
                         help="build everything and report it, without contacting Supabase")
+    parser.add_argument("--watch", type=float, metavar="SECONDS",
+                        help="keep running and publish each new forecast.json within SECONDS of it being written")
     args = parser.parse_args(argv)
 
     dotenv.load_dotenv(os.path.join(_REPO_ROOT, ".env"))
@@ -393,6 +453,8 @@ def main(argv: list[str] | None = None) -> int:
         print("[publish] SUPABASE_URL / SUPABASE_SERVICE_KEY not set; skipping.")
         return 0
     with client:
+        if args.watch:
+            watch(args.roots, client, overrides, interval=args.watch)
         _, failed = publish(args.roots, client, overrides)
     return 1 if failed else 0
 

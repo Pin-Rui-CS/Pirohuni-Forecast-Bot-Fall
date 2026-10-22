@@ -39,12 +39,20 @@ Discipline rules that apply to every phase:
   (c) the two lookback windows will often disagree. Choose one, say why, and note what the other implies;
   (d) treat the excluded outage/partial rows as excluded — never read one as the current level.
   Widening under acknowledged ignorance is correct ONLY when no measured series is present. With one in hand, an interval several times the measured spread is not caution, it is a discarded measurement.
-- INTERVAL SIZING. Derive your 90% interval; do not choose it by feel. When a "Measured historical series" section is present the rule above governs and this one adds nothing. When there is none — the common case — build the equivalent yourself, once, in Phase 1, and show the arithmetic:
-  (a) take the finest periodic data the research does contain (a table of monthly or quarterly values, a run of daily rows, a list of prior outcomes) and compute the successive differences from the values you list; state their mean and their standard deviation;
-  (b) count the periods between the latest observation and the resolution date and scale — for a quantity that accumulates period by period the horizon spread is roughly (per-period sd) x sqrt(number of periods). State the per-period sd, the period count, and the product;
-  (c) add the spread BETWEEN the scenarios you are carrying. A forecast holding two live branches is wider than either branch alone; if your branches sit far apart, that distance, not the within-branch noise, dominates your interval;
-  (d) state the resulting sigma and 90% interval, and carry them forward as the number every later phase must argue against.
-  A final 90% interval narrower than the period-to-period movement the research already documents is a claim that the future will be calmer than the measured past. That claim is sometimes right — a binding cap, a near resolution date, an already-settled value — but it must be made explicitly and attributed to evidence, never reached by default.
+- INTERVAL SIZING. Size your 90% interval from how wrong YOUR KIND of estimate has historically been — do not choose it by feel. Do this once, in Phase 1, and show the arithmetic.
+  1. NAME THE CASE. State in one line which case(s) below apply and why ("Interval case: C + D — quarterly total with a Q4 pattern, and a full-year analyst forecast"):
+  (A) A "Measured historical series" section is present: the rule above governs and this one adds nothing.
+  (B) A level that wanders from where it is now (a price, an index level, a cumulative count, a running total): take the finest periodic data the research contains, compute the successive differences from the values you list, state their mean and standard deviation, and scale by sqrt(number of periods between the latest observation and the resolution date).
+  (C) A seasonal total (a quarterly or monthly figure with a calendar pattern): never mix seasons. Compare like with like — the same period in earlier years, or the past transitions between the same two periods (e.g. each year's Q3-to-Q4 change) — and size from the spread of those. Swings between different seasons (Q4 to Q1) are predictable, not uncertainty.
+  (D) A dated forecast, analyst consensus or company guidance for the target exists: anchor on it and size from how far such forecasts have missed — the research's record of past misses if it has one; otherwise state a percentage and where it comes from.
+  (E) A one-off event outcome (an election margin, a vote count, a single game): size from the current cycle's evidence — polls and their usual error, vote arithmetic, results already in. Past cycles show the plausible range; the differences BETWEEN past cycles are not your uncertainty.
+  (F) An average or rate that reverts to its usual level (a weekly average, a rate around a stable level): use the spread of the level itself, not differences scaled by sqrt(periods).
+  (G) None of these fits (a time until an event, a share near 0% or 100%, a ranking): say so and explain the yardstick you use instead, in the same spirit — how far off this kind of estimate has been.
+  2. COMBINE, DON'T PICK. When more than one case applies, each is a separate source of uncertainty: compute each yardstick and combine them as sqrt(a^2 + b^2). Never keep only the smallest. Count a source once: if two cases measure the same thing (a consensus that already reflects the seasonal pattern), say so and use it once.
+  3. THIN DATA. If a yardstick rests on fewer than 3 observations, or on a percentage you state without data, label it "thin" and widen it by half (x1.5). A thin yardstick may never be the reason your interval is narrow.
+  4. SCENARIOS. Then add the spread BETWEEN the scenarios you are carrying: a forecast holding two live branches is wider than either alone, and if your branches sit far apart that distance, not the within-branch noise, dominates. State the resulting sigma and 90% interval and carry them forward as the number every later phase must argue against.
+  5. CHECK EACH COMPONENT. When you write the final JSON, state each component's 90% width next to the width your yardstick implies, and widen any component that is narrower — unless you name the evidence that this scenario is more certain than its kind usually is.
+  A final 90% interval narrower than your yardstick is a claim that this case is more predictable than its kind usually is. That is sometimes right — a binding cap, a near resolution date, an already-settled value — but make it explicitly and attribute it to evidence, never by default. Equally, do not size from a yardstick that measures something else: a series' season-to-season swings, or how different past elections were, overstate the uncertainty of a forecast that already knows the season or this cycle's results.
 
 ---
 
@@ -1268,6 +1276,19 @@ def parse_declared_answer_space(text: str) -> tuple[float, float, float] | None:
     if total <= 0:
         return None
     return (triple[0] / total, triple[1] / total, triple[2] / total)
+
+
+_INTERVAL_CASE = re.compile(r"Interval case\s*[:\-]?\s*\**\s*\(?([A-G](?:\s*\+\s*[A-G])*)\b", re.IGNORECASE)
+_INTERVAL_CASE_LOOSE = re.compile(r"\bCase\s*\(?([A-G])\)?\s*[—\-:,]")
+
+
+def parse_interval_case(text: str) -> str | None:
+    """Which INTERVAL SIZING case(s) a run named ("C+D"), or None. Recorded in
+    forecast.json so the choice can be audited against how wide the run came out."""
+    if not text:
+        return None
+    match = _INTERVAL_CASE.search(text) or _INTERVAL_CASE_LOOSE.search(text)
+    return re.sub(r"\s+", "", match.group(1)).upper() if match else None
 
 
 def _last_probability_on_line(text: str, lead_pattern: str) -> float | None:
@@ -2887,6 +2908,7 @@ async def get_numeric_gpt_prediction(
         # have rewritten.
         declared = parse_declared_answer_space(run.response)
         record["declared_answer_space"] = list(declared) if declared else None
+        record["interval_case"] = parse_interval_case(run.response)
         if declared is None:
             logger.info(
                 "[ensemble] numeric run (%s) declared no answer-space split; "
