@@ -13,6 +13,7 @@ from typing import Any, Final
 import httpx
 
 from bot.llm import provider as llm_provider
+from bot.llm import soclaas_models
 from bot.utils import _get_field, _json_default
 
 logger = logging.getLogger(__name__)
@@ -162,8 +163,13 @@ class OpenRouterUsageHandle:
         native = extract_openrouter_native_usage(
             response, self._model, getattr(self, "_route", None)
         )
+        # A SoCLaaS call that fell back down the model chain was served by a
+        # different model than the one the row was opened for; record that one.
+        served_model = _get_field(response, "soclaas_model")
         if not self._finished:
             for record in self._records:
+                if served_model:
+                    record.model_used = str(served_model)
                 record.reasoning_tokens = reasoning_tokens
                 record.native_input_tokens = native["prompt_tokens"]
                 record.native_output_tokens = native["completion_tokens"]
@@ -672,13 +678,24 @@ def extract_openrouter_native_usage(
     elif cost_source == "quota":
         # No money changes hands, so cost_usd stays 0.0 -- but the call still
         # spends a metered allowance, and the rates are per 1M tokens exactly
-        # like PRICES.
-        rates = getattr(route, "quota_rate_microdollars", None)
-        if rates:
-            in_rate, out_rate = rates
-            quota_microdollars = (
-                prompt_tokens * in_rate + completion_tokens * out_rate
-            ) / 1_000_000
+        # like PRICES. Priced at the model that actually served the call: the
+        # ladder reports its own total (each attempt at its model's rate, so a
+        # DeepSeek attempt that fell back to Qwen is priced as both), and a
+        # reply naming a registered model is priced at that model's rate.
+        reported = _get_field(response, "soclaas_quota_microdollars")
+        served = str(_get_field(response, "model") or "")
+        if reported is not None:
+            quota_microdollars = _coerce_float(reported)
+        elif served and soclaas_models.model_for_reply(served):
+            quota_microdollars = soclaas_models.quota_microdollars(
+                served, prompt_tokens, completion_tokens)
+        else:
+            rates = getattr(route, "quota_rate_microdollars", None)
+            if rates:
+                in_rate, out_rate = rates
+                quota_microdollars = (
+                    prompt_tokens * in_rate + completion_tokens * out_rate
+                ) / 1_000_000
     else:  # native
         cost_usd = _coerce_float(_get_field(usage, "cost")) + _coerce_float(
             _get_field(cost_details, "upstream_inference_cost")

@@ -1,28 +1,37 @@
-"""Opt-in XHigh-then-Medium ladder for research calls routed to SoCLaaS Qwen.
+"""Opt-in effort ladder, with model fallback, for calls routed to SoCLaaS.
+
+(The module name predates DeepSeek; it serves every SoCLaaS model.) Each
+model's rungs, sampler and reply names come from soclaas_models; the models
+are tried in SOCLAAS_MODEL_CHAIN order (DeepSeek, then Qwen by default).
 
 Enabled by QWEN_LADDER=1. When on, llm_provider hands every SoCLaaS route a
 ladder client instead of the plain OpenAI client, so the four places that send
 requests (call_llm, sync_chat, the compiler brief, the resolution scraper) all
 get the same policy without changing a line at the call site:
 
-  1. One streamed request at the label's starting effort (XHigh by default).
+  1. One streamed request at the label's starting effort (the model's deepest
+     rung by default: DeepSeek high, Qwen XHigh).
   2. If it times out, loses the stream, finishes without [DONE]/stop, returns
-     nothing, or the answer is unusable: one more request at Medium, built from
-     the same original kwargs -- never from the failed partial answer.
+     nothing, or the answer is unusable: one more request at the next rung
+     (DeepSeek low, Qwen Medium), built from the same original kwargs -- never
+     from the failed partial answer.
   3. HTTP 408/5xx, a refused connection, or a 429 that is the gateway's busy
-     queue rather than a spent quota (``is_overload_429``) means SoCLaaS itself
-     is unavailable, which less thinking does not cure. The same rung is retried once after a
+     queue rather than a spent quota (``is_overload_429``) means the model is
+     unavailable, which less thinking does not cure. The same rung is retried once after a
      backoff (UNAVAILABLE_BACKOFF_SECONDS), applied to the shared endpoint gate
-     so every other Qwen call pauses too. If the retry fails as well, SoCLaaS
-     is down for the rest of the question (see OutageTally): QwenUnavailable is
-     raised, and every later Qwen call in that question fails at once. There
-     is no backup; research carries on with whatever the other providers got.
-  4. Auth, access and quota refusals stop immediately. Less thinking cures
-     none of them. Every stream holds one of the endpoint's ``max_in_flight``
-     slots (llm_provider.RateGate) while it runs.
-  5. When every rung fails, raise QwenLadderFailed. It is not an OpenAI
-     exception, so llm_client's three-attempt retry loop does not turn one
-     ladder into three. There is no paid fallback here.
+     so every other SoCLaaS call pauses too. If the retry fails as well, the
+     next model in the chain is tried; when the LAST one is unavailable too,
+     SoCLaaS is down for the rest of the question (see OutageTally):
+     QwenUnavailable is raised, and every later SoCLaaS call in that question
+     fails at once. Research carries on with whatever the other providers got.
+  4. Auth, access and quota refusals (and an HTTP 400/404 for a model the
+     gateway rejects) end that model's ladder; less thinking cures none of
+     them. Every stream holds one of the endpoint's ``max_in_flight`` slots
+     (llm_provider.RateGate) while it runs.
+  5. When one model's ladder fails, the same request goes to the next model in
+     SOCLAAS_MODEL_CHAIN. When the last fails, raise QwenLadderFailed. It is
+     not an OpenAI exception, so llm_client's three-attempt retry loop does not
+     turn one ladder into three. There is no paid fallback here.
 
 The caller gets an ordinary ChatCompletion whose usage is the SUM over every
 attempt that reported usage, so the ledger books the quota a failed XHigh
@@ -51,15 +60,19 @@ from uuid import uuid4
 import httpx
 
 from bot.llm import provider as llm_provider
+from bot.llm import soclaas_models
 
 logger = logging.getLogger(__name__)
 
-EFFORT_LADDER = ("xhigh", "medium")
+# Each model's ladder, sampler and reply names come from soclaas_models. These
+# two are Qwen's, kept for older eval scripts that import them.
+EFFORT_LADDER = soclaas_models.SOCLAAS_MODELS["qwen3.8:27b"].efforts
+SAMPLER = dict(soclaas_models.SOCLAAS_MODELS["qwen3.8:27b"].sampler)
 # max_tokens caps reasoning and answer together; XHigh needs the room.
 MAX_TOKENS = 65536
-# The sampler the A1 screen and the precompression replay used.
-SAMPLER = {"temperature": 1, "top_p": .95, "top_k": 20}
 RETRY_STATUS = frozenset({408, 500, 502, 503, 504})
+# The gateway will not serve this model with these settings: try the next one.
+MODEL_REJECTED_STATUS = frozenset({400, 404, 422})
 # Wait before the one retry after SoCLaaS reports itself unavailable. On
 # 2026-10-01 (Q46024) every Qwen call got HTTP 503 for the whole research
 # window and each step spent both rungs within ~2 s; a lower effort never
@@ -85,6 +98,11 @@ class StreamRefused(RuntimeError):
     """Access, quota or model refusal. Not eligible for a lower rung."""
 
 
+class ModelRejected(StreamRefused):
+    """The gateway would not serve THIS model (gone, renamed, or refusing these
+    settings). The next model in the chain may still work."""
+
+
 class AttemptFailed(RuntimeError):
     """This rung failed in a way the next rung might not."""
 
@@ -99,6 +117,11 @@ class QwenLadderFailed(RuntimeError):
 
 class QwenUnavailable(QwenLadderFailed):
     """SoCLaaS was unavailable, after its retry or already down for this question."""
+
+
+class QwenRefused(QwenLadderFailed):
+    """An access or quota refusal. Every chain model shares the key and the
+    allowance, so this ends the call without trying the next model."""
 
 
 @dataclass
@@ -156,6 +179,19 @@ class StreamState:
     tool_calls: dict[int, dict[str, str]] = field(default_factory=dict)
 
 
+def reply_matches(requested: str, replied: str) -> bool:
+    """True when ``replied`` is a name the gateway may use for ``requested``.
+
+    Anything else -- the gateway silently serving a different model -- is still
+    refused. DeepSeek answers "x-test-2" requests as "deepseek-v4.1-flash-1017",
+    which its registry entry lists.
+    """
+    if replied == requested:
+        return True
+    model = soclaas_models.lookup(requested)
+    return bool(model and model.accepts_reply(replied))
+
+
 def consume(state: StreamState, raw: str, expected_model: str) -> None:
     """Fold one SSE ``data:`` payload into ``state``."""
     if raw == "[DONE]":
@@ -171,8 +207,8 @@ def consume(state: StreamState, raw: str, expected_model: str) -> None:
         raise AttemptFailed("Stream returned an error")
     if item.get("model"):
         state.model = item["model"]
-        if item["model"] != expected_model:
-            raise StreamRefused("Unexpected response model")
+        if not reply_matches(expected_model, item["model"]):
+            raise ModelRejected("Unexpected response model")
     if item.get("usage"):
         state.usage = item["usage"]
     for choice in item.get("choices", []):
@@ -239,28 +275,35 @@ def timeout_seconds(label: str = "") -> float:
 
 # Labels whose calls are small decisions, not long reasoning: an API-agent step
 # picks the next tool call, and XHigh would spend minutes on each of six steps.
+# "light" is each model's lightest rung (Qwen medium, DeepSeek low).
 # QWEN_START_EFFORT still overrides.
 # A key ending in "/" covers every label under it ("diagnostics/plan-items").
-DEFAULT_START_EFFORT: dict[str, str] = {"apiagent": "medium", "forecast-comment": "medium",
-                                        "diagnostics/": "medium"}
+DEFAULT_START_EFFORT: dict[str, str] = {"apiagent": soclaas_models.LIGHT,
+                                        "forecast-comment": soclaas_models.LIGHT,
+                                        "diagnostics/": soclaas_models.LIGHT}
 
 
-def efforts_for(label: str) -> tuple[str, ...]:
-    """The rungs for one label: from its starting effort down the ladder.
+def start_effort(label: str) -> str:
+    """Where a label's ladder starts: "deep", "light" or an effort name.
 
-    QWEN_START_EFFORT="serp-scrape-extract=medium" starts that label at Medium,
-    which leaves it a single attempt -- there is no rung below Medium.
+    QWEN_START_EFFORT="serp-scrape-extract=light" starts that label on its
+    model's lightest rung, which leaves it a single attempt. "medium" (the
+    value before per-model ladders) still works and means "light" for a model
+    without a medium rung.
     """
     start = DEFAULT_START_EFFORT.get(label) or next(
         (effort for prefix, effort in DEFAULT_START_EFFORT.items()
-         if prefix.endswith("/") and label.startswith(prefix)), EFFORT_LADDER[0])
+         if prefix.endswith("/") and label.startswith(prefix)), soclaas_models.DEEP)
     for entry in os.getenv("QWEN_START_EFFORT", "").split(","):
         name, _, effort = entry.partition("=")
         if name.strip() and name.strip() == label and effort.strip():
             start = effort.strip().lower()
-    if start not in EFFORT_LADDER:
-        raise ValueError(f"QWEN_START_EFFORT for {label!r} must be one of {EFFORT_LADDER}")
-    return EFFORT_LADDER[EFFORT_LADDER.index(start):]
+    return start
+
+
+def efforts_for(label: str, model_id: str | None = None) -> tuple[str, ...]:
+    """The rungs for one label on one model (default: the head of the chain)."""
+    return soclaas_models.effort_ladder(model_id or soclaas_models.primary(), start_effort(label))
 
 
 def set_attempt_log(path: Path | None) -> None:
@@ -290,12 +333,16 @@ def _log_attempt(record: dict) -> None:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def _payload(kwargs: dict[str, Any], effort: str) -> dict[str, Any]:
+def _payload(kwargs: dict[str, Any], effort: str, model_id: str | None = None) -> dict[str, Any]:
+    """One attempt's request: the caller's messages/tools, this model and effort,
+    the model's own sampler. Rebuilt from the caller's kwargs every attempt."""
     payload = {key: value for key, value in kwargs.items() if key not in _LADDER_KEYS}
+    model_id = model_id or str(kwargs.get("model") or "")
+    model = soclaas_models.lookup(model_id)
     caller_cap = kwargs.get("max_tokens") or kwargs.get("max_completion_tokens") or 0
-    payload.update(stream=True, stream_options={"include_usage": True},
+    payload.update(model=model_id, stream=True, stream_options={"include_usage": True},
                    reasoning_effort=effort, max_tokens=max(int(caller_cap), MAX_TOKENS),
-                   **SAMPLER)
+                   **(model.sampler if model else SAMPLER))
     return payload
 
 
@@ -315,6 +362,8 @@ def _refuse_or_retry(route: llm_provider.Route, status: int, response: Any) -> N
     llm_provider.note_failure(route, SimpleNamespace(status_code=status, response=response))
     if status in RETRY_STATUS or is_overload_429(status, response):
         raise Unavailable(f"HTTP {status}")
+    if status in MODEL_REJECTED_STATUS:
+        raise ModelRejected(f"SoCLaaS HTTP {status} for this model")
     raise StreamRefused(f"SoCLaaS HTTP {status}; no lower-effort retry")
 
 
@@ -341,15 +390,33 @@ def _wait_unavailable_sync(route: llm_provider.Route, delay: float) -> None:
         time.sleep(delay)
 
 
-def _give_up_unavailable(label: str, failures: list[str]) -> QwenUnavailable:
-    _note_unavailable_ladder(label)
+def _give_up_unavailable(label: str, failures: list[str], *, last_model: bool = True) -> QwenUnavailable:
+    # Only the LAST model in the chain marks SoCLaaS down for the question: a
+    # "testing" model can be unavailable while the rest of the gateway serves.
+    if last_model:
+        _note_unavailable_ladder(label)
     return QwenUnavailable(
-        f"{label}: SoCLaaS unavailable, retry failed too; down for this question -- "
+        f"{label}: SoCLaaS unavailable, retry failed too"
+        + ("; down for this question" if last_model else "") + " -- "
         + "; ".join(failures)
     )
 
 
-def _completion(state: StreamState, effort: str, usages: list[dict | None]):
+def _attempt_quota(model_id: str, usage: dict | None) -> float:
+    if not usage:
+        return 0.0
+    return soclaas_models.quota_microdollars(
+        model_id, int(usage.get("prompt_tokens") or 0), int(usage.get("completion_tokens") or 0))
+
+
+def _completion(state: StreamState, effort: str, attempts: list[tuple[str, dict | None]],
+                model_id: str = ""):
+    """The ChatCompletion handed back to the caller.
+
+    ``attempts`` is (model, usage) for every attempt of this request, on every
+    model tried, so the ledger books the quota a failed attempt spent too --
+    each priced at the rate of the model that ran it (soclaas_quota_microdollars).
+    """
     from openai.types.chat import ChatCompletion
 
     tool_calls = [
@@ -357,7 +424,7 @@ def _completion(state: StreamState, effort: str, usages: list[dict | None]):
          "function": {"name": call["name"], "arguments": call["arguments"] or "{}"}}
         for index, call in sorted(state.tool_calls.items()) if call["name"]
     ]
-    known = [usage for usage in usages if usage]
+    known = [usage for _, usage in attempts if usage]
     usage = None
     if known:
         prompt = sum(int(u.get("prompt_tokens") or 0) for u in known)
@@ -378,19 +445,33 @@ def _completion(state: StreamState, effort: str, usages: list[dict | None]):
         }],
         "usage": usage,
         "qwen_effort": effort,
-        "qwen_attempts": len(usages),
+        "qwen_attempts": len(attempts),
+        "soclaas_model": model_id,
+        "soclaas_quota_microdollars": sum(_attempt_quota(m, u) for m, u in attempts),
     })
 
 
-def _record(call_id, label, effort, outcome, start, state, error=None) -> dict:
+def _record(call_id, label, effort, outcome, start, state, error=None, model="") -> dict:
     return {
         "utc": datetime.now(timezone.utc).isoformat(), "call_id": call_id,
-        "label": label, "effort": effort,
+        "label": label, "model": model, "effort": effort,
         "outcome": outcome, "seconds": round(time.monotonic() - start, 3),
         "finish_reason": state.finish, "done_marker": state.done, "usage": state.usage,
         "answer_chars": len(state.answer), "reasoning_chars": len(state.reasoning),
         "error": error,
     }
+
+
+def _chain_routes(route: llm_provider.Route) -> list[llm_provider.Route]:
+    """The route asked for, then a route for each later model in the chain."""
+    ids = soclaas_models.fallbacks_from(route.model_id)
+    return [route] + [llm_provider.route_for_model(model_id) for model_id in ids[1:]]
+
+
+def _fall_back(label: str, route: llm_provider.Route, nxt: llm_provider.Route,
+               exc: QwenLadderFailed) -> None:
+    logger.warning("[soclaas] %s: %s failed (%s); falling back to %s",
+                   label, route.model_id, exc, nxt.model_id)
 
 
 def _client_settings(route: llm_provider.Route, label: str = "") -> dict[str, Any]:
@@ -403,14 +484,50 @@ def _client_settings(route: llm_provider.Route, label: str = "") -> dict[str, An
 
 async def run_async(route: llm_provider.Route, kwargs: dict[str, Any], *,
                     transport: httpx.AsyncBaseTransport | None = None):
+    """One request through the ladder, falling back down SOCLAAS_MODEL_CHAIN.
+
+    Each model gets its own full ladder. When it fails -- every rung failed,
+    the gateway rejected the model (HTTP 400/404/422 or a reply naming another
+    model), or it stayed unavailable after its retry -- the same request goes
+    to the next model in the chain. An access or quota refusal ends the call
+    (QwenRefused): the next model shares the allowance. When the last model
+    fails, the call fails: there is no paid fallback.
+    """
     label = current_label.get() or "unlabelled"
     _raise_if_down(label)
     call_id = uuid4().hex[:12]
+    attempts: list[tuple[str, dict | None]] = []
+    routes = _chain_routes(route)
+    earlier: list[str] = []
+    for index, model_route in enumerate(routes):
+        last = index == len(routes) - 1
+        try:
+            return await _ladder_async(model_route, kwargs, label, call_id, attempts,
+                                       transport=transport, last_model=last)
+        except QwenRefused:
+            raise
+        except QwenLadderFailed as exc:
+            if last:
+                if earlier:
+                    raise type(exc)(f"{exc} | earlier models: " + " | ".join(earlier)) from exc
+                raise
+            earlier.append(str(exc))
+            _fall_back(label, model_route, routes[index + 1], exc)
+            await llm_provider.gate_for(routes[index + 1]).wait_async()
+    raise QwenLadderFailed(f"{label}: no SoCLaaS model to try")  # pragma: no cover
+
+
+async def _ladder_async(route: llm_provider.Route, kwargs: dict[str, Any], label: str,
+                        call_id: str, attempts: list[tuple[str, dict | None]], *,
+                        transport: httpx.AsyncBaseTransport | None, last_model: bool):
+    """Every rung on ONE model."""
     url = route.endpoint.base_url + "/chat/completions"
     deadline = timeout_seconds(label)
-    usages: list[dict | None] = []
     failures: list[str] = []
-    efforts = efforts_for(label)
+    try:
+        efforts = efforts_for(label, route.model_id)
+    except ValueError as exc:  # an unregistered model or an effort it lacks
+        raise QwenLadderFailed(f"{label}: {exc}") from exc
     backoffs = list(UNAVAILABLE_BACKOFF_SECONDS)
     rung = 0
     async with httpx.AsyncClient(
@@ -425,7 +542,8 @@ async def run_async(route: llm_provider.Route, kwargs: dict[str, Any], *,
                 async with llm_provider.gate_for(route).in_flight_async():
                     start = time.monotonic()
                     async with asyncio.timeout(deadline):
-                        async with client.stream("POST", url, json=_payload(kwargs, effort)) as response:
+                        payload = _payload(kwargs, effort, route.model_id)
+                        async with client.stream("POST", url, json=payload) as response:
                             if response.status_code >= 400:
                                 await response.aread()
                                 _refuse_or_retry(route, response.status_code, response)
@@ -446,16 +564,18 @@ async def run_async(route: llm_provider.Route, kwargs: dict[str, Any], *,
                 outcome, error = "failed", f"{type(exc).__name__}: {exc}"
             except StreamRefused as exc:
                 outcome, error = "refused", str(exc)
-                raise QwenLadderFailed(f"{label}: {exc}") from exc
+                failed = QwenLadderFailed if isinstance(exc, ModelRejected) else QwenRefused
+                raise failed(f"{label}: {route.model_id}: {exc}") from exc
             finally:
-                usages.append(state.usage)
-                _log_attempt(_record(call_id, label, effort, outcome, start, state, error))
+                attempts.append((route.model_id, state.usage))
+                _log_attempt(_record(call_id, label, effort, outcome, start, state, error,
+                                     model=route.model_id))
             if outcome == "ok":
-                return _completion(state, effort, usages)
+                return _completion(state, effort, attempts, route.model_id)
             failures.append(f"{effort} {outcome}: {error}")
             if outcome == "unavailable":
                 if not backoffs:
-                    raise _give_up_unavailable(label, failures)
+                    raise _give_up_unavailable(label, failures, last_model=last_model)
                 # Same rung again: the request was never served, so less
                 # thinking would only waste the effort the label asked for.
                 await _wait_unavailable_async(route, backoffs.pop(0))
@@ -464,12 +584,13 @@ async def run_async(route: llm_provider.Route, kwargs: dict[str, Any], *,
             if rung < len(efforts):
                 # The caller gated the first request; a retry is another request.
                 await llm_provider.gate_for(route).wait_async()
-    raise QwenLadderFailed(f"{label}: every Qwen attempt failed -- " + "; ".join(failures))
+    raise QwenLadderFailed(f"{label}: every attempt on {route.model_id} failed -- " + "; ".join(failures))
 
 
 def run_sync(route: llm_provider.Route, kwargs: dict[str, Any], *,
              transport: httpx.BaseTransport | None = None):
-    """The same ladder for the synchronous prediction-market providers.
+    """The same ladder and chain fallback for the synchronous prediction-market
+    providers.
 
     httpx's read timeout bounds silence between chunks; the total deadline is
     checked between chunks, so a stream that keeps trickling cannot run on.
@@ -477,11 +598,37 @@ def run_sync(route: llm_provider.Route, kwargs: dict[str, Any], *,
     label = current_label.get() or "unlabelled"
     _raise_if_down(label)
     call_id = uuid4().hex[:12]
+    attempts: list[tuple[str, dict | None]] = []
+    routes = _chain_routes(route)
+    earlier: list[str] = []
+    for index, model_route in enumerate(routes):
+        last = index == len(routes) - 1
+        try:
+            return _ladder_sync(model_route, kwargs, label, call_id, attempts,
+                                transport=transport, last_model=last)
+        except QwenRefused:
+            raise
+        except QwenLadderFailed as exc:
+            if last:
+                if earlier:
+                    raise type(exc)(f"{exc} | earlier models: " + " | ".join(earlier)) from exc
+                raise
+            earlier.append(str(exc))
+            _fall_back(label, model_route, routes[index + 1], exc)
+            llm_provider.gate_for(routes[index + 1]).wait_sync()
+    raise QwenLadderFailed(f"{label}: no SoCLaaS model to try")  # pragma: no cover
+
+
+def _ladder_sync(route: llm_provider.Route, kwargs: dict[str, Any], label: str,
+                 call_id: str, attempts: list[tuple[str, dict | None]], *,
+                 transport: httpx.BaseTransport | None, last_model: bool):
     url = route.endpoint.base_url + "/chat/completions"
     deadline = timeout_seconds(label)
-    usages: list[dict | None] = []
     failures: list[str] = []
-    efforts = efforts_for(label)
+    try:
+        efforts = efforts_for(label, route.model_id)
+    except ValueError as exc:
+        raise QwenLadderFailed(f"{label}: {exc}") from exc
     backoffs = list(UNAVAILABLE_BACKOFF_SECONDS)
     rung = 0
     with httpx.Client(
@@ -493,7 +640,8 @@ def run_sync(route: llm_provider.Route, kwargs: dict[str, Any], *,
             try:
                 with llm_provider.gate_for(route).in_flight_sync():
                     start = time.monotonic()
-                    with client.stream("POST", url, json=_payload(kwargs, effort)) as response:
+                    payload = _payload(kwargs, effort, route.model_id)
+                    with client.stream("POST", url, json=payload) as response:
                         if response.status_code >= 400:
                             response.read()
                             _refuse_or_retry(route, response.status_code, response)
@@ -518,22 +666,24 @@ def run_sync(route: llm_provider.Route, kwargs: dict[str, Any], *,
                 outcome, error = "failed", f"{type(exc).__name__}: {exc}"
             except StreamRefused as exc:
                 outcome, error = "refused", str(exc)
-                raise QwenLadderFailed(f"{label}: {exc}") from exc
+                failed = QwenLadderFailed if isinstance(exc, ModelRejected) else QwenRefused
+                raise failed(f"{label}: {route.model_id}: {exc}") from exc
             finally:
-                usages.append(state.usage)
-                _log_attempt(_record(call_id, label, effort, outcome, start, state, error))
+                attempts.append((route.model_id, state.usage))
+                _log_attempt(_record(call_id, label, effort, outcome, start, state, error,
+                                     model=route.model_id))
             if outcome == "ok":
-                return _completion(state, effort, usages)
+                return _completion(state, effort, attempts, route.model_id)
             failures.append(f"{effort} {outcome}: {error}")
             if outcome == "unavailable":
                 if not backoffs:
-                    raise _give_up_unavailable(label, failures)
+                    raise _give_up_unavailable(label, failures, last_model=last_model)
                 _wait_unavailable_sync(route, backoffs.pop(0))
                 continue
             rung += 1
             if rung < len(efforts):
                 llm_provider.gate_for(route).wait_sync()
-    raise QwenLadderFailed(f"{label}: every Qwen attempt failed -- " + "; ".join(failures))
+    raise QwenLadderFailed(f"{label}: every attempt on {route.model_id} failed -- " + "; ".join(failures))
 
 
 class _AsyncCompletions:

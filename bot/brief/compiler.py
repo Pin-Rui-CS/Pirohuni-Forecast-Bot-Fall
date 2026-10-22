@@ -469,6 +469,7 @@ async def review_qwen_precompression(
     research_trace.emit(
         "precompress", name, candidate.answer or "", status="experimental",
         meta={"artifact_dir": str(candidate.artifact_dir), "effort": candidate.selected_effort,
+              "model": candidate.selected_model,
               "semantic_review": "pending", "input_chars": len(content)},
         **_precompress_lineage(name, content, candidate.answer),
     )

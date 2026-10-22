@@ -13,12 +13,14 @@ name: Test Metaculus Cup questions
           - "openrouter"
           - "openai"
       research_models:
-        description: "SETTING 1 - research (everything before the forecast). original = paid Sonnet/Opus, no Qwen. qwen = the tested Qwen setup (free; evidence plan stays on Sonnet; ~45-70 min)."
+        description: "SETTING 1 - research (everything before the forecast). original = paid Sonnet/Opus. soclaas = free SoCLaaS models, DeepSeek first and Qwen if it fails (evidence plan stays on Sonnet). soclaas-qwen-only = the previous Qwen-only setup. qwen = old name for soclaas."
         required: true
         default: "original"
         type: choice
         options:
           - "original"
+          - "soclaas"
+          - "soclaas-qwen-only"
           - "qwen"
       # SETTING 2 - forecasters. Each ticked model makes one forecast from the
       # compiled brief; raw_research_forecaster adds one run on the raw research.
@@ -49,7 +51,7 @@ name: Test Metaculus Cup questions
         default: false
         type: boolean
       forecaster_qwen:
-        description: "Forecaster (reads the brief): Qwen 3.8 27B (free)"
+        description: "Forecaster (reads the brief): the SoCLaaS model, DeepSeek first then Qwen (free)"
         required: true
         default: false
         type: boolean
@@ -64,6 +66,7 @@ name: Test Metaculus Cup questions
           - "GPT-6.1 Sol"
           - "GPT-6 Astra"
           - "Gemini 4 Argon"
+          - "SoCLaaS DeepSeek->Qwen (free)"
           - "Qwen 3.8 27B (free)"
           - "none"
       question_id:
@@ -170,7 +173,8 @@ jobs:
           [ "$FC_CLAUDE_OPUS" = "true" ] && MODELS+=("anthropic/claude-opus-5.5")
           [ "$FC_GPT56_SOL" = "true" ] && MODELS+=("openai/gpt-6.1-sol")
           [ "$FC_CLAUDE_SONNET" = "true" ] && MODELS+=("anthropic/claude-sonnet-5")
-          [ "$FC_QWEN" = "true" ] && MODELS+=("qwen3.8:27b")
+          # "soclaas" = the head of SOCLAAS_MODEL_CHAIN, falling back down it.
+          [ "$FC_QWEN" = "true" ] && MODELS+=("soclaas")
           if [ "${#MODELS[@]}" -eq 0 ]; then echo "Tick at least one brief forecaster." >&2; exit 1; fi
           case "$RAW_FORECASTER" in
             "Claude Sonnet 5") RAW_MODEL="anthropic/claude-sonnet-5" ;;
@@ -178,6 +182,7 @@ jobs:
             "GPT-6.1 Sol") RAW_MODEL="openai/gpt-6.1-sol" ;;
             "GPT-6 Astra") RAW_MODEL="openai/gpt-6-astra" ;;
             "Gemini 4 Argon") RAW_MODEL="google/gemini-4-argon" ;;
+            "SoCLaaS DeepSeek->Qwen (free)") RAW_MODEL="soclaas" ;;
             "Qwen 3.8 27B (free)") RAW_MODEL="qwen3.8:27b" ;;
             "none") RAW_MODEL="" ;;
             *) echo "Unknown raw_research_forecaster: $RAW_FORECASTER" >&2; exit 1 ;;
@@ -397,18 +402,22 @@ jobs:
           ENABLE_TAVILY_RESEARCH: ${{ vars.ENABLE_TAVILY_RESEARCH || 'true' }}
           ENABLE_PREDICTION_MARKET_RESEARCH: ${{ vars.ENABLE_PREDICTION_MARKET_RESEARCH || 'true' }}
           FIRECRAWL_SEARCH_TBS: ${{ vars.FIRECRAWL_SEARCH_TBS || '' }}
-          # SETTING 1 = qwen. On an original run each is off or the code default
+          # SETTING 1 = soclaas (or soclaas-qwen-only, or the old name qwen). Which
+          # SoCLaaS models, in order; each falls back to the next. Swapping in a new
+          # model: add it to bot/llm/soclaas_models.py, then put it first here.
+          SOCLAAS_MODEL_CHAIN: ${{ inputs.research_models == 'soclaas-qwen-only' && 'qwen3.8:27b' || 'x-test-2,qwen3.8:27b' }}
+          # On an original run each is off or the code default
           # (never empty: the timeouts are parsed with int()/float()).
-          QWEN_RESEARCH_LABELS: ${{ inputs.research_models == 'qwen' && 'recommended' || '' }}
-          QWEN_LADDER: ${{ inputs.research_models == 'qwen' && '1' || '' }}
-          QWEN_START_EFFORT: ${{ inputs.research_models == 'qwen' && 'serp-scrape-extract=medium,asknews-filter=medium' || '' }}
-          SOCLAAS_PRECOMPRESS_MODE: ${{ inputs.research_models == 'qwen' && 'experimental' || 'off' }}
-          SOCLAAS_PRECOMPRESS_OVERFLOW: ${{ inputs.research_models == 'qwen' && 'truncate' || 'pause' }}
-          SOCLAAS_PRECOMPRESS_CHECKS: ${{ inputs.research_models == 'qwen' && 'advisory' || 'strict' }}
+          QWEN_RESEARCH_LABELS: ${{ inputs.research_models != 'original' && 'recommended' || '' }}
+          QWEN_LADDER: ${{ inputs.research_models != 'original' && '1' || '' }}
+          QWEN_START_EFFORT: ${{ inputs.research_models != 'original' && 'serp-scrape-extract=light,asknews-filter=light' || '' }}
+          SOCLAAS_PRECOMPRESS_MODE: ${{ inputs.research_models != 'original' && 'experimental' || 'off' }}
+          SOCLAAS_PRECOMPRESS_OVERFLOW: ${{ inputs.research_models != 'original' && 'truncate' || 'pause' }}
+          SOCLAAS_PRECOMPRESS_CHECKS: ${{ inputs.research_models != 'original' && 'advisory' || 'strict' }}
           # Qwen research measured 44-67 min per question; the default per-question
           # limit is 20 min (1200). Paid runs keep the defaults.
-          QUESTION_TIMEOUT_SECONDS: ${{ inputs.research_models == 'qwen' && '10800' || '1200' }}
-          ARTIFACT_RETRY_TIMEOUT_SECONDS: ${{ inputs.research_models == 'qwen' && '3600' || '150' }}
+          QUESTION_TIMEOUT_SECONDS: ${{ inputs.research_models != 'original' && '10800' || '1200' }}
+          ARTIFACT_RETRY_TIMEOUT_SECONDS: ${{ inputs.research_models != 'original' && '3600' || '150' }}
 
       - name: Publish run to the forecast library
         # Never fails or blocks forecasting: a no-op until the SUPABASE_*

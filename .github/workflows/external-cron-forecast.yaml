@@ -31,13 +31,15 @@ name: Forecast via external cron
         default: true
         type: boolean
       research_models:
-        description: "SETTING 1 - research. qwen = the tested Qwen setup (free; evidence plan stays on Sonnet; ~45-70 min/question). original = paid Sonnet/Opus, no Qwen."
+        description: "SETTING 1 - research. soclaas = free SoCLaaS models, DeepSeek first and Qwen if it fails (evidence plan stays on Sonnet). soclaas-qwen-only = the previous Qwen-only setup. original = paid Sonnet/Opus. qwen = old name for soclaas."
         required: false
-        default: "qwen"
+        default: "soclaas"
         type: choice
         options:
-          - "qwen"
+          - "soclaas"
+          - "soclaas-qwen-only"
           - "original"
+          - "qwen"
       forecaster_gemini4_argon:
         description: "Forecaster (reads the brief): Gemini 4 Argon (replaced GPT-6 Astra 2026-10-16; ~1/5 of Astra's price)"
         required: false
@@ -64,22 +66,23 @@ name: Forecast via external cron
         default: false
         type: boolean
       forecaster_qwen:
-        description: "Forecaster (reads the brief): Qwen 3.8 27B (free)"
+        description: "Forecaster (reads the brief): the SoCLaaS model, DeepSeek first then Qwen (free)"
         required: false
         default: false
         type: boolean
       raw_research_forecaster:
-        description: "Raw-research forecaster: one extra run that reads the raw research instead of the brief (catches evidence the brief dropped). Qwen is free."
+        description: "Raw-research forecaster: one extra run that reads the raw research instead of the brief (catches evidence the brief dropped). SoCLaaS models are free."
         required: false
-        default: "Qwen 3.8 27B (free)"
+        default: "SoCLaaS DeepSeek->Qwen (free)"
         type: choice
         options:
+          - "SoCLaaS DeepSeek->Qwen (free)"
+          - "Qwen 3.8 27B (free)"
           - "Claude Sonnet 5"
           - "Claude Opus 5.5"
           - "GPT-6.1 Sol"
           - "GPT-6 Astra"
           - "Gemini 4 Argon"
-          - "Qwen 3.8 27B (free)"
           - "none"
 
 # Prevent overlapping external cron runs.
@@ -140,7 +143,7 @@ jobs:
           echo "LLM_PROVIDER:         ${{ vars.LLM_PROVIDER || 'openrouter' }}"
           echo "OPENROUTER_API_KEY:   $([ -n '${{ secrets.OPENROUTER_API_KEY }}'   ] && echo 'SET' || echo 'MISSING')"
           echo "SOCLAAS_API_KEY:      $([ -n '${{ secrets.SOCLAAS_API_KEY }}'      ] && echo 'SET' || echo 'MISSING')"
-          echo "RESEARCH_MODELS:      ${{ inputs.research_models || 'qwen' }}  (TIER1/TIER2_MODEL repo variables are not used by this workflow)"
+          echo "RESEARCH_MODELS:      ${{ inputs.research_models || 'soclaas' }}  (TIER1/TIER2_MODEL repo variables are not used by this workflow)"
           echo "OPENAI_API_KEY:       $([ -n '${{ secrets.OPENAI_API_KEY }}'       ] && echo 'SET' || echo 'MISSING')"
           echo "ASKNEWS_CLIENT_ID:    $([ -n '${{ secrets.ASKNEWS_CLIENT_ID }}'    ] && echo 'SET' || echo 'MISSING')"
           echo "ASKNEWS_SECRET:       $([ -n '${{ secrets.ASKNEWS_SECRET }}'       ] && echo 'SET' || echo 'MISSING')"
@@ -215,14 +218,15 @@ jobs:
           FC_GEMINI4_ARGON="${FC_GEMINI4_ARGON:-true}"
           FC_GPT6_ASTRA="${FC_GPT6_ASTRA:-false}"; FC_CLAUDE_OPUS="${FC_CLAUDE_OPUS:-true}"
           FC_GPT56_SOL="${FC_GPT56_SOL:-true}"; FC_CLAUDE_SONNET="${FC_CLAUDE_SONNET:-false}"
-          FC_QWEN="${FC_QWEN:-false}"; RAW_FORECASTER="${RAW_FORECASTER:-Qwen 3.8 27B (free)}"
+          FC_QWEN="${FC_QWEN:-false}"; RAW_FORECASTER="${RAW_FORECASTER:-SoCLaaS DeepSeek->Qwen (free)}"
           MODELS=()
           [ "$FC_GEMINI4_ARGON" = "true" ] && MODELS+=("google/gemini-4-argon")
           [ "$FC_GPT6_ASTRA" = "true" ] && MODELS+=("openai/gpt-6-astra")
           [ "$FC_CLAUDE_OPUS" = "true" ] && MODELS+=("anthropic/claude-opus-5.5")
           [ "$FC_GPT56_SOL" = "true" ] && MODELS+=("openai/gpt-6.1-sol")
           [ "$FC_CLAUDE_SONNET" = "true" ] && MODELS+=("anthropic/claude-sonnet-5")
-          [ "$FC_QWEN" = "true" ] && MODELS+=("qwen3.8:27b")
+          # "soclaas" = the head of SOCLAAS_MODEL_CHAIN, falling back down it.
+          [ "$FC_QWEN" = "true" ] && MODELS+=("soclaas")
           if [ "${#MODELS[@]}" -eq 0 ]; then echo "Tick at least one brief forecaster." >&2; exit 1; fi
           case "$RAW_FORECASTER" in
             "Claude Sonnet 5") RAW_MODEL="anthropic/claude-sonnet-5" ;;
@@ -230,6 +234,7 @@ jobs:
             "GPT-6.1 Sol") RAW_MODEL="openai/gpt-6.1-sol" ;;
             "GPT-6 Astra") RAW_MODEL="openai/gpt-6-astra" ;;
             "Gemini 4 Argon") RAW_MODEL="google/gemini-4-argon" ;;
+            "SoCLaaS DeepSeek->Qwen (free)") RAW_MODEL="soclaas" ;;
             "Qwen 3.8 27B (free)") RAW_MODEL="qwen3.8:27b" ;;
             "none") RAW_MODEL="" ;;
             *) echo "Unknown raw_research_forecaster: $RAW_FORECASTER" >&2; exit 1 ;;
@@ -328,19 +333,23 @@ jobs:
           FC_GPT56_SOL: ${{ inputs.forecaster_gpt56_sol }}
           FC_CLAUDE_SONNET: ${{ inputs.forecaster_claude_sonnet }}
           FC_QWEN: ${{ inputs.forecaster_qwen }}
-          RAW_FORECASTER: ${{ inputs.raw_research_forecaster || 'Qwen 3.8 27B (free)' }}
-          RESEARCH_MODELS: ${{ inputs.research_models || 'qwen' }}
-          # SETTING 1 = qwen. On an original run each is off or the code default
-          # (never empty: the timeouts are parsed with int()/float()).
-          QWEN_RESEARCH_LABELS: ${{ (inputs.research_models || 'qwen') == 'qwen' && 'recommended' || '' }}
-          QWEN_LADDER: ${{ (inputs.research_models || 'qwen') == 'qwen' && '1' || '' }}
-          QWEN_START_EFFORT: ${{ (inputs.research_models || 'qwen') == 'qwen' && 'serp-scrape-extract=medium,asknews-filter=medium' || '' }}
-          SOCLAAS_PRECOMPRESS_MODE: ${{ (inputs.research_models || 'qwen') == 'qwen' && 'experimental' || 'off' }}
-          SOCLAAS_PRECOMPRESS_OVERFLOW: ${{ (inputs.research_models || 'qwen') == 'qwen' && 'truncate' || 'pause' }}
-          SOCLAAS_PRECOMPRESS_CHECKS: ${{ (inputs.research_models || 'qwen') == 'qwen' && 'advisory' || 'strict' }}
+          RAW_FORECASTER: ${{ inputs.raw_research_forecaster || 'SoCLaaS DeepSeek->Qwen (free)' }}
+          RESEARCH_MODELS: ${{ inputs.research_models || 'soclaas' }}
+          # SETTING 1 = soclaas (or soclaas-qwen-only, or the old name qwen). On an
+          # original run each is off or the code default (never empty: the
+          # timeouts are parsed with int()/float()).
+          # Which SoCLaaS models, in order; each falls back to the next. Swapping
+          # in a new model: add it to bot/llm/soclaas_models.py, then put it first here.
+          SOCLAAS_MODEL_CHAIN: ${{ (inputs.research_models || 'soclaas') == 'soclaas-qwen-only' && 'qwen3.8:27b' || 'x-test-2,qwen3.8:27b' }}
+          QWEN_RESEARCH_LABELS: ${{ (inputs.research_models || 'soclaas') != 'original' && 'recommended' || '' }}
+          QWEN_LADDER: ${{ (inputs.research_models || 'soclaas') != 'original' && '1' || '' }}
+          QWEN_START_EFFORT: ${{ (inputs.research_models || 'soclaas') != 'original' && 'serp-scrape-extract=light,asknews-filter=light' || '' }}
+          SOCLAAS_PRECOMPRESS_MODE: ${{ (inputs.research_models || 'soclaas') != 'original' && 'experimental' || 'off' }}
+          SOCLAAS_PRECOMPRESS_OVERFLOW: ${{ (inputs.research_models || 'soclaas') != 'original' && 'truncate' || 'pause' }}
+          SOCLAAS_PRECOMPRESS_CHECKS: ${{ (inputs.research_models || 'soclaas') != 'original' && 'advisory' || 'strict' }}
           # Qwen research measured 44-67 min per question; the default limit is 20 min.
-          QUESTION_TIMEOUT_SECONDS: ${{ (inputs.research_models || 'qwen') == 'qwen' && '10800' || '1200' }}
-          ARTIFACT_RETRY_TIMEOUT_SECONDS: ${{ (inputs.research_models || 'qwen') == 'qwen' && '3600' || '150' }}
+          QUESTION_TIMEOUT_SECONDS: ${{ (inputs.research_models || 'soclaas') != 'original' && '10800' || '1200' }}
+          ARTIFACT_RETRY_TIMEOUT_SECONDS: ${{ (inputs.research_models || 'soclaas') != 'original' && '3600' || '150' }}
 
       - name: Publish run to the forecast library
         # Never fails or blocks forecasting: a no-op until the SUPABASE_*

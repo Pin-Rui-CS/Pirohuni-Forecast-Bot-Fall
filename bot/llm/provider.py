@@ -84,6 +84,8 @@ from typing import Any, Final
 
 import dotenv
 
+from bot.llm import soclaas_models
+
 dotenv.load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -626,11 +628,10 @@ TIER2_ROLE_NAMES: Final[frozenset[str]] = frozenset(
 # Microdollars per 1M tokens (input, output), from the gateway's own model
 # table. No real money is charged, but the allowance is real -- measured
 # $50/day against documented $80 -- so it is tracked as `quota`, never as cost.
+# The rates and every other per-model fact live in soclaas_models; this view is
+# kept for callers that only need the rates.
 SOCLAAS_QUOTA_RATES: Final[dict[str, tuple[float, float]]] = {
-    "qwen3.8:27b": (195_000.0, 900_000.0),
-    "qwen3.6:35b": (140_000.0, 900_000.0),
-    "gemma4:26b": (60_000.0, 300_000.0),
-    "llama3.1:8b": (20_000.0, 30_000.0),
+    model_id: model.quota_rate for model_id, model in soclaas_models.SOCLAAS_MODELS.items()
 }
 
 # Where a SoCLaaS route falls back when the gateway is down. An internal NAME,
@@ -753,7 +754,10 @@ def _soclaas_route(model_id: str) -> Route:
         sends_usage_accounting=False,
         cost_source="quota",
         quota_rate_microdollars=SOCLAAS_QUOTA_RATES.get(model_id),
-        fallback=_QUOTA_FALLBACK_ROLE,
+        # A failed SoCLaaS model falls back to the next model in
+        # SOCLAAS_MODEL_CHAIN, inside the request ladder -- never to a paid
+        # endpoint, so no cross-endpoint fallback is declared here.
+        fallback=None,
     )
 
 
@@ -764,9 +768,15 @@ def route_for_model(model_id: str) -> Route:
     (gpt-6-astra-pro, qwen3.6:35b) works without an edit here. An unrecognised
     id falls through to OpenRouter, which is the one endpoint that multiplexes
     every vendor -- the safest guess, and it is logged.
+
+    SoCLaaS ids are the ones in soclaas_models.SOCLAAS_MODELS (DeepSeek's
+    "x-test-2" has no colon), plus any `family:size` id; the role name
+    "soclaas" resolves to the head of SOCLAAS_MODEL_CHAIN.
     """
     name = model_id.strip()
-    if name in SOCLAAS_QUOTA_RATES or ":" in name:
+    if name == soclaas_models.SOCLAAS_ROLE:
+        return _soclaas_route(soclaas_models.primary())
+    if name in soclaas_models.SOCLAAS_MODELS or ":" in name:
         # `family:size` is the gateway's id convention and nobody else's.
         return _soclaas_route(name)
     if "gpt-6" in name or "gpt-5" in name:
@@ -941,7 +951,12 @@ def _fallback_route(model: str) -> Route:
 # "recommended" is the same minus the evidence plan (see below).
 # The Wikipedia adapter is the one research task it never tested, so it is
 # deliberately absent. Unset means routing is unchanged.
-QWEN_RESEARCH_MODEL: Final = "qwen3.8:27b"
+#
+# The label names "Qwen" are historical: these tasks go to SOCLAAS_RESEARCH_MODEL,
+# the role that resolves to the head of SOCLAAS_MODEL_CHAIN (DeepSeek first,
+# then Qwen; see soclaas_models). QWEN_RESEARCH_MODEL is the old name, kept.
+SOCLAAS_RESEARCH_MODEL: Final = soclaas_models.SOCLAAS_ROLE
+QWEN_RESEARCH_MODEL: Final = SOCLAAS_RESEARCH_MODEL
 QWEN_TESTED_RESEARCH_LABELS: Final[tuple[str, ...]] = (
     "asknews-filter",
     "evidence-plan",
@@ -986,7 +1001,7 @@ def _qwen_label_override(label: str | None) -> str | None:
         return None
     for pattern in qwen_research_labels():
         if label == pattern or (pattern.endswith("/") and label.startswith(pattern)):
-            return QWEN_RESEARCH_MODEL
+            return SOCLAAS_RESEARCH_MODEL
     return None
 
 
@@ -1084,6 +1099,16 @@ def preflight() -> list[str]:
                 f"{name!r} falls back to {route.fallback!r}, but both are on "
                 f"{route.endpoint.label} -- a fallback must cross endpoints"
             )
+
+    # 4. The SoCLaaS chain: every model must be in the registry (it holds the
+    #    reply names, efforts and rates the ladder needs), and the gateway key
+    #    must be set when research tasks are routed there.
+    problems.extend(soclaas_models.chain_problems())
+    if qwen_research_labels() and not api_key_for(ENDPOINT_SOCLAAS):
+        problems.append(
+            f"QWEN_RESEARCH_LABELS routes research to {ENDPOINT_SOCLAAS.label} but "
+            f"{ENDPOINT_SOCLAAS.api_key_env} is not set"
+        )
     return problems
 
 
@@ -1127,7 +1152,10 @@ def build_kwargs(
     if effort:
         kwargs["reasoning_effort"] = effort
     if route.thinks_unless_disabled and not deliberate:
-        kwargs["reasoning_effort"] = "none"
+        # The model's own "don't think" setting: "none" for Qwen; DeepSeek
+        # gets its lightest tested effort (soclaas_models.no_think_effort).
+        model = soclaas_models.lookup(route.model_id)
+        kwargs["reasoning_effort"] = model.no_think_effort if model else "none"
 
     visible = kwargs.pop("max_tokens", None)
     if visible is not None:
