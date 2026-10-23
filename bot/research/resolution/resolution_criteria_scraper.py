@@ -892,6 +892,15 @@ async def scrape_resolution_sources(
             timeout=timeout,
             target_date=target_date,
         )
+    # No measured series: the source may still carry its numbers in the page
+    # source (a map's per-region classes, a chart's weekly values and forecast).
+    # Free like the series ladder, and for every question type: a snapshot can
+    # decide a binary question as easily as a count.
+    if not series_section:
+        series_section = await _build_embedded_data_section(
+            (criteria_urls or urls)[:_EMBEDDED_MAX_PAGES], question_text=question_text,
+            timeout=timeout,
+        )
 
     criteria_url_set = set(criteria_urls)
     sections: list[str] = []
@@ -996,6 +1005,57 @@ async def scrape_resolution_sources(
         + series_section
         + "\n\n---\n\n".join(sections)
         + history_section
+    )
+
+
+# ===========================================================================
+# Embedded page data (free: plain HTTP, no LLM, no Firecrawl)
+# ===========================================================================
+
+EMBEDDED_SECTION_TITLE = "Data embedded in the resolution source"
+_EMBEDDED_MAX_PAGES = 3
+_EMBEDDED_MAX_CHARS = 9000
+
+
+async def _build_embedded_data_section(urls: list[str], *, question_text: str, timeout: int) -> str:
+    """Tables shipped inside the resolution pages' HTML, which a markdown scrape drops.
+
+    Returns "" when no page carries any. Size-capped and ranked by relevance to
+    the question, so a map's geometry never crowds out its values.
+    """
+    if not urls:
+        return ""
+    import httpx
+
+    from bot.research.resolution.embedded_tables import extract_tables, render_section
+    from bot.research.resolution.series_discovery import USER_AGENT, _fetch
+
+    pages = []
+    async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT}, timeout=timeout,
+                                 follow_redirects=True) as client:
+        for index, url in enumerate(urls, start=1):
+            try:
+                fetched = await _fetch(client, url)
+            except Exception as exc:  # noqa: BLE001 - optional enrichment
+                logger.debug("Embedded-data fetch failed for %s: %s", url, exc)
+                continue
+            if fetched is None:
+                continue
+            tables = extract_tables(fetched[2], fetched[0], id_prefix=f"P{index}.T")
+            if tables:
+                pages.append((fetched[2], tables))
+    if not pages:
+        return ""
+    count = sum(len(t) for _, t in pages)
+    logger.info("Embedded data: %d table(s) in %d resolution page(s)", count, len(pages))
+    body = render_section(pages, question_text, max_chars=_EMBEDDED_MAX_CHARS)
+    return (
+        f"## {EMBEDDED_SECTION_TITLE}\n\n"
+        "_Read deterministically from data embedded in the resolution source's page source "
+        "(the numbers behind its maps and charts, which the text scrape does not see). Values "
+        "are quoted exactly; rows marked FUTURE are dated after today -- the source's own "
+        "forecast or schedule, not a measurement._\n\n"
+        f"{body}\n\n---\n\n"
     )
 
 

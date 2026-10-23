@@ -1271,6 +1271,7 @@ Output exactly these Markdown sections:
 - Do NOT write a found / partial / not-found verdict here — the authoritative artifact status is shown to the forecaster in a separate fixed banner above this brief. This section is only for the data itself.
 - If it is a table or time series and any rows were extracted, reproduce those rows here verbatim, and mark the resolution-target row as "not yet released" when the resolution source does not show it. This is the single most important section.
 - Never present a secondary or year-ago figure as if it were the confirmed resolution value.
+- A "Data embedded in the resolution source" section, or a "Resolution Source Explorer" retry section, was read from the resolution source's own data tables. Reproduce the rows that bear on the resolution value verbatim, with their dates, and keep every forecast or schedule the source publishes for dates up to the resolution date — labelled as the source's own forecast, never as a measurement.
 - If the automated check lists a "Closest available adjacent metric", reproduce it here and carry it into Key Evidence as an `adjacent-metric` item. Never omit a value that was actually retrieved just because it is not the exact metric.
 
 ## Resolution Mechanics

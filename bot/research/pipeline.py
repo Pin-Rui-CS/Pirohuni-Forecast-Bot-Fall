@@ -465,6 +465,15 @@ async def run_research(
     retry_label = _select_retry_provider_label(chosen_search_result, ordered_search_providers)
     run_retry_search = _retry_runner_for(retry_label) if retry_label else None
     pre_retry_result_count = len(included_results)
+
+    # Stage 5a: when the artifact is still missing, a SoCLaaS model browses the
+    # resolution source's own pages and reads the data embedded in their source
+    # (Q46422: every value the brief lacked sat in pages the bot had scraped as
+    # text). Runs beside the web-search retry below, never instead of it; free,
+    # and skipped entirely unless research is on SoCLaaS.
+    explorer_task = _start_source_explorer(
+        run_provider, retry_basis, title=title, resolution_criteria=resolution_criteria,
+        fine_print=fine_print, background=background, artifact_check=artifact_check)
     wants_artifact_retry = bool(
         retry_basis
         and retry_basis.get("status") in {"missing", "partial"}
@@ -587,6 +596,19 @@ async def run_research(
             },
             reads=[research_trace.ref_doc("artifact_check:v1")], writes=[], kind="note", lane="*",
         )
+
+    if explorer_task is not None:
+        explorer_result = await explorer_task
+        explorer_included = should_include_provider_result(*explorer_result)
+        research_trace.emit(
+            "provider", explorer_result[0], explorer_result[1] or "",
+            status="included" if explorer_included else "excluded",
+            reads=research_trace.outputs_of(explorer_result[0]),
+            writes=[research_trace.ref_section(explorer_result[0])], kind="model",
+            lane=explorer_result[0],
+        )
+        if explorer_included:
+            included_results.append((explorer_result[0], explorer_result[1] or ""))
 
     # Stage 5.5: if the focused retry actually added evidence, re-run the
     # verification gate on the augmented evidence. The Stage-4 check ran on
@@ -1026,10 +1048,14 @@ Rules:
   missing information were resolved one way versus the other: "low" (<5 percentage
   points), "moderate" (5-15), "decisive" (>15). Use "low" when status is "complete".
 - Retry queries must be materially different from generic restatements of the question.
-- If the missing value simply does not exist yet (a future data release, an outcome
-  that has not happened, an unpublished statistic), return an empty retry_queries
-  list — searching cannot find numbers that have not been published. Suggest retry
-  queries only when the artifact plausibly already exists somewhere online.
+- A resolution value dated in the future does NOT by itself mean there is nothing to
+  search for: the same quantity's latest published reading, its recent history, and
+  any forecast or schedule its source publishes usually exist now. When the target
+  reading is in the future, retry queries must target those (e.g. the current value
+  on the resolution source, its row-level breakdown, the source's own outlook).
+  Return an empty retry_queries list only when even the current reading cannot exist
+  yet (a first-ever release, an event with no running measure) — searching cannot
+  find numbers that have never been published.
 """.strip()
 
 
@@ -1082,6 +1108,35 @@ def _flag_future_dated_claims(
                 f"evidence merely mentions, this flag is a false positive; disregard it.]"
             )
     return check
+
+
+def _start_source_explorer(run_provider, retry_basis: dict | None, *, title: str,
+                           resolution_criteria: str, fine_print: str, background: str,
+                           artifact_check: dict | None) -> "asyncio.Task | None":
+    """Start the resolution-source explorer as a task, or None when it does not apply.
+
+    Applies when the artifact is missing or partial (or the check failed),
+    research runs on SoCLaaS, and the question names a resolution URL.
+    """
+    from bot.research.resolution import source_explorer
+    from bot.research.resolution.resolution_criteria_scraper import extract_urls
+
+    if (retry_basis or {}).get("status") not in {"missing", "partial"} or not source_explorer.enabled():
+        return None
+    urls = (extract_urls("\n".join(p for p in (resolution_criteria, fine_print) if p))
+            or extract_urls(background or ""))
+    if not urls:
+        return None
+    logger.info("[research] Required artifact %s; exploring the resolution source (%s)",
+                retry_basis.get("status"), ", ".join(urls[:3]))
+    return asyncio.create_task(run_provider(
+        source_explorer.SECTION_NAME,
+        lambda: source_explorer.explore(
+            title=title, resolution_criteria=resolution_criteria, fine_print=fine_print,
+            artifact_check=artifact_check, resolution_urls=urls),
+        feeds=[research_trace.ref_doc("artifact_check:v1")],
+        lane=source_explorer.SECTION_NAME,
+    ))
 
 
 def _artifact_check_section_priority(name: str) -> int:
