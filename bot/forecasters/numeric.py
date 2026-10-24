@@ -270,8 +270,13 @@ How to build it:
 5. **Hard limits ("support", optional).** If the quantity physically CANNOT go below (or
    above) some value, set that limit and the harness cuts every component there and
    rescales the rest, whatever family you chose. Typical cases: a cumulative count or
-   year-to-date total that already stands at N and cannot fall (min = N); a share that
-   cannot exceed 100% (max = 100); a total that already includes amounts known to be in.
+   year-to-date total that already stands at N and cannot fall (min = N); a record or
+   maximum-to-date that already stands at R (min = the lowest value R can be shown as,
+   after any known pending adjustment such as a dividend lowering adjusted prices); a share
+   that cannot exceed 100% (max = 100); a total that already includes amounts known to be in.
+   When a scenario is "the value stays exactly where it is", give it a narrow component at
+   that value AND set the limit there, so none of that scenario's mass lands on values the
+   outcome cannot take.
    Use null for a side with no limit, or leave "support" out entirely. Only impossible
    values belong outside it — never use it to narrow a forecast; an outcome you merely
    think unlikely belongs in a tail. Your components should already put most of their
@@ -1966,10 +1971,18 @@ class NumericDistribution(BaseModel):
 #   6. a broad-normal fallback if nothing survives
 # ---------------------------------------------------------------------------
 
-# Anti-spike: no component may be narrower than this fraction of the question
-# range. Keeps peak per-cell mass well under the Metaculus cap even before the
-# final standardisation backstop.
+# Anti-spike: no component may be narrower than MIN_SCALE_BINS grid cells (or
+# MIN_SCALE_RANGE_FLOOR of the range, whichever is larger) -- enough to stop a
+# unit slip (sd 0.01 on a range of millions) from making a needle. The per-cell
+# Metaculus cap itself is enforced by the final standardisation, not here.
+# This floor was 2% of the range until 2026-10-24: on Q46412 (NVDA record,
+# $39 range) it widened "the record stands at 238.96" from sd 0.15-0.5 to 0.78,
+# spreading the likeliest outcome over ~$3, half of it on impossible values.
+# MIN_SCALE_FRACTION stays as a ceiling so no question gets a WIDER floor than
+# before (a 24-outcome discrete grid would otherwise get 1.5 whole outcomes).
 MIN_SCALE_FRACTION = 0.02
+MIN_SCALE_BINS = 1.5
+MIN_SCALE_RANGE_FLOOR = 0.003
 # Absolute floor on a lognormal's log-scale spread (sigma is unitless).
 MIN_LOG_SIGMA = 0.03
 # Components rated less likely than this are negligible: dropped and absorbed.
@@ -2121,7 +2134,9 @@ def build_mixture_spec_from_components(
     notes: list[str] = []
     lower, upper = geometry["lower_bound"], geometry["upper_bound"]
     rng = abs(upper - lower) or 1.0
-    min_scale = MIN_SCALE_FRACTION * rng
+    cell = rng / max(int(geometry.get("cdf_size") or 201) - 1, 1)
+    min_scale = min(MIN_SCALE_FRACTION * rng,
+                    max(MIN_SCALE_BINS * cell, MIN_SCALE_RANGE_FLOOR * rng))
     merge_tol = COMPONENT_MERGE_FRACTION * rng
 
     clean: list[dict] = []
