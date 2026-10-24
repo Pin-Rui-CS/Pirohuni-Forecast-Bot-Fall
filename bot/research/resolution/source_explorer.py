@@ -30,9 +30,10 @@ from datetime import date
 import json
 import logging
 import os
+import re
 import time
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
@@ -56,7 +57,14 @@ WALL_SECONDS = float(os.getenv("SOURCE_EXPLORER_TIMEOUT_SECONDS", "1500"))
 MAX_RESULT_CHARS = 60_000
 MAX_CONVERSATION_CHARS = 300_000
 TRIMMED_RESULT_CHARS = 3_000
-MAX_START_URLS = 15
+MAX_START_URLS = 25
+# Same-site links listed per fetched page, so the model follows real addresses
+# instead of guessing them (2026-10-24: 5 of 8 turns went on guessed 404s).
+MAX_LINKS_PER_PAGE = 40
+_HREF = re.compile(r'href="([^"#]+)', re.IGNORECASE)
+_ABS_URL = re.compile(r"https?://[^\s\"'<>\\)]+")
+_ASSET = re.compile(r"(/_next/|/static/|\.(?:js|css|png|jpe?g|svg|gif|ico|woff2?|map|webp)(?:\?|$))",
+                    re.IGNORECASE)
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
@@ -85,15 +93,30 @@ def start_points(resolution_urls: list[str]) -> tuple[list[str], set[str]]:
     """(URLs to show first, hosts the explorer may fetch).
 
     The hosts are those of the URLs the question resolves off. The start list
-    adds every page on those hosts that any lane already scraped this run --
-    deeper pages a search found are often the best way in.
+    adds every page on those hosts that any lane scraped OR any search returned
+    this run: deeper pages are the way in, and on 2026-10-24 (Q46422) the
+    regional pages holding the source's forecast had only been returned by the
+    search, never scraped, so the explorer never saw them.
     """
     hosts = {_host(u) for u in resolution_urls if _host(u)}
-    urls = list(dict.fromkeys(resolution_urls))
-    for event in source_ledger.get_events():
-        if event.role == source_ledger.ROLE_SCRAPED and _host(event.url) in hosts:
-            urls.append(event.url)
+    rank = {source_ledger.ROLE_SCRAPED: 0, source_ledger.ROLE_RANKED: 1, source_ledger.ROLE_CANDIDATE: 2}
+    found = [(rank[e.role], i, e.url) for i, e in enumerate(source_ledger.get_events())
+             if e.role in rank and _host(e.url) in hosts]
+    urls = list(resolution_urls) + [url for *_, url in sorted(found)]
     return list(dict.fromkeys(urls))[:MAX_START_URLS], hosts
+
+
+def page_links(page_url: str, page: str, hosts: set[str]) -> list[str]:
+    """Same-site page links: <a href> targets and site URLs quoted inside the
+    page's data, minus scripts, styles and images."""
+    unescaped = page.replace('\\"', '"').replace("\\/", "/")
+    raw = [urljoin(page_url, h) for h in _HREF.findall(page)] + _ABS_URL.findall(unescaped)
+    links = []
+    for url in raw:
+        url = url.rstrip(".,;")
+        if url.startswith("http") and _host(url) in hosts and not _ASSET.search(url):
+            links.append(url)
+    return list(dict.fromkeys(links))
 
 
 def _system_prompt(*, title: str, resolution_criteria: str, fine_print: str,
@@ -111,8 +134,9 @@ Resolution criteria: {resolution_criteria}
 The bot's research so far could not retrieve: {missing}
 {('What it did find: ' + found) if found else ''}
 
-The bot scraped these pages as markdown text. Many sites keep the data behind their maps and
-charts inside the page source, where a text scraper never sees it. You have a tool that reads it:
+The bot already saw these pages on the site (scraped as markdown text, or returned by a search).
+Many sites keep the data behind their maps and charts inside the page source, where a text
+scraper never sees it. You have a tool that reads it:
 {chr(10).join('- ' + u for u in start_urls)}
 
 Reply with exactly ONE JSON object per turn, nothing else:
@@ -122,7 +146,8 @@ Reply with exactly ONE JSON object per turn, nothing else:
       total). For each page you get a short visible-text excerpt and a summary of every data table
       embedded in its source: rows, columns, value counts, first and last rows. Rows dated after
       today are marked FUTURE (the source's own forecast or schedule). Tables are named
-      P<page>.T<n>. With "columns", only tables having ALL those columns are shown -- use it
+      P<page>.T<n>. Each page also lists the same-site links it contains that you have not been
+      shown yet. With "columns", only tables having ALL those columns are shown -- use it
       when fetching many similar pages.
   {{"action": "rows", "table": "P1.T2"}}
       Every row of one table.
@@ -131,8 +156,9 @@ Reply with exactly ONE JSON object per turn, nothing else:
 
 You have at most {MAX_TURNS} turns. Work out which field of which table the resolution value is
 read from, find its most recent value, and anything the source says about where it is heading by
-the resolution date (history, its own forecasts). Infer page addresses only from what the pages
-themselves show; do not guess site maps.
+the resolution date (history, its own forecasts). Fetch addresses from the start list, the links
+pages list, or a pattern those addresses follow (e.g. one region page's address with another
+region's id); do not guess site maps or page names.
 
 The report records what the source CONTAINS -- quote values exactly as the tables give them, with
 their dates and the table and URL they come from. Do NOT estimate probabilities or give a forecast;
@@ -152,6 +178,7 @@ class _Pages:
         self.hosts = hosts
         self.tables: dict[str, Table] = {}
         self.fetched: list[str] = []
+        self.links_shown: set[str] = set()
 
     async def fetch(self, client: httpx.AsyncClient, urls: list[str], columns: list[str],
                     today: date) -> str:
@@ -184,6 +211,23 @@ class _Pages:
                      + (f", {len(shown)} with columns {columns}" if columns else "") + ")",
                      "visible text: " + visible_text(page, 300 if columns else 700)]
             lines += [t.summary(today) for t in shown]
+            # A filter must never hide a table silently: on 2026-10-24 (Q46422)
+            # "columns": ["cdi"] hid the regional weekly table (date, level,
+            # counts) that held the source's forecast, and the model concluded
+            # none existed. Hidden tables keep a one-line entry.
+            for t in tables:
+                if t not in shown:
+                    future = t.future_rows(today)
+                    lines.append(f"  (hidden by filter) [{t.id}] {len(t.rows)} rows; columns: "
+                                 + ", ".join(t.columns[:8])
+                                 + (f"; {future} FUTURE row(s)" if future else ""))
+            links =[u for u in page_links(url, page, self.hosts)
+                     if u not in self.links_shown and u not in self.fetched]
+            if links:
+                self.links_shown.update(links[:MAX_LINKS_PER_PAGE])
+                more = f", first {MAX_LINKS_PER_PAGE}" if len(links) > MAX_LINKS_PER_PAGE else ""
+                lines.append(f"links ({len(links)} new same-site{more}): "
+                             + " ".join(links[:MAX_LINKS_PER_PAGE]))
             out.append("\n".join(lines))
         result = "\n\n".join(out)
         if len(result) > MAX_RESULT_CHARS:
