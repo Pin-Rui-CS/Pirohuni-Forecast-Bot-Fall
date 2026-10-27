@@ -417,6 +417,34 @@ async def _build_wayback_history_section(
     )
 
 
+UPDATE_STAMP_SECTION_TITLE = "Resolution Source Update Stamps (Wayback, every distinct capture)"
+
+
+async def _build_update_stamp_section(url: str) -> str:
+    """The page's own "last updated" stamp read off every distinct archive
+    capture: update cadence as observed data, not inferred from two endpoints.
+    Free (plain HTTP, no LLM); "" when no capture displays a stamp."""
+    import datetime
+
+    try:
+        from bot.scrapers.adapters.Wayback import fetch_update_stamp_history, summarize_stamp_history
+
+        observations = await fetch_update_stamp_history(url)
+        table = summarize_stamp_history(observations, datetime.date.today())
+    except Exception as exc:  # noqa: BLE001 - history is a bonus, never a blocker
+        logger.warning("Update-stamp history failed for %s: %s", url, exc)
+        return ""
+    if not table:
+        return ""
+    logger.info("Update stamps for %s: %d captures read", url, len(observations))
+    return (
+        f"\n\n## {UPDATE_STAMP_SECTION_TITLE}\n\n"
+        f"_Read deterministically from every distinct Wayback capture of {url}: the date the page "
+        "itself displayed as its last update. Use it for how often the source really updates._\n\n"
+        f"{table}\n"
+    )
+
+
 async def _llm_summarize(
     url: str,
     content: str,
@@ -956,6 +984,7 @@ async def scrape_resolution_sources(
                 resolution_criteria=resolution_criteria,
                 model=llm_model,
             )
+            history_section += await _build_update_stamp_section(primary_url)
 
     if use_llm_cleaning and cleaned_sources:
         try:

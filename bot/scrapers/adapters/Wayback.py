@@ -198,6 +198,142 @@ async def snapshot_fallback_text(url: str, timeout: float = 30.0) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Update-stamp history: how often the page actually changes (no LLM)
+# ---------------------------------------------------------------------------
+# Motivating case (Q46429, 2026-10-26): the forecasters sized "will the tracker
+# refresh before the deadline?" from 4 spread-out captures, i.e. 2 dated stamps.
+# The archive held 47 distinct captures; reading the "Last update" stamp off all
+# of them shows it unchanged across 24 captures for 13 months -- cadence as data,
+# not a guess.
+
+_MONTHS = ("january february march april may june july august september october "
+           "november december").split()
+_MONTH_RE = "|".join(m[:3] + f"(?:{m[3:]})?" for m in _MONTHS)
+# The year is allowed to contain stray whitespace: Q46429's stamp rendered as
+# "17 June 202 6" (a tag split inside the digits).
+_YEAR = r"(?P<y>2\s?0\s?\d\s?\d)"
+_DATE_PATTERNS = (
+    rf"(?P<d>\d{{1,2}})\.?\s+(?P<m>{_MONTH_RE})\.?,?\s+{_YEAR}",          # 17 June 2026
+    rf"(?P<m>{_MONTH_RE})\.?\s+(?P<d>\d{{1,2}}),?\s+{_YEAR}",            # June 17, 2026
+    r"(?P<y>20\d\d)-(?P<mn>\d\d)-(?P<d>\d\d)",                           # 2026-06-17
+    r"(?P<d>\d{1,2})\.(?P<mn>\d{1,2})\.(?P<y>20\d\d)",                   # 17.06.2026
+    r"(?P<mn>\d{1,2})/(?P<d>\d{1,2})/(?P<y>20\d\d)",                     # 06/17/2026 (US)
+)
+_STAMP_LEAD = (r"(?:last\s+updated?|updated(?:\s+on)?|last\s+modified|as\s+of|data\s+as\s+of|"
+               r"stand|aktualisiert(?:\s+am)?|mis\s+à\s+jour(?:\s+le)?|situation\s+until)")
+# One regex per date format: group names repeat across formats, which a single
+# alternation cannot hold.
+_STAMP_RES = tuple(re.compile(rf"{_STAMP_LEAD}\s*[:\-–]?\s*(?:{p})", re.IGNORECASE)
+                   for p in _DATE_PATTERNS)
+_DEFAULT_STAMP_CAPTURES = 60
+_STAMP_CONCURRENCY = 4
+
+
+@dataclass(frozen=True)
+class StampObservation:
+    timestamp: str          # capture time, YYYYMMDDhhmmss
+    stamp: str | None       # the page's own "last updated" date, ISO, or None if absent
+
+
+def find_update_stamp(text: str) -> str | None:
+    """The first "last updated"-style date in ``text``, as ISO YYYY-MM-DD."""
+    matches = [m for m in (r.search(text) for r in _STAMP_RES) if m]
+    if not matches:
+        return None
+    match = min(matches, key=lambda m: m.start())
+    groups = {k: v for k, v in match.groupdict().items() if v}
+    try:
+        year = int(re.sub(r"\s", "", groups["y"]))
+        if "m" in groups:
+            month = next(i for i, m in enumerate(_MONTHS, 1) if m.startswith(groups["m"].lower()[:3]))
+        else:
+            month = int(groups["mn"])
+        return datetime.date(year, month, int(groups["d"])).isoformat()
+    except (KeyError, ValueError, StopIteration):
+        return None
+
+
+async def fetch_update_stamp_history(
+    url: str,
+    months_back: int = 30,
+    max_captures: int = _DEFAULT_STAMP_CAPTURES,
+    timeout: float = 30.0,
+) -> list[StampObservation]:
+    """Every distinct capture of ``url`` (thinned evenly to ``max_captures``),
+    each with the "last updated" date the page itself displayed. Oldest first;
+    empty on any global failure."""
+    import asyncio
+
+    since = (datetime.date.today() - datetime.timedelta(days=months_back * 31)).strftime("%Y%m%d")
+    params = {"url": url, "output": "json", "filter": "statuscode:200", "collapse": "digest",
+              "fl": "timestamp", "from": since}
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            response = await client.get(_CDX_API, params=params)
+            response.raise_for_status()
+            rows = response.json()[1:]
+            timestamps = [row[0] for row in rows if row]
+            timestamps = [timestamps[i] for i in _spread_indices(len(timestamps), max_captures)]
+            gate = asyncio.Semaphore(_STAMP_CONCURRENCY)
+
+            async def one(timestamp: str) -> StampObservation | None:
+                snapshot_url = _SNAPSHOT_URL.format(timestamp=timestamp, url=quote(url, safe=":/?&=%"))
+                async with gate:
+                    try:
+                        page = await client.get(snapshot_url)
+                        page.raise_for_status()
+                    except Exception as exc:  # one bad capture never sinks the history
+                        logger.debug("Wayback capture %s of %s failed: %s", timestamp, url, exc)
+                        return None
+                text = " ".join(_html_to_text(page.text).split())
+                return StampObservation(timestamp, find_update_stamp(text))
+
+            results = await asyncio.gather(*(one(t) for t in timestamps))
+    except Exception as exc:
+        logger.warning("Wayback stamp history failed for %s: %s", url, exc)
+        return []
+    return [r for r in results if r is not None]
+
+
+def summarize_stamp_history(observations: list[StampObservation], today: datetime.date) -> str:
+    """Markdown: each displayed stamp, the captures that showed it, and what
+    that implies about update cadence. "" when no capture showed a stamp."""
+    if not observations or not any(o.stamp for o in observations):
+        return ""
+
+    def day(ts: str) -> datetime.date:
+        return datetime.date(int(ts[:4]), int(ts[4:6]), int(ts[6:8]))
+
+    runs: list[list] = []  # [stamp, first capture, last capture, n]
+    for obs in observations:
+        if runs and runs[-1][0] == obs.stamp:
+            runs[-1][2], runs[-1][3] = obs.timestamp, runs[-1][3] + 1
+        else:
+            runs.append([obs.stamp, obs.timestamp, obs.timestamp, 1])
+    lines = ["| Stamp the page displayed | First capture showing it | Last capture showing it | Captures |",
+             "|---|---|---|---|"]
+    for stamp, first, last, n in runs:
+        lines.append(f"| {stamp or '(no stamp found)'} | {day(first)} | {day(last)} | {n} |")
+    stamps = [r for r in runs if r[0]]
+    distinct = list(dict.fromkeys(r[0] for r in stamps))
+    longest = max(((day(r[2]) - day(r[1])).days, r[0]) for r in stamps)
+    gaps = [(datetime.date.fromisoformat(b) - datetime.date.fromisoformat(a)).days
+            for a, b in zip(distinct, distinct[1:])]
+    latest = distinct[-1]
+    notes = [
+        f"- {len(observations)} distinct captures from {day(observations[0].timestamp)} to "
+        f"{day(observations[-1].timestamp)}; the displayed stamp changed {len(distinct) - 1} time(s).",
+        f"- Gaps between successive displayed stamps (days): {gaps or 'n/a'}. Each was confirmed by "
+        "captures in between, not inferred from two endpoints.",
+        f"- Longest stretch with one stamp across captures: {longest[0]} days (stamp {longest[1]}).",
+        f"- Latest stamp {latest}: {(today - datetime.date.fromisoformat(latest)).days} days before today "
+        f"({today.isoformat()}).",
+        "- A stamp first seen at a capture was published between the previous capture and that one.",
+    ]
+    return "\n".join(lines + [""] + notes)
+
+
 async def fetch_snapshot_history(
     url: str,
     months_back: int = _DEFAULT_MONTHS_BACK,
