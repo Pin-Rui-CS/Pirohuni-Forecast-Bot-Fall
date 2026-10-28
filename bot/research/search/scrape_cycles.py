@@ -616,79 +616,6 @@ async def _scrape_targets(
             )
             return scrape
 
-        adapter = None
-        try:
-            from bot.scrapers.adapters import find_adapter
-
-            adapter = find_adapter(item.url)
-        except Exception as exc:
-            print(f"[adapter] registry unavailable for {item.url}: {type(exc).__name__}: {exc}")
-
-        if adapter is not None:
-            from bot.scrapers.crawler.crawl import claim_scrape_url, get_cached_scrape_content, record_scrape_content
-
-            duplicate_payload = claim_scrape_url(item.url)
-            if duplicate_payload is not None:
-                cached = get_cached_scrape_content(item.url)
-                if cached:
-                    cached_content, cached_error = _cache_payload(cached)
-                    return _finish(
-                        Scrape(
-                            cycle=0,
-                            group=group.group,
-                            group_purpose=group.group_purpose,
-                            url=item.url,
-                            purpose=item.purpose,
-                            ok=True,
-                            content=cached_content,
-                            error=cached_error,
-                        ),
-                        engine=source_ledger.ENGINE_CACHE,
-                    )
-                return _finish(
-                    Scrape(
-                        cycle=0,
-                        group=group.group,
-                        group_purpose=group.group_purpose,
-                        url=item.url,
-                        purpose=item.purpose,
-                        ok=False,
-                        error="skipped duplicate: URL has already been scraped in this process",
-                    ),
-                    engine=source_ledger.ENGINE_SKIPPED_DUPLICATE,
-                )
-            try:
-                print(f"[adapter] {adapter.name} handling {item.url}")
-                result = await adapter.extract(item.url, query=query)
-                record_scrape_content(item.url, result.content)
-                return _finish(
-                    Scrape(
-                        cycle=0,
-                        group=group.group,
-                        group_purpose=group.group_purpose,
-                        url=item.url,
-                        purpose=item.purpose,
-                        ok=bool(result.content.strip()),
-                        content=_truncate_text(result.content, _MAX_SCRAPE_CHARS),
-                        raw_chars=len(result.content or ""),
-                        error="" if result.content.strip() else f"{adapter.name} returned no content.",
-                    ),
-                    engine=f"adapter:{adapter.name}",
-                )
-            except Exception as exc:
-                return _finish(
-                    Scrape(
-                        cycle=0,
-                        group=group.group,
-                        group_purpose=group.group_purpose,
-                        url=item.url,
-                        purpose=item.purpose,
-                        ok=False,
-                        error=f"adapter failed: {type(exc).__name__}: {exc}",
-                    ),
-                    engine=f"adapter:{adapter.name}",
-                )
-
         from bot.scrapers.crawler.crawl import (
             basic_crawl_markdown,
             claim_scrape_url,
@@ -696,6 +623,9 @@ async def _scrape_targets(
             record_scrape_content,
         )
 
+        # One claim per URL, before both the adapter and the generic chain: a
+        # failed adapter falls through to the chain below, which must not then
+        # see its own URL as an earlier duplicate.
         duplicate_payload = claim_scrape_url(item.url)
         if duplicate_payload is not None:
             cached = get_cached_scrape_content(item.url)
@@ -727,6 +657,53 @@ async def _scrape_targets(
                 engine=source_ledger.ENGINE_SKIPPED_DUPLICATE,
             )
 
+        adapter = None
+        try:
+            from bot.scrapers.adapters import find_adapter
+
+            adapter = find_adapter(item.url)
+        except Exception as exc:
+            print(f"[adapter] registry unavailable for {item.url}: {type(exc).__name__}: {exc}")
+
+        # A site adapter reads the page through the site's own API or file
+        # format. When it errors or returns nothing, the URL falls through to
+        # the generic chain below instead of being lost for the run (Firecrawl
+        # renders PDFs; Wikipedia, Metaculus and Sheets pages are plain HTML).
+        # A short but non-empty adapter result is kept: adapters return compact
+        # structured data (a quote, a question, a Trends table) that is often
+        # under the generic chain's 500-char "thin" floor and still the answer.
+        adapter_error = ""
+        if adapter is not None:
+            try:
+                print(f"[adapter] {adapter.name} handling {item.url}")
+                result = await adapter.extract(item.url, query=query)
+                if result.content.strip():
+                    record_scrape_content(item.url, result.content)
+                    return _finish(
+                        Scrape(
+                            cycle=0,
+                            group=group.group,
+                            group_purpose=group.group_purpose,
+                            url=item.url,
+                            purpose=item.purpose,
+                            ok=True,
+                            content=_truncate_text(result.content, _MAX_SCRAPE_CHARS),
+                            raw_chars=len(result.content or ""),
+                        ),
+                        engine=f"adapter:{adapter.name}",
+                    )
+                adapter_error = f"{adapter.name} returned no content"
+            except HardLimitExceededError:
+                raise
+            except Exception as exc:
+                adapter_error = f"{type(exc).__name__}: {exc}"
+            logger.warning(
+                "[adapter] %s failed for %s (%s); falling back to generic scraping.",
+                adapter.name,
+                item.url,
+                adapter_error,
+            )
+
         # Firecrawl first (main-content markdown, JS/PDF rendering, bot-wall
         # bypass); Crawl4AI below stays as the free fallback. The shared
         # per-question credit budget in research.firecrawl_scrape hard-caps
@@ -738,7 +715,7 @@ async def _scrape_targets(
         best_thin_content = ""
         best_thin_engine = ""
         best_thin_reason = ""
-        engines_tried: list[str] = []
+        engines_tried: list[str] = [f"adapter:{adapter.name}"] if adapter_error else []
 
         def _note_thin(content: str, engine: str, reason: str) -> None:
             nonlocal best_thin_content, best_thin_engine, best_thin_reason
@@ -944,6 +921,7 @@ async def _scrape_targets(
         combined_error = "; ".join(
             part
             for part in (
+                f"adapter:{adapter.name}: {adapter_error}" if adapter_error else "",
                 f"firecrawl: {firecrawl_error}" if firecrawl_error else "",
                 f"crawl4ai: {crawl_error}" if crawl_error else "",
                 f"firecrawl-render-wait: {render_error}" if render_error else "",
