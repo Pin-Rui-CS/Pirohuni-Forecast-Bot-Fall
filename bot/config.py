@@ -140,7 +140,7 @@ ENABLE_APIAGENT_RESEARCH = _env_bool("ENABLE_APIAGENT_RESEARCH", True)
 APIAGENT_TIMEOUT_SECONDS = float(os.getenv("APIAGENT_TIMEOUT_SECONDS") or "900")
 APIAGENT_MAX_STEPS = int(os.getenv("APIAGENT_MAX_STEPS") or "6")
 FIRECRAWL_SEARCH_TBS = os.getenv("FIRECRAWL_SEARCH_TBS", "").strip()
-# Firecrawl-first scraping of general research URLs (the serp_research scrape
+# Firecrawl-first scraping of general research URLs (the scrape_cycles scrape
 # cycles). Resolution-criteria scraping always tries Firecrawl when a key is
 # present; this toggle only governs the general research path.
 ENABLE_FIRECRAWL_GENERAL_SCRAPE = _env_bool("ENABLE_FIRECRAWL_GENERAL_SCRAPE", True)

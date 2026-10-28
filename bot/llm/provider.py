@@ -965,7 +965,7 @@ QWEN_TESTED_RESEARCH_LABELS: Final[tuple[str, ...]] = (
     "serp-url-ranking",
     "tavily-url-ranking",
     "firecrawl-url-ranking",
-    "serp-scrape-extract",
+    "scrape-extract",
     "kalshi/",
     "manifold/",
     "polymarket/",

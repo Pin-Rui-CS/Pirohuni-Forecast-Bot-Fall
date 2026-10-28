@@ -1,7 +1,7 @@
 """Shared Firecrawl single-page scraper with a per-question credit budget.
 
 Extracted from resolution_criteria_scraper so BOTH the resolution path and the
-general research scrape path (serp_research._scrape_targets) share one
+general research scrape path (scrape_cycles._scrape_targets) share one
 Firecrawl client, one process-level exhaustion flag, and one per-question
 credit budget.
 

@@ -329,8 +329,8 @@ def finalize() -> None:
 
 def format_search_results(results) -> str:
     """Render provider search results grouped by query, in per-query rank
-    order — the ordering the audit ledger loses. Duck-types SerpOrganicResult
-    (.link/.snippet) and TavilySearchResult (.url/.content)."""
+    order — the ordering the audit ledger loses. Duck-types SearchHit
+    (.url/.snippet) and older result objects (.link, .content)."""
     try:
         by_query: dict[str, list] = {}
         for result in results:
@@ -356,7 +356,7 @@ def format_search_results(results) -> str:
 
 
 def ranked_groups_payload(groups) -> list[dict]:
-    """Serialize ranked URL groups (duck-typed RankedSerpUrlGroup)."""
+    """Serialize ranked URL groups (duck-typed RankedUrlGroup)."""
     try:
         return [
             {

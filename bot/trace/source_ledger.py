@@ -10,7 +10,7 @@ Concurrency model mirrors the scrape dedupe registry in ``Crawl4AI/crawl.py``:
 events are stored in a module-global dict keyed by a ContextVar scope, so
 questions forecast concurrently keep separate ledgers. The active tool/phase is
 also held in a ContextVar so the deep, shared scrape code
-(``research.serp_research._scrape_targets``) can attribute a scrape without
+(``research.search.scrape_cycles._scrape_targets``) can attribute a scrape without
 threading the provider name through every call signature.
 """
 

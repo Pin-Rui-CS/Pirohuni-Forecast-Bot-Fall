@@ -21,6 +21,7 @@ from bot.config import (
 )
 from bot.llm.client import call_llm
 from bot.llm.cost_manager import HardLimitExceededError, MonetaryCostManager
+from bot.research.search import web_search
 from bot.utils import _truncate_text, find_future_full_dates
 from bot.trace import research_trace
 from bot.trace import source_ledger
@@ -175,40 +176,6 @@ async def run_research(
             target_date=target_date,
         )
 
-    async def serpapi_call(asknews_research: str = "") -> str:
-        from bot.research.search.serp_research import run_serp_research
-
-        return await run_serp_research(
-            title=title,
-            resolution_criteria=resolution_criteria,
-            background=background,
-            fine_print=fine_print,
-            asknews_research=asknews_research,
-        )
-
-    async def firecrawl_call(asknews_research: str = "") -> str:
-        from bot.research.search.firecrawl_research import run_firecrawl_research
-
-        return await run_firecrawl_research(
-            title=title,
-            resolution_criteria=resolution_criteria,
-            background=background,
-            fine_print=fine_print,
-            asknews_research=asknews_research,
-            reason="main pass",
-        )
-
-    async def tavily_call(asknews_research: str = "") -> str:
-        from bot.research.search.tavily_research import run_tavily_research
-
-        return await run_tavily_research(
-            title=title,
-            resolution_criteria=resolution_criteria,
-            background=background,
-            fine_print=fine_print,
-            asknews_research=asknews_research,
-        )
-
     async def kalshi_call(market_question: str) -> str:
         return await asyncio.to_thread(scrape_kalshi, market_question)
 
@@ -331,23 +298,33 @@ async def run_research(
         other_provider_tasks.append(asyncio.create_task(
             run_provider("Polymarket", lambda: polymarket_call(market_question), feeds=plan_feeds)))
 
-    # Search providers run as a priority fallback CHAIN (SerpAPI -> Tavily ->
-    # Firecrawl), not in parallel, to conserve credits: the bot uses the first
-    # provider that returns usable results and skips the rest. A provider that
-    # fails with an out-of-credits / auth / missing-key signal is remembered for
-    # the rest of the process so later questions skip it without re-probing.
-    ordered_search_providers = []
-    if ENABLE_SERPAPI_RESEARCH:
-        ordered_search_providers.append(("SerpAPI Google", serpapi_call))
-    if ENABLE_TAVILY_RESEARCH:
-        ordered_search_providers.append(("Tavily Search", tavily_call))
-    if ENABLE_FIRECRAWL_RESEARCH:
-        ordered_search_providers.append(("Firecrawl Search", firecrawl_call))
+    # Web search: the engines (SerpAPI -> Tavily -> Firecrawl) are a fallback
+    # chain for the search alone, not in parallel, to conserve credits. The
+    # first engine that returns results wins, and ranking, scraping and
+    # extraction run once on its results (see web_search). An engine that
+    # fails with an out-of-credits / auth / missing-key signal is remembered
+    # for the rest of the process so later questions skip it.
+    ordered_search_engines = [
+        web_search.ENGINES[label]
+        for label, enabled in (
+            ("SerpAPI Google", ENABLE_SERPAPI_RESEARCH),
+            ("Tavily Search", ENABLE_TAVILY_RESEARCH),
+            ("Firecrawl Search", ENABLE_FIRECRAWL_RESEARCH),
+        )
+        if enabled
+    ]
 
-    chosen_search_result, search_provider_errors = await _run_search_chain(
-        ordered_search_providers,
+    chosen_search_result, search_provider_errors = await _run_web_search(
+        ordered_search_engines,
+        question={
+            "title": title,
+            "resolution_criteria": resolution_criteria,
+            "background": background,
+            "fine_print": fine_print,
+        },
         asknews_research=search_asknews_research,
-        run_provider=lambda name, call: run_provider(name, call, feeds=search_feeds),
+        feeds=search_feeds,
+        run_provider=run_provider,
         should_include=should_include_provider_result,
     )
 
@@ -376,7 +353,7 @@ async def run_research(
     # search results. A successful fallback to a lower-priority provider is NOT
     # degraded; the providers that were tried and failed are surfaced only when
     # nothing worked.
-    if not ordered_search_providers:
+    if not ordered_search_engines:
         degraded_search_providers = ["No web-search provider enabled"]
     elif chosen_search_result is None:
         degraded_search_providers = search_provider_errors
@@ -462,8 +439,7 @@ async def run_research(
             "[research] artifact check failed; treating the artifact as missing and "
             "retrying with %d evidence-plan queries", len(retry_basis["retry_queries"]),
         )
-    retry_label = _select_retry_provider_label(chosen_search_result, ordered_search_providers)
-    run_retry_search = _retry_runner_for(retry_label) if retry_label else None
+    retry_label = _select_retry_provider_label(chosen_search_result, ordered_search_engines)
     pre_retry_result_count = len(included_results)
 
     # Stage 5a: when the artifact is still missing, a SoCLaaS model browses the
@@ -478,7 +454,7 @@ async def run_research(
         retry_basis
         and retry_basis.get("status") in {"missing", "partial"}
         and retry_basis.get("retry_queries")
-        and run_retry_search is not None
+        and retry_label is not None
     )
     if wants_artifact_retry and MonetaryCostManager.would_breach_input_reserve(
         _EXPECTED_ARTIFACT_RETRY_INPUT_TOKENS
@@ -518,18 +494,16 @@ async def run_research(
                 ARTIFACT_RETRY_TIMEOUT_SECONDS,
             )
 
-            # Only Firecrawl's entrypoint accepts the debug `reason` kwarg; pass it
-            # there so retry-triggered Firecrawl calls are labeled in the credit log.
-            retry_extra_kwargs = (
-                {"reason": "artifact retry"} if retry_label == "Firecrawl Search" else {}
-            )
+            # The retry searches with the main pass's engine only, so it never
+            # spends a second engine's credits.
             source_ledger.set_source_context(retry_label, "artifact retry")
             retry_result = await run_provider(
                 f"Focused Artifact Retry ({retry_label})",
                 feeds=[research_trace.ref_doc("artifact_check:v1")],
                 lane=retry_label,
                 research_call=lambda: asyncio.wait_for(
-                    run_retry_search(
+                    web_search.run_web_research(
+                        [web_search.ENGINES[retry_label]],
                         title=title,
                         resolution_criteria=resolution_criteria,
                         background=background,
@@ -537,7 +511,7 @@ async def run_research(
                         asknews_research=search_asknews_research,
                         preset_queries=retry_queries,
                         max_scrape_cycles=1,
-                        **retry_extra_kwargs,
+                        reason="artifact retry",
                     ),
                     timeout=ARTIFACT_RETRY_TIMEOUT_SECONDS,
                 ),
@@ -705,119 +679,91 @@ def _is_unavailable_result(content: str | None) -> bool:
     return bool(content) and "research unavailable" in content.lower()
 
 
-# A search provider that fails with one of these signals will not recover within
-# the process (out of credits, auth failure, or a missing API key), so it is
-# remembered and skipped for the rest of the run. Transient failures (timeouts,
-# connection resets, rate-limit blips) are deliberately excluded so they can be
-# retried on later questions.
-_EXHAUSTING_ERROR_MARKERS = (
-    "402",
-    "payment required",
-    "401",
-    "unauthorized",
-    "invalid api key",
-    "403",
-    "forbidden",
-    "432",
-    "usage limit",
-    "quota",
-    "insufficient",
-    "out of credit",
-    "no credit",
-    "run out",
-    "out of search",
-    "searches left",
-    "missing ",  # e.g. "Missing TAVILY_API_KEY for Tavily search research."
-)
-
-# Process-level memo of search providers that errored with a non-recoverable
+# Process-level memo of search engines that failed with a non-recoverable
 # (credit/auth/missing-key) signal; skipped for the remainder of the process.
-_exhausted_search_providers: set[str] = set()
+_exhausted_search_providers: set[str] = web_search.EXHAUSTED_ENGINES
 
 
 def _is_quota_or_auth_error(content: str | None, provider: str = "") -> bool:
     """True when a provider failed in a way that will not recover this run."""
     if not _is_unavailable_result(content):
         return False
-    lowered = content.lower()
-    # SerpAPI answers 429 when the plan's searches are used up. On 2026-10-05 it
-    # did so for every question, each time costing 40-120 s before Tavily took
-    # over. (Tavily's 429 is a short rate limit, so this is SerpAPI only.)
-    if provider == "SerpAPI Google" and "429" in lowered:
-        return True
-    return any(marker in lowered for marker in _EXHAUSTING_ERROR_MARKERS)
+    return web_search.is_exhausting_error(content, provider)
 
 
-async def _run_search_chain(
-    ordered_providers,
+async def _run_web_search(
+    engines,
     *,
+    question: dict[str, str],
     asknews_research: str,
+    feeds: list[str],
     run_provider,
     should_include,
-    exhausted: set[str] | None = None,
 ):
-    """Try search providers in priority order; return the first usable result.
+    """Search with the first engine that returns results, then research them once.
 
-    Returns ``(chosen_result, errored_labels)``. ``chosen_result`` is the
-    ``(name, content)`` tuple of the first provider that returned usable results,
-    or ``None`` if every provider failed. ``errored_labels`` lists providers that
-    were tried-and-failed or skipped as already exhausted. Providers failing with
-    a credit/auth/missing-key signal are added to ``exhausted`` (the process-level
-    set by default) so later questions skip them without re-probing.
+    Returns ``(chosen_result, failures)``. ``chosen_result`` is the winning
+    engine's ``(label, section)``, or None when no engine found results or
+    the research after the search failed. ``failures`` reads "<engine> (<why>)"
+    for every engine tried or skipped, for the brief's warning banner.
     """
-    if exhausted is None:
-        exhausted = _exhausted_search_providers
-    errored: list[str] = []
-    for name, call in ordered_providers:
-        if name in exhausted:
-            errored.append(f"{name} (skipped: out of credits earlier this run)")
-            continue
-        if MonetaryCostManager.would_breach_input_reserve(
-            _EXPECTED_SEARCH_PROVIDER_INPUT_TOKENS
-        ):
-            logger.warning(
-                "[research] %s: skipped — another search pass would eat into the "
-                "input tokens reserved for compile/forecast",
-                name,
-            )
-            errored.append(f"{name} (skipped: research token budget spent)")
-            continue
-        source_ledger.set_source_context(name, "main pass")
-        result = await run_provider(name, lambda call=call: call(asknews_research))
-        _, content = result
-        if should_include(name, content):
-            if errored:
-                # A successful fallback is not a degraded run, so these labels
-                # are dropped from the brief's warning banner — but until now
-                # they were dropped from the trace as well, leaving a provider
-                # that ran, generated a query plan and failed with no record at
-                # all (44875: two query-generation calls, one query plan, no
-                # trace entry explaining the second).
-                research_trace.emit(
-                    "search_chain",
-                    "search providers tried before the one that worked",
-                    "\n".join(f"- {label}: no usable results" for label in errored),
-                    status="fell-through",
-                    meta={"fell_through": list(errored), "chosen": name},
-                    reads=[], writes=[], kind="note", lane=name,
-                )
-            return result, errored
-        errored.append(f"{name} ({_search_failure_reason(content)})")
-        if _is_quota_or_auth_error(content, name):
-            exhausted.add(name)
-    if errored:
-        # Every provider failed. Record why, or the trace shows only that
-        # search "failed" (Q46024 blamed SerpAPI/Tavily/Firecrawl for what was
-        # a SoCLaaS outage in the query-generation step they all share).
+    if not engines:
+        return None, []
+    if MonetaryCostManager.would_breach_input_reserve(_EXPECTED_SEARCH_PROVIDER_INPUT_TOKENS):
+        logger.warning(
+            "[research] web search skipped: it would eat into the input tokens "
+            "reserved for compile/forecast"
+        )
+        return None, ["web search (skipped: research token budget spent)"]
+
+    with research_trace.scope("Web Search", feeds=feeds):
+        try:
+            queries = await web_search.plan_queries(asknews_research=asknews_research, **question)
+            engine, hits, failures = await web_search.search_with_fallback(
+                engines, queries, reason="main pass")
+        except HardLimitExceededError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - recorded as a search failure
+            logger.warning("[research] web search failed before any engine ran (%s: %s)",
+                           type(exc).__name__, exc)
+            engine, hits = None, []
+            failures = ["web search (" + _search_failure_reason(
+                f"research unavailable: {type(exc).__name__}: {exc}") + ")"]
+
+    if engine is None:
+        # Record why, or the trace shows only that search "failed" (Q46024
+        # blamed SerpAPI/Tavily/Firecrawl for what was a SoCLaaS outage in the
+        # query-generation step they all share).
         research_trace.emit(
             "search_chain",
-            "every search provider failed",
-            "\n".join(f"- {label}" for label in errored),
+            "every search engine failed",
+            "\n".join(f"- {label}" for label in failures),
             status="failed",
-            meta={"failed": list(errored)},
+            meta={"failed": list(failures)},
             reads=[], writes=[], kind="note", lane="*",
         )
-    return None, errored
+        return None, failures
+    if failures:
+        # A successful fallback is not a degraded run, so these labels stay out
+        # of the brief's warning banner, but the trace keeps them (44875).
+        research_trace.emit(
+            "search_chain",
+            "search engines tried before the one that worked",
+            "\n".join(f"- {label}" for label in failures),
+            status="fell-through",
+            meta={"fell_through": list(failures), "chosen": engine.label},
+            reads=[], writes=[], kind="note", lane=engine.label,
+        )
+
+    source_ledger.set_source_context(engine.label, "main pass")
+    result = await run_provider(
+        engine.label,
+        lambda: web_search.research_from_hits(engine, hits, queries, **question),
+        feeds=feeds,
+    )
+    if should_include(*result):
+        return result, failures
+    return None, failures + [f"{engine.label} ({_search_failure_reason(result[1])})"]
 
 
 def _search_failure_reason(content: str | None) -> str:
@@ -834,39 +780,21 @@ def _search_failure_reason(content: str | None) -> str:
 
 def _select_retry_provider_label(
     chosen_search_result: tuple[str, str | None] | None,
-    ordered_search_providers: list[tuple[str, object]],
+    ordered_search_engines: list,
 ) -> str | None:
-    """Pick which provider the focused artifact retry should use.
+    """Pick which search engine the focused artifact retry should use.
 
-    Prefer the provider that already returned usable results this run, so the
-    retry reuses an already-paid-for provider proven to work rather than
-    spending a different one's credits. If the main chain produced nothing,
-    fall back to the first provider in the configured order that has not been
-    exhausted. All three providers' ``run_*_research`` entrypoints accept
-    ``preset_queries``, so any of them can run the retry.
+    Prefer the engine that already returned usable results this run, so the
+    retry reuses an already-paid-for engine proven to work rather than
+    spending a different one's credits. If the main search produced nothing,
+    fall back to the first engine in the configured order that has not been
+    exhausted.
     """
     if chosen_search_result is not None:
         return chosen_search_result[0]
-    for name, _ in ordered_search_providers:
-        if name not in _exhausted_search_providers:
-            return name
-    return None
-
-
-def _retry_runner_for(label: str):
-    """Map a provider label to its ``run_*_research`` entrypoint."""
-    if label == "SerpAPI Google":
-        from bot.research.search.serp_research import run_serp_research
-
-        return run_serp_research
-    if label == "Firecrawl Search":
-        from bot.research.search.firecrawl_research import run_firecrawl_research
-
-        return run_firecrawl_research
-    if label == "Tavily Search":
-        from bot.research.search.tavily_research import run_tavily_research
-
-        return run_tavily_research
+    for engine in ordered_search_engines:
+        if engine.label not in _exhausted_search_providers:
+            return engine.label
     return None
 
 

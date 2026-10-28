@@ -343,7 +343,7 @@ jobs:
           SOCLAAS_MODEL_CHAIN: ${{ (inputs.research_models || 'soclaas') == 'soclaas-qwen-only' && 'qwen3.8:27b' || 'x-test-2,qwen3.8:27b' }}
           QWEN_RESEARCH_LABELS: ${{ (inputs.research_models || 'soclaas') != 'original' && 'recommended' || '' }}
           QWEN_LADDER: ${{ (inputs.research_models || 'soclaas') != 'original' && '1' || '' }}
-          QWEN_START_EFFORT: ${{ (inputs.research_models || 'soclaas') != 'original' && 'serp-scrape-extract=light,asknews-filter=light' || '' }}
+          QWEN_START_EFFORT: ${{ (inputs.research_models || 'soclaas') != 'original' && 'scrape-extract=light,asknews-filter=light' || '' }}
           SOCLAAS_PRECOMPRESS_MODE: ${{ (inputs.research_models || 'soclaas') != 'original' && 'experimental' || 'off' }}
           SOCLAAS_PRECOMPRESS_OVERFLOW: ${{ (inputs.research_models || 'soclaas') != 'original' && 'truncate' || 'pause' }}
           SOCLAAS_PRECOMPRESS_CHECKS: ${{ (inputs.research_models || 'soclaas') != 'original' && 'advisory' || 'strict' }}

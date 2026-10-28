@@ -410,7 +410,7 @@ jobs:
           # (never empty: the timeouts are parsed with int()/float()).
           QWEN_RESEARCH_LABELS: ${{ inputs.research_models != 'original' && 'recommended' || '' }}
           QWEN_LADDER: ${{ inputs.research_models != 'original' && '1' || '' }}
-          QWEN_START_EFFORT: ${{ inputs.research_models != 'original' && 'serp-scrape-extract=light,asknews-filter=light' || '' }}
+          QWEN_START_EFFORT: ${{ inputs.research_models != 'original' && 'scrape-extract=light,asknews-filter=light' || '' }}
           SOCLAAS_PRECOMPRESS_MODE: ${{ inputs.research_models != 'original' && 'experimental' || 'off' }}
           SOCLAAS_PRECOMPRESS_OVERFLOW: ${{ inputs.research_models != 'original' && 'truncate' || 'pause' }}
           SOCLAAS_PRECOMPRESS_CHECKS: ${{ inputs.research_models != 'original' && 'advisory' || 'strict' }}

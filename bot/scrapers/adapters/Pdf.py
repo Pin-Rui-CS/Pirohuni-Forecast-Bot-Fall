@@ -13,7 +13,7 @@ USER_AGENT = (
     "Pirohuni-Forecast-Bot/0.1 "
     "(https://github.com/Pin-Rui-CS/Pirohuni-Forecast-Bot-Fall; forecasting research)"
 )
-# Aligned with serp_research._MAX_SCRAPE_CHARS (not imported: Adapters must not
+# Aligned with scrape_cycles._MAX_SCRAPE_CHARS (not imported: Adapters must not
 # depend on research modules) so downstream truncation never silently cuts a
 # table mid-row that this adapter already reported as complete. Raised 18K->40K
 # with that constant on 45087; keep the two in step.

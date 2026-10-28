@@ -286,7 +286,7 @@ DEFAULT_START_EFFORT: dict[str, str] = {"apiagent": soclaas_models.LIGHT,
 def start_effort(label: str) -> str:
     """Where a label's ladder starts: "deep", "light" or an effort name.
 
-    QWEN_START_EFFORT="serp-scrape-extract=light" starts that label on its
+    QWEN_START_EFFORT="scrape-extract=light" starts that label on its
     model's lightest rung, which leaves it a single attempt. "medium" (the
     value before per-model ladders) still works and means "light" for a model
     without a medium rung.

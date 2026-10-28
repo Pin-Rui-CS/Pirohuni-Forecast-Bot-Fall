@@ -72,7 +72,9 @@ def scrape_truncation(a: RunArtifacts) -> Check:
 
 def extract_cap(a: RunArtifacts) -> Check:
     title = "Extraction input under its 180k cap"
-    calls = [c for c in a.llm_calls if str(c.get("name_of_task") or "").startswith("serp-scrape-extract")]
+    # "serp-scrape-extract" is the label runs before 2026-10-27 used.
+    calls = [c for c in a.llm_calls
+             if str(c.get("name_of_task") or "").startswith(("scrape-extract", "serp-scrape-extract"))]
     if not calls:
         return skipped(f"{CAT}.extract_cap", CAT, title, "no extraction calls")
     near = [c for c in calls if int(c.get("input_characters") or 0) >= _EXTRACT_CAP * 0.97]
