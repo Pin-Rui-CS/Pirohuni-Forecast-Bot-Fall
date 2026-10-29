@@ -257,7 +257,7 @@ async def run_research(
         asknews_result = (asknews_name, usable_asknews_research)
 
     # Stage 2: evidence plan decides what the rest of research should chase.
-    from bot.research.evidence_plan import build_evidence_plan
+    from bot.research.evidence_plan import MARKET_SEARCH_SECTIONS, build_evidence_plan, plan_sections
 
     evidence_plan = await build_evidence_plan(
         title=title,
@@ -278,9 +278,18 @@ async def run_research(
         ("Evidence plan", evidence_plan),
         ("AskNews research", usable_asknews_research),
     )
+    # The markets read only the plan sections that help recognise a matching
+    # or proxy market. This replaced a 4,000-char head cut of the whole plan,
+    # which split the median 7.1K plan mid-section; the three sections run
+    # 1.3-2.8K across 111 saved plans, so the cap below is only a safety net.
+    market_plan = plan_sections(evidence_plan, MARKET_SEARCH_SECTIONS)
+    if not market_plan:
+        logger.warning("[research] evidence plan has none of the market-search sections %s; "
+                       "markets read the plan's head instead", MARKET_SEARCH_SECTIONS)
+        market_plan = evidence_plan
     market_question = _join_research_context(
         ("Forecasting question", title),
-        ("Evidence plan for direct market search", evidence_plan),
+        ("Evidence plan for direct market search", market_plan),
         max_chars=4_000,
     )
 
@@ -406,13 +415,15 @@ async def run_research(
         evidence_plan=evidence_plan,
         provider_results=included_results,
         question_dates=question_dates,
+        resolution_criteria=resolution_criteria,
+        fine_print=fine_print,
     )
     research_trace.emit(
         "artifact_check",
         "artifact check v1 (pre-retry)",
         artifact_check or {},
         meta={"chain": "artifact_check", "version": 1},
-        reads=[research_trace.ref_doc("plan")] + [research_trace.ref_section(n) for n, _ in included_results],
+        reads=["input:question", research_trace.ref_doc("plan")] + [research_trace.ref_section(n) for n, _ in included_results],
         writes=[research_trace.ref_doc("artifact_check:v1")], kind="model", lane="*",
     )
 
@@ -596,6 +607,8 @@ async def run_research(
             provider_results=included_results,
             prior_check=artifact_check,
             question_dates=question_dates,
+            resolution_criteria=resolution_criteria,
+            fine_print=fine_print,
         )
         if refreshed_check is not None:
             artifact_check = refreshed_check
@@ -605,7 +618,7 @@ async def run_research(
             refreshed_check or {},
             status="ok" if refreshed_check is not None else "failed",
             meta={"chain": "artifact_check", "version": 2},
-            reads=[research_trace.ref_doc("artifact_check:v1")]
+            reads=["input:question", research_trace.ref_doc("artifact_check:v1")]
             + [research_trace.ref_section(n) for n, _ in included_results[pre_retry_result_count:]],
             writes=[research_trace.ref_doc("artifact_check:v2")] if refreshed_check is not None else [],
             kind="model", lane="*",
@@ -931,6 +944,12 @@ Today's date is {today}.
 Forecasting question:
 {title}
 
+Resolution criteria:
+{resolution_criteria}
+
+Fine print:
+{fine_print}
+
 The evidence plan named a required evidence artifact:
 {evidence_plan_excerpt}
 
@@ -964,6 +983,10 @@ Rules:
   8 August 2025, not 2026"), the correction wins. Report the corrected fact and do not restate
   the superseded claim anywhere in your output.
 - "complete" only if the artifact's actual values/rows appear in the research text.
+- The resolution criteria and fine print define the target: the exact metric, source,
+  units and date the question resolves on. The evidence plan's artifact is a planner's
+  reading of them. Where the two differ, judge against the resolution criteria, and say
+  in "what_is_missing" what the plan's artifact got wrong.
 - Mentions that the artifact exists, without its values, count as "partial" at best.
 - If the resolution value is a count or aggregate over an enumerable set (rows,
   member states, entries), "complete" additionally requires the row-level
@@ -1187,6 +1210,8 @@ async def verify_required_artifact(
     model: str = ARTIFACT_CHECK_MODEL,
     prior_check: dict | None = None,
     question_dates: frozenset[str] | None = None,
+    resolution_criteria: str = "",
+    fine_print: str = "",
 ) -> dict | None:
     # The evidence plan used to reach this prompt TWICE — as
     # ``evidence_plan_excerpt`` and again as a "## Evidence Plan" section
@@ -1208,6 +1233,12 @@ async def verify_required_artifact(
     )
     prompt = _ARTIFACT_CHECK_PROMPT.format(
         title=title,
+        # The check used to see only the title, so it judged "complete" against
+        # the plan's paraphrase of the target and could not catch a plan that
+        # named the wrong one. The criteria and fine print are the target itself
+        # (median ~600 + ~420 chars across 111 saved questions).
+        resolution_criteria=resolution_criteria.strip() or "Not provided.",
+        fine_print=fine_print.strip() or "Not provided.",
         today=datetime.date.today().isoformat(),
         # Sent whole: the 4,000-char cut here was a HEAD cut, so it dropped the
         # plan's own "Search Queries To Prefer" and "Contradictions And Gaps"

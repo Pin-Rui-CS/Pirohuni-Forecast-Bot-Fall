@@ -15,6 +15,16 @@ DEFAULT_EVIDENCE_PLAN_MODEL = "anthropic/claude-sonnet-5"
 # filtered for relevance before this call, so the whole filtered block fits.
 _MAX_ASKNEWS_CHARS = 40_000
 
+# Section headings that callers pick out of the formatted plan by name
+# (plan_sections). Both _format_plan and _fallback_plan use these constants,
+# so a renamed heading cannot silently stop matching.
+ARTIFACT_HEADING = "Required Evidence Artifact"
+DIRECT_EVIDENCE_HEADING = "Direct Evidence To Find"
+NEAR_PROXY_HEADING = "Near Proxy Evidence To Find"
+# What the prediction-market searches read: enough to recognise a market that
+# measures the question or a close proxy of it, without the rest of the plan.
+MARKET_SEARCH_SECTIONS = (ARTIFACT_HEADING, DIRECT_EVIDENCE_HEADING, NEAR_PROXY_HEADING)
+
 
 async def build_evidence_plan(
     title: str,
@@ -162,7 +172,7 @@ def _format_plan(plan: dict) -> str:
     lines = [
         "# Evidence Plan",
         "",
-        "## Required Evidence Artifact",
+        f"## {ARTIFACT_HEADING}",
         f"- Name: {artifact.get('name') or 'Not identified.'}",
         f"- Why it matters: {artifact.get('why_it_matters') or 'Not stated.'}",
         f"- Ideal sources: {_format_list(artifact.get('ideal_sources'))}",
@@ -172,10 +182,10 @@ def _format_plan(plan: dict) -> str:
         f"- Source update behavior: {mechanics.get('source_update_behavior') or 'Not assessed.'}",
         f"- What an update can contain before the deadline: {mechanics.get('update_content_limits') or 'Not assessed.'}",
         "",
-        "## Direct Evidence To Find",
+        f"## {DIRECT_EVIDENCE_HEADING}",
         *_format_bullets(plan.get("direct_evidence")),
         "",
-        "## Near Proxy Evidence To Find",
+        f"## {NEAR_PROXY_HEADING}",
         *_format_bullets(plan.get("near_proxy_evidence")),
         "",
         "## Weak Proxy Evidence To Treat Cautiously",
@@ -199,7 +209,7 @@ def _fallback_plan(title: str, exc: Exception) -> str:
 
 Evidence planning failed: {type(exc).__name__}: {exc}
 
-## Required Evidence Artifact
+## {ARTIFACT_HEADING}
 - Name: Historical or official source-of-truth evidence for: {title}
 - Why it matters: The forecast should be anchored to the most direct base-rate or official artifact available.
 - Ideal sources: official source, primary dataset, reputable archive
@@ -209,10 +219,10 @@ Evidence planning failed: {type(exc).__name__}: {exc}
 - Source update behavior: Not assessed (evidence planning failed).
 - What an update can contain before the deadline: Not assessed (evidence planning failed).
 
-## Direct Evidence To Find
+## {DIRECT_EVIDENCE_HEADING}
 - Official resolution-source facts and direct markets that match the exact question.
 
-## Near Proxy Evidence To Find
+## {NEAR_PROXY_HEADING}
 - Closely related historical or current evidence for the same entities and outcome type.
 
 ## Weak Proxy Evidence To Treat Cautiously
@@ -239,5 +249,19 @@ def _format_bullets(value) -> list[str]:
         value = [value] if value else []
     bullets = [f"- {str(item).strip()}" for item in value if str(item).strip()]
     return bullets or ["- None stated."]
+
+
+def plan_sections(plan: str, headings: tuple[str, ...]) -> str:
+    """The named "## " sections of a formatted plan, whole and in plan order.
+
+    Returns "" when none of the headings is present (e.g. a plan that is not in
+    the _format_plan shape); callers decide what to send instead.
+    """
+    kept = []
+    # [0] is the "# Evidence Plan" title (and, for a fallback plan, its error line).
+    for block in str(plan or "").split("\n## ")[1:]:
+        if block.split("\n", 1)[0].strip() in headings:
+            kept.append("## " + block.strip())
+    return "\n\n".join(kept)
 
 

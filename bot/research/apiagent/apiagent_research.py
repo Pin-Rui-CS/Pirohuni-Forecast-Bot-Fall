@@ -14,9 +14,10 @@ label routing and SoCLaaS streaming ladder. The loop mirrors
 (small models answer from memory otherwise), optional in the middle, and
 removed on the last step so the turn always ends in an answer.
 
-SoCLaaS Qwen only, by the owner's decision: this never runs on a paid model.
-No SoCLaaS key, no Node, a failed call or no successful data retrieval all
-mean "no section" -- never a failed question.
+SoCLaaS only, by the owner's decision: this never runs on a paid model. It
+uses the SoCLaaS chain (SOCLAAS_MODEL_CHAIN: DeepSeek first, Qwen if it
+fails, by default). No SoCLaaS key, no Node, a failed call or no successful
+data retrieval all mean "no section" -- never a failed question.
 """
 from __future__ import annotations
 
@@ -38,32 +39,29 @@ logger = logging.getLogger(__name__)
 SECTION_NAME = "Public Data APIs"
 LABEL = "apiagent"
 DEFAULT_MAX_STEPS = 6
-# Question fields are context for choosing APIs, not the research itself.
-_FIELD_CHARS = 1500
 
 
 def _qwen_route() -> llm_provider.Route | None:
-    """The pinned SoCLaaS Qwen route, or None when it cannot be used."""
+    """The SoCLaaS route (head of SOCLAAS_MODEL_CHAIN), or None when it cannot be used."""
     route = llm_provider.route_for_model(llm_provider.QWEN_RESEARCH_MODEL)
     if route.endpoint.label != "SoCLaaS" or not llm_provider.api_key_for(route.endpoint):
         return None
     return route
 
 
-def _clip(text: str, limit: int = _FIELD_CHARS) -> str:
-    text = (text or "").strip()
-    return text if len(text) <= limit else text[:limit].rstrip() + " ..."
-
-
 def build_question_message(*, title: str, resolution_criteria: str, fine_print: str,
                            background: str, target_date: str, today: str) -> str:
+    # The fields go in whole. They are how the agent picks its APIs, and the
+    # source it should call is often named at the end of the fine print or the
+    # background -- the part a 1,500-char head cut used to drop (it cut 36 of
+    # 111 saved backgrounds). The largest question seen is ~8K chars in all.
     parts = [f"Forecasting question (today is {today}):", f"Title: {title.strip()}"]
     if resolution_criteria.strip():
-        parts.append(f"Resolution criteria: {_clip(resolution_criteria)}")
+        parts.append(f"Resolution criteria: {resolution_criteria.strip()}")
     if fine_print.strip():
-        parts.append(f"Fine print: {_clip(fine_print)}")
+        parts.append(f"Fine print: {fine_print.strip()}")
     if background.strip():
-        parts.append(f"Background (excerpt): {_clip(background)}")
+        parts.append(f"Background: {background.strip()}")
     if target_date:
         parts.append(f"Resolves on: {target_date[:10]}")
     parts.append(
@@ -143,7 +141,7 @@ async def run_apiagent_research(
     """Run the agent; return the ``Public Data APIs`` section text or None."""
     route = _qwen_route()
     if route is None:
-        logger.info("[apiagent] skipped: SoCLaaS Qwen is not configured")
+        logger.info("[apiagent] skipped: SoCLaaS is not configured")
         return None
     usable, reason = apiagent_bridge.availability()
     if not usable:
