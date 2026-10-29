@@ -220,7 +220,9 @@ _DATE_PATTERNS = (
     r"(?P<d>\d{1,2})\.(?P<mn>\d{1,2})\.(?P<y>20\d\d)",                   # 17.06.2026
     r"(?P<mn>\d{1,2})/(?P<d>\d{1,2})/(?P<y>20\d\d)",                     # 06/17/2026 (US)
 )
-_STAMP_LEAD = (r"(?:last\s+updated?|updated(?:\s+on)?|last\s+modified|as\s+of|data\s+as\s+of|"
+# No bare "as of": Wikipedia prose ("As of March 2024, the population...")
+# read as a page stamp and invented an update history (2026-10-26 sweep).
+_STAMP_LEAD = (r"(?:last\s+updated?|updated(?:\s+on)?|last\s+modified|data\s+as\s+of|"
                r"stand|aktualisiert(?:\s+am)?|mis\s+à\s+jour(?:\s+le)?|situation\s+until)")
 # One regex per date format: group names repeat across formats, which a single
 # alternation cannot hold.

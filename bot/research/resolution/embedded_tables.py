@@ -218,6 +218,91 @@ def relevance(table: Table, question_words: set[str], today: date) -> float:
     return score
 
 
+# Words too common in question titles to say anything about a table.
+STOP_WORDS = {
+    "will", "what", "which", "when", "many", "much", "more", "most", "least", "than", "that",
+    "this", "with", "from", "have", "been", "after", "before", "between", "according", "during",
+    "total", "number", "there", "their", "they", "into", "over", "under", "above", "below",
+    "january", "february", "march", "april", "june", "july", "august", "september", "october",
+    "november", "december",
+}
+_NUMERIC = re.compile(r"^-?\d+(?:[.,]\d+)?%?$")
+
+
+def _is_id_or_order_column(name: str) -> bool:
+    # Ids and display order (Nate Silver's menu carries "sibling_rank") are
+    # numbers that measure nothing.
+    lowered = name.lower()
+    return (lowered == "id" or lowered.endswith("id")
+            or lowered.endswith(("rank", "order", "position", "index", "sort")))
+
+
+def _measure_columns(table: Table) -> list[str]:
+    """Columns that hold measurements: mostly numbers, more than one value, not an id."""
+    out = []
+    for col in table.columns:
+        if _is_id_or_order_column(col):
+            continue
+        values = [r.get(col) for r in table.rows if r.get(col) not in (None, "")]
+        if len(values) < MIN_ROWS:
+            continue
+        numeric = [v for v in values if (isinstance(v, (int, float)) and not isinstance(v, bool))
+                   or (isinstance(v, str) and _NUMERIC.match(v.strip()))]
+        if len(numeric) >= 0.8 * len(values) and len({str(v) for v in numeric}) > 1:
+            out.append(col)
+    return out
+
+
+def _is_link_list(table: Table) -> bool:
+    """A menu or list of links: some column is mostly URLs or site paths."""
+    for col in table.columns:
+        values = [r.get(col) for r in table.rows if isinstance(r.get(col), str)]
+        links = [v for v in values if v.startswith(("http://", "https://", "/"))]
+        if len(values) >= MIN_ROWS and len(links) >= 0.8 * len(values):
+            return True
+    return False
+
+
+def keep_tables(url: str, tables: list[Table], question_text: str,
+                today: date | None = None) -> list[Table]:
+    """The tables worth showing; site plumbing is dropped, not just ranked low.
+
+    The 2026-10-26 sweep of 101 past questions found 20 sections, one of them
+    useful: the rest were menus, link lists, schema.org page metadata and
+    Yahoo's trending-ticker widget. A table survives only if it holds
+    measurements (a numeric column that is not an id or a display order) or
+    rows after today, and either carries dates, category counts of a
+    measurement, or rows after today, or shares a word with the question. Market and quote sites are skipped: their adapters read the data,
+    and their pages are ticker widgets.
+    """
+    from bot.scrapers.adapters.Wayback import is_market_data_url
+
+    if is_market_data_url(url):
+        return []
+    today = today or date.today()
+    words = set(WORD.findall(question_text.lower())) - STOP_WORDS
+    kept = []
+    for table in tables:
+        columns = {c.lower() for c in table.columns}
+        if any(c.startswith("@") for c in columns) or STYLE_KEYS & columns or columns <= SHAPE_ONLY:
+            continue
+        measures = _measure_columns(table)
+        future = table.future_rows(today) > 0
+        # Rows after today are a schedule or the source's own forecast, worth
+        # keeping even without a number (a fixture list of kick-off times).
+        if not measures and not future:
+            continue
+        dated = any(_row_date(r) for r in table.rows[:3])
+        strong = dated or future or any(col in table.value_counts for col in measures)
+        if _is_link_list(table) and not strong:
+            continue
+        text = (" ".join(table.columns) + " " + table.context + " "
+                + " ".join(compact(r) for r in table.rows[:3])).lower()
+        if strong or words & set(WORD.findall(text)):
+            kept.append(table)
+    return kept
+
+
 def render_section(pages: list[tuple[str, list[Table]]], question_text: str,
                    max_chars: int = 9000, today: date | None = None) -> str:
     """The research-section body for tables found on the resolution source."""

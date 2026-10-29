@@ -1056,7 +1056,7 @@ async def _build_embedded_data_section(urls: list[str], *, question_text: str, t
         return ""
     import httpx
 
-    from bot.research.resolution.embedded_tables import extract_tables, render_section
+    from bot.research.resolution.embedded_tables import extract_tables, keep_tables, render_section
     from bot.research.resolution.series_discovery import USER_AGENT, _fetch
 
     pages = []
@@ -1070,7 +1070,10 @@ async def _build_embedded_data_section(urls: list[str], *, question_text: str, t
                 continue
             if fetched is None:
                 continue
-            tables = extract_tables(fetched[2], fetched[0], id_prefix=f"P{index}.T")
+            # Plumbing (menus, link lists, page metadata) is dropped here, so a
+            # page with nothing but plumbing adds no section at all.
+            tables = keep_tables(fetched[2], extract_tables(fetched[2], fetched[0], id_prefix=f"P{index}.T"),
+                                 question_text)
             if tables:
                 pages.append((fetched[2], tables))
     if not pages:
