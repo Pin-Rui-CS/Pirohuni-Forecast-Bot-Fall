@@ -41,6 +41,7 @@ from bot.config import llm_rate_limiter
 from bot.llm import provider as llm_provider
 from bot.llm import qwen_ladder, soclaas_models
 from bot.llm.cost_manager import HardLimitExceededError, MonetaryCostManager
+from bot.research.resolution import series_discovery
 from bot.research.resolution.embedded_tables import Table, extract_tables, visible_text
 from bot.trace import research_trace, source_ledger
 
@@ -158,7 +159,10 @@ You have at most {MAX_TURNS} turns. Work out which field of which table the reso
 read from, find its most recent value, and anything the source says about where it is heading by
 the resolution date (history, its own forecasts). Fetch addresses from the start list, the links
 pages list, or a pattern those addresses follow (e.g. one region page's address with another
-region's id); do not guess site maps or page names.
+region's id); do not guess site maps or page names. When you fill in a pattern, take each part
+from an address you have seen or from a table field that holds the same value (an id or key
+column whose values match the ones in seen addresses) -- never from a row's position in a table.
+If an address you built fails, fetch a page that links to it and use the link as listed.
 
 The report records what the source CONTAINS -- quote values exactly as the tables give them, with
 their dates and the table and URL they come from. Do NOT estimate probabilities or give a forecast;
@@ -192,21 +196,26 @@ class _Pages:
                 continue
             self.fetched.append(url)
             prefix = f"P{len(self.fetched)}"
+            # The embedded-data reader's fetch: raw HTML, redirect stubs
+            # followed, and a size cap (a 165 MB export once sat behind a link).
             try:
-                response = await client.get(url)
-                page = response.text
-                ok = response.status_code < 400
+                fetched = await series_discovery._fetch(client, url)
             except httpx.HTTPError as exc:
+                fetched, error = None, f"{type(exc).__name__}: {exc}"
+            else:
+                error = "HTTP error, or the page is over the size cap"
+            if fetched is None:
                 source_ledger.record_url_event(url, source_ledger.ROLE_SCRAPED, engine="source-explorer",
-                                               ok=False, error=f"{type(exc).__name__}: {exc}")
-                out.append(f"## {prefix} {url}\nfetch failed: {type(exc).__name__}: {exc}")
+                                               ok=False, error=error)
+                out.append(f"## {prefix} {url}\nfetch failed: {error}")
                 continue
+            page = fetched[0]
             source_ledger.record_url_event(url, source_ledger.ROLE_SCRAPED, engine="source-explorer",
-                                           ok=ok, chars=len(page))
+                                           ok=True, chars=len(page))
             tables = extract_tables(url, page, id_prefix=f"{prefix}.T")
             self.tables.update((t.id, t) for t in tables)
             shown = [t for t in tables if all(c in t.columns for c in columns)] if columns else tables
-            lines = [f"## {prefix} {url} (HTTP {response.status_code}, {len(page):,} bytes, "
+            lines = [f"## {prefix} {url} ({len(page):,} bytes, "
                      f"{len(tables)} embedded tables"
                      + (f", {len(shown)} with columns {columns}" if columns else "") + ")",
                      "visible text: " + visible_text(page, 300 if columns else 700)]

@@ -59,6 +59,9 @@ _MAX_RETRY_QUERIES = 4
 # introduced 2026-07-19 — same physical char budgets.
 _EXPECTED_SEARCH_PROVIDER_INPUT_TOKENS = 62_500
 _EXPECTED_ARTIFACT_RETRY_INPUT_TOKENS = 37_500
+# The early source explorer waits at most this long for web search to list its
+# results (normally 1-3 minutes after the evidence plan).
+_EARLY_EXPLORER_SEARCH_WAIT_SECONDS = 600
 ARTIFACT_RETRY_TIMEOUT_SECONDS = float(os.getenv("ARTIFACT_RETRY_TIMEOUT_SECONDS", "150"))
 
 
@@ -174,6 +177,7 @@ async def run_research(
             # criteria content budget, not the reduced background tier (45087).
             fine_print=fine_print,
             target_date=target_date,
+            on_summary=lambda text: summary_ready.done() or summary_ready.set_result(text),
         )
 
     async def kalshi_call(market_question: str) -> str:
@@ -189,6 +193,8 @@ async def run_research(
     # The scraper is usually the slowest provider and only needs the question
     # fields, so keeping it off the AskNews -> evidence-plan critical path
     # saves its head start (~1 minute of wall clock per question).
+    summary_ready: asyncio.Future = asyncio.get_running_loop().create_future()
+    search_ready: asyncio.Future = asyncio.get_running_loop().create_future()
     resolution_task = (
         asyncio.create_task(
             run_provider(
@@ -199,6 +205,12 @@ async def run_research(
         if ENABLE_RESOLUTION_SOURCE_RESEARCH
         else None
     )
+    # The source explorer starts once the resolution summary says the value is
+    # not on the scraped page and web search has listed its results, and runs
+    # beside the scrape cycles.
+    early_explorer_task = _start_early_source_explorer(
+        run_provider, summary_ready, resolution_task, search_ready, title=title,
+        resolution_criteria=resolution_criteria, fine_print=fine_print, background=background)
 
     # The API agent is independent of every other provider: question fields
     # in, public-data findings out. It starts now and is collected just before
@@ -323,19 +335,27 @@ async def run_research(
         if enabled
     ]
 
-    chosen_search_result, search_provider_errors = await _run_web_search(
-        ordered_search_engines,
-        question={
-            "title": title,
-            "resolution_criteria": resolution_criteria,
-            "background": background,
-            "fine_print": fine_print,
-        },
-        asknews_research=search_asknews_research,
-        feeds=search_feeds,
-        run_provider=run_provider,
-        should_include=should_include_provider_result,
-    )
+    def candidates_listed() -> None:
+        if not search_ready.done():
+            search_ready.set_result(None)
+
+    try:
+        chosen_search_result, search_provider_errors = await _run_web_search(
+            ordered_search_engines,
+            question={
+                "title": title,
+                "resolution_criteria": resolution_criteria,
+                "background": background,
+                "fine_print": fine_print,
+            },
+            asknews_research=search_asknews_research,
+            feeds=search_feeds,
+            run_provider=run_provider,
+            should_include=should_include_provider_result,
+            on_candidates=candidates_listed,
+        )
+    finally:
+        candidates_listed()  # search failed or found nothing: the explorer goes without
 
     other_results = (
         list(await asyncio.gather(*other_provider_tasks)) if other_provider_tasks else []
@@ -348,6 +368,11 @@ async def run_research(
     results.append(asknews_result)
     if apiagent_task is not None:
         results.append(await apiagent_task)
+    # Collected before the artifact check, so the check judges the data the
+    # explorer read instead of calling it missing and retrying for it.
+    early_explorer_result = await early_explorer_task if early_explorer_task is not None else None
+    if early_explorer_result is not None:
+        results.append(early_explorer_result)
 
     # AskNews and prediction-market providers embed source URLs in their text
     # output rather than scraping pages individually. Record those URLs as
@@ -453,12 +478,14 @@ async def run_research(
     retry_label = _select_retry_provider_label(chosen_search_result, ordered_search_engines)
     pre_retry_result_count = len(included_results)
 
-    # Stage 5a: when the artifact is still missing, a SoCLaaS model browses the
-    # resolution source's own pages and reads the data embedded in their source
-    # (Q46422: every value the brief lacked sat in pages the bot had scraped as
-    # text). Runs beside the web-search retry below, never instead of it; free,
-    # and skipped entirely unless research is on SoCLaaS.
-    explorer_task = _start_source_explorer(
+    # Stage 5a, backstop: the explorer normally starts early, from the
+    # resolution summary. When it did not (the summary found the value, or
+    # never ran) but the check still calls the artifact missing, a SoCLaaS
+    # model browses the resolution source's own pages now (Q46422: every value
+    # the brief lacked sat in pages the bot had scraped as text). Runs beside
+    # the web-search retry below, never instead of it; free, and skipped
+    # entirely unless research is on SoCLaaS.
+    explorer_task = None if early_explorer_result is not None else _start_source_explorer(
         run_provider, retry_basis, title=title, resolution_criteria=resolution_criteria,
         fine_print=fine_print, background=background, artifact_check=artifact_check)
     wants_artifact_retry = bool(
@@ -712,6 +739,7 @@ async def _run_web_search(
     feeds: list[str],
     run_provider,
     should_include,
+    on_candidates=None,
 ):
     """Search with the first engine that returns results, then research them once.
 
@@ -719,6 +747,7 @@ async def _run_web_search(
     engine's ``(label, section)``, or None when no engine found results or
     the research after the search failed. ``failures`` reads "<engine> (<why>)"
     for every engine tried or skipped, for the brief's warning banner.
+    ``on_candidates()`` fires once the search results are in the source ledger.
     """
     if not engines:
         return None, []
@@ -771,7 +800,8 @@ async def _run_web_search(
     source_ledger.set_source_context(engine.label, "main pass")
     result = await run_provider(
         engine.label,
-        lambda: web_search.research_from_hits(engine, hits, queries, **question),
+        lambda: web_search.research_from_hits(engine, hits, queries, on_candidates=on_candidates,
+                                              **question),
         feeds=feeds,
     )
     if should_include(*result):
@@ -1059,6 +1089,61 @@ def _flag_future_dated_claims(
                 f"evidence merely mentions, this flag is a false positive; disregard it.]"
             )
     return check
+
+
+def _start_early_source_explorer(run_provider, summary_ready: asyncio.Future,
+                                 resolution_task: "asyncio.Task | None",
+                                 search_ready: asyncio.Future, *, title: str,
+                                 resolution_criteria: str, fine_print: str,
+                                 background: str) -> "asyncio.Task | None":
+    """Start a task that runs the explorer once the resolution summary is in,
+    if the summary says the value is not (or only partly) on the scraped page.
+
+    It also waits for web search to list its results: those are often the
+    only way into the site's deeper pages. On 2026-10-30 (Q46422) an explorer
+    started from the summary alone saw only the homepage, whose regional pages
+    are linked by client-side code, and reported that no forecast existed.
+
+    The task returns the explorer's ``(name, section)``, or None when it did
+    not run. It browses beside the scrape cycles instead of after the
+    artifact check, so its minutes leave the critical path.
+    """
+    from bot.research.resolution import source_explorer
+    from bot.research.resolution.resolution_criteria_scraper import extract_urls, value_on_page
+
+    if resolution_task is None or not source_explorer.enabled():
+        return None
+    urls = (extract_urls("\n".join(p for p in (resolution_criteria, fine_print) if p))
+            or extract_urls(background or ""))
+    if not urls:
+        return None
+
+    async def run():
+        await asyncio.wait({summary_ready, resolution_task}, return_when=asyncio.FIRST_COMPLETED)
+        text = summary_ready.result() if summary_ready.done() else (resolution_task.result()[1] or "")
+        status, missing = value_on_page(text)
+        if status not in {"partly", "no"}:
+            return None
+        try:
+            await asyncio.wait_for(asyncio.shield(search_ready), _EARLY_EXPLORER_SEARCH_WAIT_SECONDS)
+        except TimeoutError:
+            logger.info("[research] web search has listed no results after %ds; exploring without them",
+                        _EARLY_EXPLORER_SEARCH_WAIT_SECONDS)
+        logger.info("[research] Resolution summary: value %s on the scraped page; exploring the "
+                    "resolution source now (%s)", "partly" if status == "partly" else "not",
+                    ", ".join(urls[:3]))
+        gap = {"status": "partial" if status == "partly" else "missing",
+               "what_is_missing": missing or None}
+        return await run_provider(
+            source_explorer.SECTION_NAME,
+            lambda: source_explorer.explore(
+                title=title, resolution_criteria=resolution_criteria, fine_print=fine_print,
+                artifact_check=gap, resolution_urls=urls),
+            feeds=[research_trace.ref_section("Resolution Criteria Sources")],
+            lane=source_explorer.SECTION_NAME,
+        )
+
+    return asyncio.create_task(run())
 
 
 def _start_source_explorer(run_provider, retry_basis: dict | None, *, title: str,

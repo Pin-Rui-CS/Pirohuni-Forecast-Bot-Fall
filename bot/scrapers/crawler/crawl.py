@@ -56,7 +56,16 @@ _BOILERPLATE_TAGS = ["script", "style", "noscript", "nav", "header", "footer"]
 
 
 async def basic_crawl_markdown(url: str, timeout: int = DEFAULT_PAGE_TIMEOUT) -> str:
-    """Fetch one page with a single-page browser crawl; return its markdown.
+    """Fetch one page with a single-page browser crawl; return its markdown."""
+    markdown, _ = await basic_crawl_page(url, timeout)
+    return markdown
+
+
+async def basic_crawl_page(url: str, timeout: int = DEFAULT_PAGE_TIMEOUT) -> tuple[str, str]:
+    """Fetch one page with a single-page browser crawl; return ``(markdown, html)``.
+
+    ``html`` is the page's HTML with its script blocks, where sites keep the
+    data behind their maps and charts; "" when the crawl kept none.
 
     No embedding relevance filter and no link-following: the page is scraped as-is
     (minus structural nav/header/footer chrome) and its markdown is handed
@@ -82,11 +91,12 @@ async def basic_crawl_markdown(url: str, timeout: int = DEFAULT_PAGE_TIMEOUT) ->
             result = result._results[0]
 
     if not getattr(result, "success", False):
-        return ""
+        return "", ""
+    html = str(getattr(result, "html", None) or "")
     markdown = getattr(result, "markdown", None)
     if markdown is None:
-        return ""
-    return getattr(markdown, "raw_markdown", None) or str(markdown)
+        return "", html
+    return (getattr(markdown, "raw_markdown", None) or str(markdown)), html
 
 
 # ===========================================================================

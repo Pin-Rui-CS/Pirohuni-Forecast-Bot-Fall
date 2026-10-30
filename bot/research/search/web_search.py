@@ -186,11 +186,14 @@ async def research_from_hits(
     max_scrape_cycles: int = DEFAULT_MAX_SCRAPE_CYCLES,
     ranking_model: str = DEFAULT_URL_RANKING_MODEL,
     extract_model: str = DEFAULT_EXTRACT_MODEL,
+    on_candidates=None,
 ) -> str:
     """Rank, scrape and extract one engine's results; return the section text.
 
     ``retry`` marks the focused artifact retry: URLs the main pass already
     fetched cannot close the gap it was launched for, so ranking drops them.
+    ``on_candidates()`` is called once every result is in the source ledger
+    (the source explorer starts from the resolution site's pages listed there).
     """
     for hit in hits:
         source_ledger.record_url_event(
@@ -199,6 +202,8 @@ async def research_from_hits(
             round_label="search",
             detail=" | ".join([f"query: {hit.query}", *(f"{k.lower()}: {v}" for k, v in hit.extras)]),
         )
+    if on_candidates is not None:
+        on_candidates()
     research_trace.emit(
         "search_results",
         f"{engine.label} results (per-query rank order)",

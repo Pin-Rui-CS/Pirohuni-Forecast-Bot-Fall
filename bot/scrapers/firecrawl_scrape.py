@@ -220,7 +220,30 @@ async def firecrawl_scrape_markdown(
     wait_for_ms: int = 0,
     only_main_content: bool | None = None,
 ) -> str:
-    """Scrape one page with Firecrawl's /v2/scrape endpoint; return raw markdown.
+    """Scrape one page with Firecrawl's /v2/scrape endpoint; return raw markdown."""
+    markdown, _ = await firecrawl_scrape_page(
+        url, timeout, max_age_ms=max_age_ms, priority=priority, wait_for_ms=wait_for_ms,
+        only_main_content=only_main_content)
+    return markdown
+
+
+async def firecrawl_scrape_page(
+    url: str,
+    timeout: int,
+    *,
+    max_age_ms: int = RESOLUTION_MAX_AGE_MS,
+    priority: bool = False,
+    wait_for_ms: int = 0,
+    only_main_content: bool | None = None,
+    raw_html: bool = False,
+) -> tuple[str, str]:
+    """Scrape one page with Firecrawl's /v2/scrape endpoint; return
+    ``(markdown, raw_html)``, the HTML "" unless ``raw_html`` is set.
+
+    ``raw_html`` adds the "rawHtml" format: the page's HTML unmodified, script
+    blocks included, which is where sites keep the data behind their maps and
+    charts. Firecrawl bills it inside the 1-credit scrape (docs, 2026-10-29);
+    the creditsUsed top-up below would record it if that ever changed.
 
     Single-page only — no crawling or link-following. Returns "" if the page
     yielded no markdown. See the module docstring for the error contract and
@@ -253,7 +276,7 @@ async def firecrawl_scrape_markdown(
     # every scrape and silently route everything to the Crawl4AI fallback).
     payload = {
         "url": url,
-        "formats": ["markdown"],
+        "formats": ["markdown", "rawHtml"] if raw_html else ["markdown"],
         "onlyMainContent": (
             ONLY_MAIN_CONTENT if only_main_content is None else bool(only_main_content)
         ),
@@ -305,19 +328,21 @@ async def firecrawl_scrape_markdown(
         raise ValueError(f"Firecrawl scrape error for {url!r}: {error}")
 
     data = body.get("data", body)
-    markdown = ""
+    markdown = html = ""
     if isinstance(data, dict):
         markdown = str(data.get("markdown") or "")
+        html = str(data.get("rawHtml") or "") if raw_html else ""
         metadata = data.get("metadata")
         if isinstance(metadata, dict):
             credits_used = metadata.get("creditsUsed")
             if isinstance(credits_used, (int, float)) and int(credits_used) > 1:
                 _top_up(scope, int(credits_used) - 1)
     logger.info(
-        "[firecrawl] scraped %s (%d chars md, %d/%d credits this question)",
+        "[firecrawl] scraped %s (%d chars md%s, %d/%d credits this question)",
         url,
         len(markdown),
+        f", {len(html):,} chars raw html" if raw_html else "",
         firecrawl_credits_spent(scope),
         FIRECRAWL_QUESTION_CREDIT_CAP,
     )
-    return markdown
+    return markdown, html

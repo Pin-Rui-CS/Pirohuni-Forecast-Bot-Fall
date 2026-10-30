@@ -32,20 +32,11 @@ from bot.llm.cost_manager import (  # noqa: E402
     MonetaryCostManager,
 )
 
-# Resolution sources are scraped with Firecrawl FIRST (its rendering handles
-# JS-heavy and PDF sources well); the local Crawl4AI basic crawl is the
-# fallback. The Firecrawl client, exhaustion flag, and per-question credit
-# budget live in research.firecrawl_scrape (shared with the general research
-# scrape path); resolution scrapes pass priority=True, which gives them first
-# claim on the per-question credit cap.
-from bot.scrapers.firecrawl_scrape import (  # noqa: E402
-    RESOLUTION_MAX_AGE_MS,
-    FirecrawlCreditError as _FirecrawlCreditError,
-    firecrawl_exhausted,
-    firecrawl_scrape_markdown,
-    mark_firecrawl_exhausted,
-    release_resolution_reserve,
-)
+# Resolution sources are fetched through the shared ladder in
+# bot.scrapers.fetch (resolution_policy: first claim on the per-question
+# Firecrawl credit cap, fresher cache). This module only releases that claim
+# once its URLs are done.
+from bot.scrapers.firecrawl_scrape import release_resolution_reserve  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +221,32 @@ def _truncation_notice(original: int, kept: int) -> str:
 _LLM_MAX_INPUT = 100_000  # chars sent to the LLM
 
 
+# The summary's last line says whether the resolution value is in the scraped
+# text. The pipeline reads it to start the source explorer as soon as this
+# section is ready, instead of after the artifact check.
+VALUE_ON_PAGE_LABEL = "VALUE ON PAGE"
+_VALUE_ON_PAGE = re.compile(
+    rf"{VALUE_ON_PAGE_LABEL}\s*:\s*\**\s*(yes|partly|partial|no)\b\**\s*(?:[-—–:]+\s*)?([^\n`]*)",
+    re.IGNORECASE,
+)
+
+
+def value_on_page(section: str | None) -> tuple[str | None, str]:
+    """``(status, what_is_missing)`` from a resolution section's summaries.
+
+    status is "yes" when any summary found the value, else "partly" or "no";
+    None when no summary carried the line (summary failed or never ran).
+    """
+    found = _VALUE_ON_PAGE.findall(section or "")
+    if not found:
+        return None, ""
+    statuses = [s.lower().replace("partial", "partly") for s, _ in found]
+    if "yes" in statuses:
+        return "yes", ""
+    missing = "; ".join(dict.fromkeys(m.strip(" .`*") for _, m in found if m.strip(" .`*")))
+    return ("partly" if "partly" in statuses else "no"), missing
+
+
 def _build_resolution_summary_prompt(
     question_text: str,
     resolution_criteria: str,
@@ -257,7 +274,7 @@ def _build_resolution_summary_prompt(
         f"## Scraped Resolution Source Content ({url})\n{content[:_LLM_MAX_INPUT]}\n\n"
         "## Task\n"
         "Write one structured summary of the scraped resolution source content. "
-        "Use exactly these four sections:\n\n"
+        "Use exactly these five sections:\n\n"
         "**1. CURRENT STATE:** What does the source currently show? Include exact "
         "dates, labels, values, or status fields that matter for resolution.\n\n"
         "**2. GAP TO RESOLUTION:** What exactly would need to appear or change on "
@@ -269,6 +286,12 @@ def _build_resolution_summary_prompt(
         "**4. KEY AMBIGUITY:** Flag any mismatch between the resolution criteria "
         "and what the scraped source actually displays, including labels, date "
         "ranges, formatting, or scoping issues.\n\n"
+        "**5. VALUE ON PAGE:** End with exactly one line in one of these forms:\n"
+        f"`{VALUE_ON_PAGE_LABEL}: yes` -- the scraped content shows the current value the "
+        "question resolves on (the exact count, number, status or entry the criteria read).\n"
+        f"`{VALUE_ON_PAGE_LABEL}: partly -- <what is missing>` -- it shows only part of it.\n"
+        f"`{VALUE_ON_PAGE_LABEL}: no -- <what is missing>` -- it does not (for example the "
+        "page is a map or chart whose values are not in the text).\n\n"
         "## Important Rules\n"
         "- Base your summary only on the scraped content provided above.\n"
         "- Do not search for, identify, request, or recommend additional links.\n"
@@ -501,6 +524,7 @@ class _ResolutionScrapeResult:
     success: bool
     content: str = ""
     error: str = ""
+    raw_html: str = ""  # for the embedded-data reader; "" when no rung kept any
 
 
 def _truncate_scrape_content(content: str, max_chars: int = _CRAWL4AI_CONTENT_BUDGET) -> str:
@@ -568,232 +592,44 @@ def _batch_resolution_sources(
     return batches
 
 
-async def _basic_crawl_markdown(url: str, timeout: int) -> str:
-    """Fetch one page with a single-page browser crawl; return full raw markdown.
-
-    Thin wrapper over the shared ``Crawl4AI.crawl.basic_crawl_markdown`` so the
-    resolution scraper and the research scrapers use one identical basic crawl.
-    The resolution source is the page that holds the value being resolved, so its
-    full markdown is what we want, handed downstream to the LLM-cleaning step.
-    Returns "" if the page did not load successfully.
-    """
-    from bot.scrapers.crawler.crawl import basic_crawl_markdown
-
-    return await basic_crawl_markdown(url, timeout=timeout)
-
-
 async def _scrape_resolution_url(
     url: str,
     question_text: str,
     resolution_criteria: str,
     timeout: int,
 ) -> _ResolutionScrapeResult:
-    """Scrape one resolution URL, Firecrawl first with a Crawl4AI fallback.
+    """Scrape one resolution URL through the shared fetch ladder.
 
     The resolution source is the page named by the resolution criteria, so the
     value being resolved is on that page by definition; the full page markdown is
-    handed to the LLM-cleaning step to read against the criteria.
-
-    Firecrawl's /v2/scrape is tried first (it renders JS and PDFs well). On a
-    credit/auth exhaustion it is disabled for the rest of the run; on any other
-    Firecrawl failure (timeout, page error, empty result) we fall back to the
-    local Crawl4AI basic crawl for just this URL. The basic crawl returns the full
-    raw page markdown (no relevance filter, no link-following) so short,
-    semantically-thin facts (e.g. a bare "Predictions 3,903,957") are preserved.
+    handed to the LLM-cleaning step to read against the criteria. The ladder is
+    the one web search uses (bot.scrapers.fetch): every site adapter, Firecrawl
+    with first claim on the credit cap and a fresher cache, Crawl4AI,
+    render-wait, Wayback, and a banner-marked thin attempt rather than a login
+    wall passing as the page.
     """
+    from bot.scrapers.fetch import fetch_page, resolution_policy
     from bot.trace import source_ledger
 
-    from bot.scrapers.crawler.crawl import claim_scrape_url, get_cached_scrape_content, record_scrape_content
-
-    if claim_scrape_url(url) is not None:
-        cached = get_cached_scrape_content(url)
-        if cached:
-            content = _truncate_scrape_content(cached)
-            source_ledger.record_url_event(
-                url,
-                source_ledger.ROLE_SCRAPED,
-                engine=source_ledger.ENGINE_CACHE,
-                ok=True,
-                chars=len(content),
-                round_label="single pass",
-            )
-            return _ResolutionScrapeResult(
-                url=url,
-                provider_used="scrape cache",
-                success=True,
-                content=content,
-            )
-        source_ledger.record_url_event(
-            url,
-            source_ledger.ROLE_SCRAPED,
-            engine=source_ledger.ENGINE_SKIPPED_DUPLICATE,
-            ok=False,
-            error="skipped duplicate: URL has already been scraped in this process",
-            round_label="single pass",
-        )
-        return _ResolutionScrapeResult(
-            url=url,
-            provider_used="dedupe registry",
-            success=False,
-            error="skipped duplicate: URL has already been scraped in this process",
-        )
-
-    def _record_and_return(engine: str, provider: str, content: str, error: str) -> _ResolutionScrapeResult:
-        success = bool(content.strip())
-        source_ledger.record_url_event(
-            url,
-            source_ledger.ROLE_SCRAPED,
-            engine=engine,
-            ok=success,
-            error="" if success else error,
-            chars=len(content),
-            round_label="single pass",
-        )
-        return _ResolutionScrapeResult(
-            url=url,
-            provider_used=provider,
-            success=success,
-            content=content,
-            error="" if success else error,
-        )
-
-    # ------------------------------------------------------------------
-    # 0. Google Sheets: fetch the CSV export directly. Page-scraping a large
-    #    sheet returns whatever rows the rendered grid shows (for PLATracker
-    #    that meant early-2021 rows only, dropping the resolution window), so
-    #    the deterministic export path always runs first for sheet URLs.
-    # ------------------------------------------------------------------
-    try:
-        from bot.scrapers.adapters.GoogleSheets import GoogleSheetsAdapter
-
-        _sheets_adapter = GoogleSheetsAdapter()
-        if _sheets_adapter.can_handle(url):
-            try:
-                result = await _sheets_adapter.extract(url, query=question_text, timeout=timeout)
-                record_scrape_content(url, result.content)
-                content = _truncate_scrape_content(result.content)
-                if content.strip():
-                    return _record_and_return(
-                        f"adapter:{_sheets_adapter.name}",
-                        f"adapter:{_sheets_adapter.name}",
-                        content,
-                        "",
-                    )
-                logger.info(
-                    "Google Sheets CSV export returned no content for %s; "
-                    "falling back to page scraping.", url,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Google Sheets CSV export failed for %s: %s — falling back to "
-                    "page scraping.", url, exc,
-                )
-    except ImportError as exc:
-        logger.warning("Google Sheets adapter unavailable: %s", exc)
-
-    # ------------------------------------------------------------------
-    # 0.5. Yahoo Finance quote pages: fetch the chart API directly — the same
-    #      data the page renders, without the scrape lottery (44773: the
-    #      resolution source BZ=F). Fail-open: the adapter itself falls back
-    #      to a plain crawl, and an empty result falls through to Firecrawl.
-    # ------------------------------------------------------------------
-    try:
-        from bot.scrapers.adapters.YahooQuotes import YahooQuotesAdapter
-
-        _quotes_adapter = YahooQuotesAdapter()
-        if _quotes_adapter.can_handle(url):
-            try:
-                result = await _quotes_adapter.extract(url, query=question_text, timeout=timeout)
-                record_scrape_content(url, result.content)
-                content = _truncate_scrape_content(result.content)
-                if content.strip():
-                    return _record_and_return(
-                        f"adapter:{_quotes_adapter.name}",
-                        f"adapter:{_quotes_adapter.name}",
-                        content,
-                        "",
-                    )
-                logger.info(
-                    "Yahoo quotes adapter returned no content for %s; "
-                    "falling back to page scraping.", url,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Yahoo quotes adapter failed for %s: %s — falling back to "
-                    "page scraping.", url, exc,
-                )
-    except ImportError as exc:
-        logger.warning("Yahoo quotes adapter unavailable: %s", exc)
-
-    # ------------------------------------------------------------------
-    # 1. Firecrawl single-page scrape (skipped once credits/auth exhausted).
-    # ------------------------------------------------------------------
-    if not firecrawl_exhausted():
-        try:
-            raw = await firecrawl_scrape_markdown(
-                url, timeout, max_age_ms=RESOLUTION_MAX_AGE_MS, priority=True
-            )
-            record_scrape_content(url, raw)
-            content = _truncate_scrape_content(raw)
-            if content.strip():
-                return _record_and_return(
-                    source_ledger.ENGINE_FIRECRAWL, "firecrawl-scrape", content, ""
-                )
-            logger.info("Firecrawl returned no content for %s; falling back to Crawl4AI.", url)
-        except _FirecrawlCreditError as exc:
-            mark_firecrawl_exhausted()
-            logger.warning(
-                "Firecrawl exhausted (credits/auth) on %s: %s — falling back to "
-                "Crawl4AI for this and all remaining resolution URLs this run.",
-                url, exc,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Firecrawl scrape failed for %s: %s — falling back to Crawl4AI.", url, exc
-            )
-
-    # ------------------------------------------------------------------
-    # 2. Crawl4AI basic crawl fallback.
-    # ------------------------------------------------------------------
-    crawl_error = ""
-    try:
-        raw = await _basic_crawl_markdown(url, timeout)
-        record_scrape_content(url, raw)
-        content = _truncate_scrape_content(raw)
-        if content.strip():
-            return _record_and_return(
-                source_ledger.ENGINE_CRAWL4AI_BASIC, "crawl4ai-basic", content, ""
-            )
-        crawl_error = "Crawl4AI returned no content."
-    except HardLimitExceededError:
-        raise
-    except Exception as exc:
-        crawl_error = f"{type(exc).__name__}: {exc}"
-
-    # ------------------------------------------------------------------
-    # 3. Wayback snapshot fallback: pages the live web will not serve
-    #    (paywalls, bot walls — the 44773 NYT case). Never for market/quote
-    #    pages, where an archive capture is stale price data (44267 class);
-    #    snapshot_fallback_text stamps the capture date in-band.
-    # ------------------------------------------------------------------
-    try:
-        from bot.scrapers.adapters import Wayback as wayback_module
-
-        snapshot_text = await wayback_module.snapshot_fallback_text(url)
-    except Exception as exc:
-        logger.warning("Wayback snapshot fallback failed for %s: %s", url, exc)
-        snapshot_text = ""
-    if snapshot_text.strip():
-        record_scrape_content(url, snapshot_text)
-        return _record_and_return(
-            "wayback-snapshot",
-            "wayback-snapshot",
-            _truncate_scrape_content(snapshot_text),
-            "",
-        )
-
-    return _record_and_return(
-        source_ledger.ENGINE_CRAWL4AI_BASIC, "crawl4ai-basic", "", crawl_error
+    page = await fetch_page(url, resolution_policy(timeout), query=question_text)
+    text = page.banner + page.content if page.ok else ""
+    content = _truncate_scrape_content(text)
+    source_ledger.record_url_event(
+        url,
+        source_ledger.ROLE_SCRAPED,
+        engine=page.engine,
+        ok=page.ok,
+        error=page.error,
+        chars=len(content),
+        round_label="single pass",
+    )
+    return _ResolutionScrapeResult(
+        url=url,
+        provider_used=page.engine,
+        success=page.ok,
+        content=content,
+        error=page.error,
+        raw_html=page.raw_html,
     )
 
 
@@ -849,8 +685,13 @@ async def scrape_resolution_sources(
     question_type: str = "",
     fine_print: str = "",
     target_date: str = "",
+    on_summary=None,
 ) -> str:
     """Scrape the URLs embedded in the question and summarize them once.
+
+    ``on_summary(text)``, when given, is called as soon as the page summaries
+    exist (with "" if there are none), before the slower archive history is
+    joined in: the pipeline starts the source explorer from it.
 
     Candidate URLs are gathered from BOTH the resolution criteria and the
     question context (background + fine print), deduped with criteria URLs
@@ -927,7 +768,7 @@ async def scrape_resolution_sources(
     if not series_section:
         series_section = await _build_embedded_data_section(
             (criteria_urls or urls)[:_EMBEDDED_MAX_PAGES], question_text=question_text,
-            timeout=timeout,
+            timeout=timeout, raw_pages={r.url: r.raw_html for r in results if r.raw_html},
         )
 
     criteria_url_set = set(criteria_urls)
@@ -968,8 +809,10 @@ async def scrape_resolution_sources(
     # Historical captures of the primary resolution URL (the page the value
     # resolves off). Gives the forecaster a same-source flow rate and update
     # cadence; soft-fails to "" when the page has no usable archive history.
-    history_section = ""
-    if use_llm_cleaning:
+    # Runs beside the summary below rather than before it: reading up to 60
+    # archive captures takes minutes, and the summary's VALUE ON PAGE line is
+    # what starts the source explorer.
+    async def history() -> str:
         primary_url = criteria_urls[0] if criteria_urls else urls[0]
         if _is_market_data_url(primary_url):
             logger.info(
@@ -977,14 +820,49 @@ async def scrape_resolution_sources(
                 "carries its own history; archive captures would only add stale prices.",
                 primary_url,
             )
-        else:
-            history_section = await _build_wayback_history_section(
-                primary_url,
-                question_text=question_text,
-                resolution_criteria=resolution_criteria,
-                model=llm_model,
-            )
-            history_section += await _build_update_stamp_section(primary_url)
+            return ""
+        section = await _build_wayback_history_section(
+            primary_url,
+            question_text=question_text,
+            resolution_criteria=resolution_criteria,
+            model=llm_model,
+        )
+        return section + await _build_update_stamp_section(primary_url)
+
+    history_task = asyncio.create_task(history()) if use_llm_cleaning else None
+    try:
+        return await _assemble_resolution_section(
+            sections, cleaned_sources, series_section, history_task,
+            use_llm_cleaning=use_llm_cleaning, question_text=question_text,
+            resolution_criteria=resolution_criteria, llm_model=llm_model,
+            on_summary=on_summary,
+        )
+    finally:
+        if history_task is not None and not history_task.done():
+            history_task.cancel()
+
+
+async def _assemble_resolution_section(
+    sections: list[str],
+    cleaned_sources: list[tuple[str, str]],
+    series_section: str,
+    history_task: "asyncio.Task | None",
+    *,
+    use_llm_cleaning: bool,
+    question_text: str,
+    resolution_criteria: str,
+    llm_model: str,
+    on_summary=None,
+) -> str:
+    async def history_section() -> str:
+        return await history_task if history_task is not None else ""
+
+    def announce(text: str) -> None:
+        if on_summary is not None:
+            try:
+                on_summary(text)
+            except Exception as exc:  # noqa: BLE001 - a listener never fails the scrape
+                logger.warning("on_summary listener failed: %s", exc)
 
     if use_llm_cleaning and cleaned_sources:
         try:
@@ -1014,6 +892,7 @@ async def scrape_resolution_sources(
                     "summarization budget and was NOT summarized: "
                     + ", ".join(omitted_urls) + "_"
                 )
+            announce(summary_text)
             source_lines = "\n".join(f"- {url}" for url, _ in cleaned_sources)
             return (
                 "# Resolution Criteria Sources\n\n"
@@ -1022,18 +901,19 @@ async def scrape_resolution_sources(
                 f"{summary_text}\n\n"
                 "## Scraped Sources\n\n"
                 f"{source_lines}"
-                f"{history_section}"
+                f"{await history_section()}"
             )
         except HardLimitExceededError:
             raise
         except Exception as exc:
             logger.warning("LLM summary failed: %s - returning heuristic output", exc)
 
+    announce("")
     return (
         "# Resolution Criteria Sources\n\n"
         + series_section
         + "\n\n---\n\n".join(sections)
-        + history_section
+        + await history_section()
     )
 
 
@@ -1046,11 +926,14 @@ _EMBEDDED_MAX_PAGES = 3
 _EMBEDDED_MAX_CHARS = 9000
 
 
-async def _build_embedded_data_section(urls: list[str], *, question_text: str, timeout: int) -> str:
+async def _build_embedded_data_section(urls: list[str], *, question_text: str, timeout: int,
+                                      raw_pages: dict[str, str] | None = None) -> str:
     """Tables shipped inside the resolution pages' HTML, which a markdown scrape drops.
 
     Returns "" when no page carries any. Size-capped and ranked by relevance to
-    the question, so a map's geometry never crowds out its values.
+    the question, so a map's geometry never crowds out its values. ``raw_pages``
+    holds the HTML the resolution scrape already downloaded; a page missing
+    from it is fetched here with a plain GET.
     """
     if not urls:
         return ""
@@ -1063,11 +946,16 @@ async def _build_embedded_data_section(urls: list[str], *, question_text: str, t
     async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT}, timeout=timeout,
                                  follow_redirects=True) as client:
         for index, url in enumerate(urls, start=1):
-            try:
-                fetched = await _fetch(client, url)
-            except Exception as exc:  # noqa: BLE001 - optional enrichment
-                logger.debug("Embedded-data fetch failed for %s: %s", url, exc)
-                continue
+            if (raw_pages or {}).get(url):
+                logger.info("Embedded data: reading the HTML the scrape already downloaded for %s "
+                            "(%s chars)", url, f"{len(raw_pages[url]):,}")
+                fetched = (raw_pages[url], "text/html", url)
+            else:
+                try:
+                    fetched = await _fetch(client, url)
+                except Exception as exc:  # noqa: BLE001 - optional enrichment
+                    logger.debug("Embedded-data fetch failed for %s: %s", url, exc)
+                    continue
             if fetched is None:
                 continue
             # Plumbing (menus, link lists, page metadata) is dropped here, so a

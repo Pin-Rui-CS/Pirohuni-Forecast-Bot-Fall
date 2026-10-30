@@ -17,13 +17,18 @@ import re
 from dataclasses import dataclass
 from typing import Iterable
 
-from bot.config import ENABLE_FIRECRAWL_GENERAL_SCRAPE
 from bot.llm.client import call_llm
 from bot.llm.cost_manager import HardLimitExceededError, MonetaryCostManager
 from bot.utils import _truncate_text, tweet_url_date
 from bot.trace import research_trace
 from bot.trace import source_ledger
 from bot.research.search.search_common import RankedUrl, RankedUrlGroup, _limited_gather
+from bot.scrapers.fetch import (  # noqa: F401 - scrape_adequacy/thin_content_banner re-exported
+    fetch_page,
+    scrape_adequacy,
+    search_policy,
+    thin_content_banner,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,42 +66,6 @@ _MAX_SCRAPE_CHARS = 40_000
 # does bind it drops the LAST scrapes of the cycle entirely, not a tail from
 # each — the reason it must stay comfortably above the per-scrape cap.
 _MAX_EXTRACT_INPUT_CHARS = 180_000
-# Below this, a fetch is treated as "shell only" and the ladder keeps escalating
-# instead of accepting the page. Deliberately generous: because inadequate
-# content is never DISCARDED (the best attempt is returned with a warning
-# banner), this threshold governs how hard we try, not what we believe. A false
-# "inadequate" costs one extra fetch on the free rungs; a false "adequate" cost
-# 44875 its resolution source (bsky.jazco.dev/stats returned 246-250 chars of
-# nav boilerplate five times, each recorded ok, so the ladder never escalated).
-_MIN_SUBSTANTIVE_SCRAPE_CHARS = 500
-# Wall/placeholder markers are only consulted on short pages: a long article
-# that happens to contain "access denied" is fine, a 300-char page that says it
-# is not.
-_WALL_MARKER_MAX_CHARS = 2_000
-_WALL_MARKERS = (
-    "enable javascript",
-    "requires javascript",
-    "javascript is disabled",
-    "javascript to run",
-    "please enable js",
-    "checking your browser",
-    "verify you are human",
-    "are you a robot",
-    "access denied",
-    "403 forbidden",
-    "subscribe to continue",
-    "subscribe to read",
-    "create an account to continue",
-)
-# Firecrawl's own page-render timeout for general research scrapes (its HTTP
-# client gets +15 s headroom on top; see research.firecrawl_scrape).
-_FIRECRAWL_GENERAL_TIMEOUT_SECONDS = 30
-# Render-wait rung: held open long enough for client-side JS to populate the
-# DOM. 8 s was the value verified against bsky.jazco.dev/stats; the longer
-# page timeout gives the render room to finish inside the request.
-_RENDER_WAIT_MS = 8_000
-_FIRECRAWL_RENDER_TIMEOUT_SECONDS = 45
-_ENGINE_FIRECRAWL_RENDER = "firecrawl-render-wait"
 # Soft-stop gate for the scrape-cycle loop: measured extract calls ran 6K-25K
 # input tokens in chars/4 units (44773 ledger); rescaled x1.25 to the
 # 3.2-chars/token units introduced 2026-07-19 (same physical budget). A cycle
@@ -126,76 +95,6 @@ class Scrape:
     # Size of the page before the _MAX_SCRAPE_CHARS cut (0 = not measured).
     # Recorded in the trace so a diagnosis can see what the cap removed.
     raw_chars: int = 0
-
-
-def scrape_adequacy(content: str) -> tuple[bool, str]:
-    """Did this fetch return usable research material, or only the page shell?
-
-    Returns ``(adequate, reason)``; ``reason`` is empty when adequate.
-
-    Every rung of the scrape ladder used to gate on ``content.strip()`` alone,
-    which asks "did bytes come back", not "did the page's data come back".
-    Those differ precisely on the pages that matter most for numeric questions:
-    client-side-rendered dashboards, paywall interstitials, cookie/bot walls.
-    All return a real DOM full of navigation and no data, so the ladder
-    short-circuited at the first rung and the free fallbacks never ran.
-
-    This is a *thin content* test, not a *wrong content* test. Judging whether
-    the page holds the specific value we came for is the extract stage's job;
-    doing it here would need the question in scope and would turn every scrape
-    into an LLM call.
-    """
-    text = (content or "").strip()
-    if not text:
-        return False, "no content"
-    if len(text) < _WALL_MARKER_MAX_CHARS:
-        lowered = text.lower()
-        for marker in _WALL_MARKERS:
-            if marker in lowered:
-                return False, (
-                    f"{len(text)} chars matching a wall/placeholder page ({marker!r})"
-                )
-    if len(text) < _MIN_SUBSTANTIVE_SCRAPE_CHARS:
-        return False, (
-            f"only {len(text)} chars, under the {_MIN_SUBSTANTIVE_SCRAPE_CHARS}-char "
-            "substantive-content floor (navigation/boilerplate shell)"
-        )
-    return True, ""
-
-
-def thin_content_banner(reason: str, engines_tried: Iterable[str]) -> str:
-    """Prefix marking content that the ladder accepted only as a last resort.
-
-    Downstream readers (extract, artifact-check, compiler) otherwise cannot tell
-    a genuinely sparse page from one whose payload never loaded, and would read
-    the silence as evidence the value does not exist.
-    """
-    tried = ", ".join(dict.fromkeys(e for e in engines_tried if e)) or "all engines"
-    return (
-        "[SCRAPE WARNING — INADEQUATE CONTENT] This fetch succeeded but returned "
-        f"{reason}. Engines tried: {tried}. The page is most likely client-side "
-        "rendered (its data loads via JavaScript after the HTML), paywalled, or behind "
-        "a bot wall, so the data it displays to a human was NOT retrieved. Treat the "
-        "text below as incomplete: the ABSENCE of a value here is NOT evidence that the "
-        "value does not exist or was not published.\n\n"
-    )
-
-
-def _cache_payload(cached: str) -> tuple[str, str]:
-    """``(content, error)`` for cache-served text, banner-marked when thin.
-
-    A URL scraped twice in one run (main pass, then artifact retry) takes the
-    cache path the second time. Without this the retry copy would arrive
-    unmarked while the original carried the warning — 44875 hit exactly that.
-    """
-    adequate, reason = scrape_adequacy(cached)
-    if adequate:
-        return _truncate_text(cached, _MAX_SCRAPE_CHARS), ""
-    banner = thin_content_banner(reason, ["cache (earlier attempt this run)"])
-    return (
-        banner + _truncate_text(cached, _MAX_SCRAPE_CHARS - len(banner)),
-        f"inadequate content: {reason}",
-    )
 
 
 @dataclass(frozen=True)
@@ -616,318 +515,10 @@ async def _scrape_targets(
             )
             return scrape
 
-        from bot.scrapers.crawler.crawl import (
-            basic_crawl_markdown,
-            claim_scrape_url,
-            get_cached_scrape_content,
-            record_scrape_content,
-        )
-
-        # One claim per URL, before both the adapter and the generic chain: a
-        # failed adapter falls through to the chain below, which must not then
-        # see its own URL as an earlier duplicate.
-        duplicate_payload = claim_scrape_url(item.url)
-        if duplicate_payload is not None:
-            cached = get_cached_scrape_content(item.url)
-            if cached:
-                cached_content, cached_error = _cache_payload(cached)
-                return _finish(
-                    Scrape(
-                        cycle=0,
-                        group=group.group,
-                        group_purpose=group.group_purpose,
-                        url=item.url,
-                        purpose=item.purpose,
-                        ok=True,
-                        content=cached_content,
-                        error=cached_error,
-                    ),
-                    engine=source_ledger.ENGINE_CACHE,
-                )
-            return _finish(
-                Scrape(
-                    cycle=0,
-                    group=group.group,
-                    group_purpose=group.group_purpose,
-                    url=item.url,
-                    purpose=item.purpose,
-                    ok=False,
-                    error="skipped duplicate: URL has already been scraped in this process",
-                ),
-                engine=source_ledger.ENGINE_SKIPPED_DUPLICATE,
-            )
-
-        adapter = None
-        try:
-            from bot.scrapers.adapters import find_adapter
-
-            adapter = find_adapter(item.url)
-        except Exception as exc:
-            print(f"[adapter] registry unavailable for {item.url}: {type(exc).__name__}: {exc}")
-
-        # A site adapter reads the page through the site's own API or file
-        # format. When it errors or returns nothing, the URL falls through to
-        # the generic chain below instead of being lost for the run (Firecrawl
-        # renders PDFs; Wikipedia, Metaculus and Sheets pages are plain HTML).
-        # A short but non-empty adapter result is kept: adapters return compact
-        # structured data (a quote, a question, a Trends table) that is often
-        # under the generic chain's 500-char "thin" floor and still the answer.
-        adapter_error = ""
-        if adapter is not None:
-            try:
-                print(f"[adapter] {adapter.name} handling {item.url}")
-                result = await adapter.extract(item.url, query=query)
-                if result.content.strip():
-                    record_scrape_content(item.url, result.content)
-                    return _finish(
-                        Scrape(
-                            cycle=0,
-                            group=group.group,
-                            group_purpose=group.group_purpose,
-                            url=item.url,
-                            purpose=item.purpose,
-                            ok=True,
-                            content=_truncate_text(result.content, _MAX_SCRAPE_CHARS),
-                            raw_chars=len(result.content or ""),
-                        ),
-                        engine=f"adapter:{adapter.name}",
-                    )
-                adapter_error = f"{adapter.name} returned no content"
-            except HardLimitExceededError:
-                raise
-            except Exception as exc:
-                adapter_error = f"{type(exc).__name__}: {exc}"
-            logger.warning(
-                "[adapter] %s failed for %s (%s); falling back to generic scraping.",
-                adapter.name,
-                item.url,
-                adapter_error,
-            )
-
-        # Firecrawl first (main-content markdown, JS/PDF rendering, bot-wall
-        # bypass); Crawl4AI below stays as the free fallback. The shared
-        # per-question credit budget in research.firecrawl_scrape hard-caps
-        # spend and reserves first claim for the resolution-path URLs.
-        # Best inadequate attempt seen so far. Adequacy decides whether to keep
-        # escalating; it never decides whether to keep the text. If every rung
-        # comes back thin we still return the longest thing we got, banner-
-        # marked, rather than discarding it as a failure.
-        best_thin_content = ""
-        best_thin_engine = ""
-        best_thin_reason = ""
-        engines_tried: list[str] = [f"adapter:{adapter.name}"] if adapter_error else []
-
-        def _note_thin(content: str, engine: str, reason: str) -> None:
-            nonlocal best_thin_content, best_thin_engine, best_thin_reason
-            engines_tried.append(engine)
-            if content.strip() and len(content.strip()) > len(best_thin_content):
-                best_thin_content = content.strip()
-                best_thin_engine = engine
-                best_thin_reason = reason
-
-        firecrawl_error = ""
-        if ENABLE_FIRECRAWL_GENERAL_SCRAPE:
-            from bot.scrapers.firecrawl_scrape import (
-                GENERAL_MAX_AGE_MS,
-                FirecrawlBudgetExceededError,
-                FirecrawlCreditError,
-                firecrawl_exhausted,
-                firecrawl_scrape_markdown,
-                mark_firecrawl_exhausted,
-            )
-
-            if not firecrawl_exhausted():
-                try:
-                    content = await firecrawl_scrape_markdown(
-                        item.url,
-                        _FIRECRAWL_GENERAL_TIMEOUT_SECONDS,
-                        max_age_ms=GENERAL_MAX_AGE_MS,
-                    )
-                    record_scrape_content(item.url, content)
-                    adequate, reason = scrape_adequacy(content)
-                    if adequate:
-                        return _finish(
-                            Scrape(
-                                cycle=0,
-                                group=group.group,
-                                group_purpose=group.group_purpose,
-                                url=item.url,
-                                purpose=item.purpose,
-                                ok=True,
-                                content=_truncate_text(content, _MAX_SCRAPE_CHARS),
-                                raw_chars=len(content or ""),
-                            ),
-                            engine=source_ledger.ENGINE_FIRECRAWL,
-                        )
-                    _note_thin(content, source_ledger.ENGINE_FIRECRAWL, reason)
-                    firecrawl_error = f"Firecrawl returned {reason}."
-                except FirecrawlCreditError as exc:
-                    mark_firecrawl_exhausted()
-                    firecrawl_error = f"{exc}"
-                    logger.warning(
-                        "Firecrawl exhausted (credits/auth) on %s — falling back "
-                        "to Crawl4AI for the rest of this run: %s",
-                        item.url,
-                        exc,
-                    )
-                except FirecrawlBudgetExceededError as exc:
-                    firecrawl_error = f"{exc}"
-                    logger.info("%s", exc)
-                except Exception as exc:
-                    firecrawl_error = f"{type(exc).__name__}: {exc}"
-                    logger.warning(
-                        "Firecrawl scrape failed for %s: %s — falling back to Crawl4AI.",
-                        item.url,
-                        firecrawl_error,
-                    )
-
-        crawl_error = ""
-        try:
-            content = await basic_crawl_markdown(item.url)
-            record_scrape_content(item.url, content)
-            adequate, reason = scrape_adequacy(content)
-            if adequate:
-                return _finish(
-                    Scrape(
-                        cycle=0,
-                        group=group.group,
-                        group_purpose=group.group_purpose,
-                        url=item.url,
-                        purpose=item.purpose,
-                        ok=True,
-                        content=_truncate_text(content, _MAX_SCRAPE_CHARS),
-                        raw_chars=len(content or ""),
-                    ),
-                    engine=source_ledger.ENGINE_CRAWL4AI_BASIC,
-                )
-            _note_thin(content, source_ledger.ENGINE_CRAWL4AI_BASIC, reason)
-            crawl_error = f"Crawl4AI returned {reason}."
-        except HardLimitExceededError:
-            raise
-        except Exception as exc:
-            crawl_error = f"{type(exc).__name__}: {exc}"
-
-        # Render-wait rung: only reached when the ordinary engines came back
-        # inadequate, which is the signature of a client-side-rendered page.
-        # Costs one Firecrawl credit and ~8s, so it is never on the fast path —
-        # and the per-question credit cap makes the worst case bounded (44875
-        # spent 1 of 25 credits while its resolution source failed five times).
-        render_error = ""
-        if ENABLE_FIRECRAWL_GENERAL_SCRAPE and best_thin_content:
-            from bot.scrapers.firecrawl_scrape import (
-                FirecrawlBudgetExceededError,
-                FirecrawlCreditError,
-                firecrawl_exhausted,
-                firecrawl_scrape_markdown,
-                mark_firecrawl_exhausted,
-            )
-
-            if not firecrawl_exhausted():
-                try:
-                    content = await firecrawl_scrape_markdown(
-                        item.url,
-                        _FIRECRAWL_RENDER_TIMEOUT_SECONDS,
-                        max_age_ms=0,
-                        wait_for_ms=_RENDER_WAIT_MS,
-                        only_main_content=False,
-                    )
-                    record_scrape_content(item.url, content)
-                    adequate, reason = scrape_adequacy(content)
-                    if adequate:
-                        return _finish(
-                            Scrape(
-                                cycle=0,
-                                group=group.group,
-                                group_purpose=group.group_purpose,
-                                url=item.url,
-                                purpose=item.purpose,
-                                ok=True,
-                                content=_truncate_text(content, _MAX_SCRAPE_CHARS),
-                                raw_chars=len(content or ""),
-                            ),
-                            engine=_ENGINE_FIRECRAWL_RENDER,
-                        )
-                    _note_thin(content, _ENGINE_FIRECRAWL_RENDER, reason)
-                    render_error = f"Firecrawl render-wait returned {reason}."
-                except FirecrawlCreditError as exc:
-                    mark_firecrawl_exhausted()
-                    render_error = f"{exc}"
-                except FirecrawlBudgetExceededError as exc:
-                    render_error = f"{exc}"
-                except HardLimitExceededError:
-                    raise
-                except Exception as exc:
-                    render_error = f"{type(exc).__name__}: {exc}"
-                    logger.warning(
-                        "Firecrawl render-wait scrape failed for %s: %s", item.url, render_error
-                    )
-
-        # Wayback snapshot fallback: pages the live web will not serve
-        # (paywalls, bot walls — the 44773 NYT case, where one failed live
-        # fetch tombstoned the URL for the whole run). Free (archive.org),
-        # never for market/quote pages (stale prices, the 44267 class), and
-        # the capture date is stamped in-band by snapshot_fallback_text.
-        try:
-            from bot.scrapers.adapters import Wayback as wayback_module
-
-            snapshot_text = await wayback_module.snapshot_fallback_text(item.url)
-        except Exception as exc:
-            logger.warning(
-                "Wayback snapshot fallback failed for %s: %s", item.url, exc
-            )
-            snapshot_text = ""
-        wayback_adequate, wayback_reason = scrape_adequacy(snapshot_text)
-        if wayback_adequate:
-            record_scrape_content(item.url, snapshot_text)
-            return _finish(
-                Scrape(
-                    cycle=0,
-                    group=group.group,
-                    group_purpose=group.group_purpose,
-                    url=item.url,
-                    purpose=item.purpose,
-                    ok=True,
-                    content=_truncate_text(snapshot_text, _MAX_SCRAPE_CHARS),
-                    raw_chars=len(snapshot_text or ""),
-                ),
-                engine="wayback-snapshot",
-            )
-        if snapshot_text.strip():
-            _note_thin(snapshot_text, "wayback-snapshot", wayback_reason)
-
-        # Every rung came back thin. Returning the best attempt banner-marked
-        # beats dropping it: the text is still weak evidence, and the banner is
-        # what tells the artifact-check and the compiler that this page's
-        # silence is a retrieval failure rather than a published absence.
-        if best_thin_content:
-            record_scrape_content(item.url, best_thin_content)
-            banner = thin_content_banner(best_thin_reason, engines_tried)
-            return _finish(
-                Scrape(
-                    cycle=0,
-                    group=group.group,
-                    group_purpose=group.group_purpose,
-                    url=item.url,
-                    purpose=item.purpose,
-                    ok=True,
-                    content=banner + _truncate_text(
-                        best_thin_content, _MAX_SCRAPE_CHARS - len(banner)
-                    ),
-                    error=f"inadequate content: {best_thin_reason}",
-                ),
-                engine=f"{best_thin_engine}+thin",
-            )
-
-        combined_error = "; ".join(
-            part
-            for part in (
-                f"adapter:{adapter.name}: {adapter_error}" if adapter_error else "",
-                f"firecrawl: {firecrawl_error}" if firecrawl_error else "",
-                f"crawl4ai: {crawl_error}" if crawl_error else "",
-                f"firecrawl-render-wait: {render_error}" if render_error else "",
-            )
-            if part
-        )
+        page = await fetch_page(item.url, search_policy(), query=query)
+        content = page.content
+        if page.ok:
+            content = page.banner + _truncate_text(content, _MAX_SCRAPE_CHARS - len(page.banner))
         return _finish(
             Scrape(
                 cycle=0,
@@ -935,10 +526,12 @@ async def _scrape_targets(
                 group_purpose=group.group_purpose,
                 url=item.url,
                 purpose=item.purpose,
-                ok=False,
-                error=combined_error or "scrape returned no content",
+                ok=page.ok,
+                content=content if page.ok else "",
+                error=page.error,
+                raw_chars=len(page.content) if page.ok and page.engine != source_ledger.ENGINE_CACHE else 0,
             ),
-            engine=source_ledger.ENGINE_CRAWL4AI_BASIC,
+            engine=page.engine,
         )
 
     scrapes = await _limited_gather(

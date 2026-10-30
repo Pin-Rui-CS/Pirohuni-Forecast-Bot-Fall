@@ -295,7 +295,9 @@ Rules:
 - UNITS: every numeric value below must be in {units}. Never mix units; if the
   research used a different unit, convert first. State the unit you used in
   reasoning_summary so the conversion is explicit.
-- 1–3 components; weights positive and summing to 1; each component is smooth and single-peaked.
+- One component per genuinely distinct scenario: usually 1–3, more when the outcome is built
+  from discrete cases (a seat count, a number of events) that each land in a different place.
+  Weights positive and summing to 1; each component is smooth and single-peaked.
   Any multimodality comes from the MIXTURE, never from a single component.
 - The chosen family's support must contain every plausible outcome and violate no stated bound.
   For a hard limit other than zero (a floor at the current count, a cap at 100%), set
@@ -1985,10 +1987,17 @@ MIN_SCALE_BINS = 1.5
 MIN_SCALE_RANGE_FLOOR = 0.003
 # Absolute floor on a lognormal's log-scale spread (sigma is unitless).
 MIN_LOG_SIGMA = 0.03
-# Components rated less likely than this are negligible: dropped and absorbed.
-COMPONENT_WEIGHT_FLOOR = 0.05
-# Maximum components kept (parsimony; matches the prompt instruction).
-MAX_COMPONENTS = 3
+# Components rated less likely than this are negligible: their weight goes to
+# the nearest kept component. Was 5% with the weight spread over every
+# component, which on Q46513 (2026-10-29) deleted an 11-seat scenario (0.9%)
+# and moved its mass toward the middle; a 1% tail scenario is a real claim.
+COMPONENT_WEIGHT_FLOOR = 0.005
+# Sanity limit only. Was 3 ("parsimony"), enforced by keeping the three
+# heaviest: Q46513's run listed 7, 8, 9, 10 and 11 seats and lost 10 and 11,
+# 12% of its forecast, with nothing checking what was cut. Discrete outcomes
+# (seat counts, vote tallies) legitimately need one component each; spurious
+# humps are handled by the near-duplicate merge below.
+MAX_COMPONENTS = 8
 # Same-family components whose centres sit within this fraction of the range
 # of each other are merged (the model inventing spurious multimodality).
 COMPONENT_MERGE_FRACTION = 0.05
@@ -2116,6 +2125,17 @@ def _merge_components(components: list[dict], merge_tol: float) -> list[dict]:
     return merged
 
 
+def _nearest(components: list[dict], comp: dict) -> dict:
+    """The component whose centre is closest to ``comp``'s (the heaviest when
+    centres are unknown)."""
+    if comp["center"] is None:
+        return max(components, key=lambda c: c["weight"])
+    return min(
+        components,
+        key=lambda c: abs(c["center"] - comp["center"]) if c["center"] is not None else float("inf"),
+    )
+
+
 def _renormalize(components: list[dict]) -> None:
     total = sum(c["weight"] for c in components) or 1.0
     for c in components:
@@ -2169,20 +2189,31 @@ def build_mixture_spec_from_components(
 
     _renormalize(clean)
 
-    # Drop negligible components, then keep at most MAX_COMPONENTS.
+    # Negligible components hand their weight to the nearest kept component,
+    # so the mass stays where the model put it instead of being spread over
+    # every component.
     kept = [c for c in clean if c["weight"] >= COMPONENT_WEIGHT_FLOOR]
     if not kept:
         kept = [max(clean, key=lambda c: c["weight"])]
-    if len(kept) < len(clean):
+    dropped = [c for c in clean if not any(c is k for k in kept)]
+    for comp in dropped:
+        _nearest(kept, comp)["weight"] += comp["weight"]
+    if dropped:
         notes.append(
-            f"dropped {len(clean) - len(kept)} negligible component(s) "
-            f"(<{COMPONENT_WEIGHT_FLOOR:.0%} weight)"
+            f"folded {len(dropped)} negligible component(s) "
+            f"(<{COMPONENT_WEIGHT_FLOOR:.1%} weight) into their nearest neighbour"
         )
+    # Over the sanity limit: fold the lightest component into its nearest
+    # neighbour, one at a time -- never delete probability outright.
+    folded = 0
+    while len(kept) > MAX_COMPONENTS:
+        lightest = min(kept, key=lambda c: c["weight"])
+        kept = [c for c in kept if c is not lightest]
+        _nearest(kept, lightest)["weight"] += lightest["weight"]
+        folded += 1
+    if folded:
+        notes.append(f"folded {folded} component(s) to stay within {MAX_COMPONENTS}")
     _renormalize(kept)
-    if len(kept) > MAX_COMPONENTS:
-        kept = sorted(kept, key=lambda c: c["weight"], reverse=True)[:MAX_COMPONENTS]
-        notes.append(f"capped to the top {MAX_COMPONENTS} components")
-        _renormalize(kept)
 
     # Anti-spike width floor.
     for comp in kept:
@@ -2731,7 +2762,7 @@ def _assert_spec_matches_components(
 
 _NUMERIC_REPAIR_INSTRUCTION = (
     "End your reply with ONLY the final JSON object described above: a top-level "
-    '"components" list of 1–3 items, each with "family", "params" (matching that '
+    '"components" list with one item per distinct scenario, each with "family", "params" (matching that '
     'family exactly), and "weight", plus an optional top-level "support" '
     '({"min": <number or null>, "max": <number or null>}) for hard physical limits. '
     'For a discrete/count question, use the "pmf" form instead. Do not output percentile lists.'
