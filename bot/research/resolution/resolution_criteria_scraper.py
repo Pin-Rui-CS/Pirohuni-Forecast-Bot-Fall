@@ -747,14 +747,16 @@ async def scrape_resolution_sources(
         # the cap to the general research path.
         release_resolution_reserve()
 
-    # Deep series retrieval, primary resolution URL only. Free (plain HTTP,
-    # no LLM, no Firecrawl), so it is not budgeted -- but it IS restricted to
-    # one URL and to questions whose answer is a number, because that is the
-    # only case where a historical trend is the thing being asked for.
+    # Deep series retrieval. Free (plain HTTP, no LLM, no Firecrawl), so it is
+    # not budgeted -- but it IS restricted to questions whose answer is a
+    # number, because that is the only case where a historical trend is the
+    # thing being asked for. The known-API check reads every candidate URL;
+    # discovery reads the primary (first) one.
     series_section = ""
     if criteria_urls or urls:
         series_section = await _build_measured_series_section(
             (criteria_urls or urls)[0],
+            known_series_urls=criteria_urls or urls,
             question_text=question_text,
             resolution_criteria=resolution_criteria,
             question_type=question_type,
@@ -997,8 +999,14 @@ async def _build_measured_series_section(
     question_type: str,
     timeout: int,
     target_date: str = "",
+    known_series_urls: list[str] | None = None,
 ) -> str:
     """Retrieve and reduce the historical series behind the resolution source.
+
+    ``known_series_urls`` are the URLs checked against the known-API table, in
+    order (default: ``primary_url`` alone). The check only compares host names,
+    so a Treasury or FRED link that is not the first resolution URL is still
+    found. Series discovery reads ``primary_url`` only.
 
     Returns "" whenever this does not apply or nothing was found, so the caller
     is unaffected. The reduced block is ~2-3 KB by construction and therefore
@@ -1020,13 +1028,17 @@ async def _build_measured_series_section(
     # A documented API first (apiagent-kit): exact and complete where it
     # applies. The scraping ladder is the fallback for everything else.
     artifact = None
-    try:
-        from bot.research.resolution.known_series import fetch_known_series
+    for known_url in dict.fromkeys(known_series_urls or [primary_url]):
+        try:
+            from bot.research.resolution.known_series import fetch_known_series
 
-        artifact = await fetch_known_series(
-            primary_url, metric_hint=f"{question_text}\n{resolution_criteria}")
-    except Exception as exc:  # noqa: BLE001 - optional enrichment
-        logger.warning("Known-API series lookup failed for %s: %s", primary_url, exc)
+            # Returns None at once, with no request, for a host not in the table.
+            artifact = await fetch_known_series(
+                known_url, metric_hint=f"{question_text}\n{resolution_criteria}")
+        except Exception as exc:  # noqa: BLE001 - optional enrichment
+            logger.warning("Known-API series lookup failed for %s: %s", known_url, exc)
+        if artifact is not None:
+            break
 
     if artifact is None:
         try:
