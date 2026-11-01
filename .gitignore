@@ -56,11 +56,12 @@ prompt_preview.py
 # Not part of the bot: tests, evaluation tools and working documentation stay local.
 tests/
 # eval_tools/ is local except the scripts the workflows run (publish_runs.py in
-# every forecast workflow, score_outcomes.py in score-outcomes.yaml) and the two
-# modules they import.
+# every forecast workflow, score_outcomes.py in score-outcomes.yaml,
+# model_scores.py in model-scores.yaml) and the modules they import.
 eval_tools/*
 !eval_tools/publish_runs.py
 !eval_tools/score_outcomes.py
+!eval_tools/model_scores.py
 !eval_tools/score_forecasts.py
 !eval_tools/supabase_rest.py
 !eval_tools/diagnose_run.py
