@@ -361,11 +361,15 @@ def _split_ranking_response(response: str) -> tuple[str, str]:
     return text, ""
 
 
-def _hit_lines(hit: SearchHit, *, prefix: str, indent: str, snippet: str) -> list[str]:
+def _hit_lines(hit: SearchHit, *, prefix: str, indent: str, snippet: str,
+               show_score: bool = False) -> list[str]:
     lines = [prefix, f"{indent}URL: {hit.url}"]
     lines.extend(f"{indent}{key}: {value}" for key, value in hit.extras)
-    if hit.score is not None:
-        lines.append(f"{indent}Score: {hit.score}")
+    # The engine's match score helps the ranker only. In the research section a
+    # bare "Score: 0.9301101" beside a Metaculus page became "current odds
+    # 93.01%" in the brief (Q46519, 2026-10-31).
+    if show_score and hit.score is not None:
+        lines.append(f"{indent}Search relevance (engine match score, not a probability): {hit.score}")
     lines.extend([
         f"{indent}Date: {display_source_date(hit.url, hit.date)}",
         f"{indent}Query: {hit.query}",
@@ -425,7 +429,7 @@ def _build_ranking_prompt(
 ) -> str:
     result_lines = [
         "\n".join(_hit_lines(item, prefix=f"{index}. Title: {item.title}", indent="   ",
-                             snippet=item.snippet or "Not provided."))
+                             snippet=item.snippet or "Not provided.", show_score=True))
         for index, item in enumerate(results, start=1)
     ]
     today = datetime.datetime.now().strftime("%Y-%m-%d")

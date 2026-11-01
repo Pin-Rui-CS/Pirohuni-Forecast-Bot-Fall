@@ -208,7 +208,9 @@ def consume(state: StreamState, raw: str, expected_model: str) -> None:
     if item.get("model"):
         state.model = item["model"]
         if not reply_matches(expected_model, item["model"]):
-            raise ModelRejected("Unexpected response model")
+            # The name goes in the attempt log: on 2026-10-31 nine x-test-2
+            # replies were refused and the log could not say what answered.
+            raise ModelRejected(f"Unexpected response model: {item['model']!r}")
     if item.get("usage"):
         state.usage = item["usage"]
     for choice in item.get("choices", []):

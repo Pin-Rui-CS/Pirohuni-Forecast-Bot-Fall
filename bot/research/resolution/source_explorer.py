@@ -15,7 +15,11 @@ The model gets one generic tool and replies with one JSON action per turn:
 
   fetch  up to MAX_URLS_PER_FETCH pages on the resolution source's host(s):
          visible-text excerpt + every table embedded in each page's source
-         (embedded_tables), optionally only tables having given columns
+         (embedded_tables), optionally only tables having given columns.
+         Documents (PDF, Word, Excel, PowerPoint) are read through the
+         Fetcher (bot.scrapers.fetch) and come back as text.
+  text   the full visible text of one page or document, TEXT_CHARS at a time,
+         for a value written in the text rather than held in a table
   rows   every row of one table
   final  the evidence report
 
@@ -59,6 +63,17 @@ MAX_RESULT_CHARS = 60_000
 MAX_CONVERSATION_CHARS = 300_000
 TRIMMED_RESULT_CHARS = 3_000
 MAX_START_URLS = 25
+# One "text" action returns at most this much of a page's or document's visible
+# text; a longer one is read in further calls with "from".
+TEXT_CHARS = 30_000
+# Documents the plain download cannot read as text. They go through the
+# Fetcher instead, whose first rung (the PDF adapter) is free.
+DOCUMENT_SUFFIXES = (".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx")
+_TEXT_TYPES = ("text/", "application/json", "application/xml", "application/xhtml",
+               "application/javascript", "application/ld+json")
+# Data files read as tables (embedded_tables), whatever content type the
+# server sends: CSVs often come as application/octet-stream or vnd.ms-excel.
+DATA_SUFFIXES = (".csv", ".tsv", ".txt", ".json")
 # Same-site links listed per fetched page, so the model follows real addresses
 # instead of guessing them (2026-10-24: 5 of 8 turns went on guessed 404s).
 MAX_LINKS_PER_PAGE = 40
@@ -136,38 +151,49 @@ The bot's research so far could not retrieve: {missing}
 {('What it did find: ' + found) if found else ''}
 
 The bot already saw these pages on the site (scraped as markdown text, or returned by a search).
-Many sites keep the data behind their maps and charts inside the page source, where a text
-scraper never sees it. You have a tool that reads it:
+The value may be written in a page's text, in a document the site links to (a PDF report, a
+spreadsheet), or kept in the data behind the site's maps and charts inside the page source, where
+a text scraper never sees it. Your tools read all three:
 {chr(10).join('- ' + u for u in start_urls)}
 
 Reply with exactly ONE JSON object per turn, nothing else:
 
   {{"action": "fetch", "urls": ["...", ...], "columns": ["optional", "column", "names"]}}
-      Fetches up to {MAX_URLS_PER_FETCH} pages (hosts: {', '.join(sorted(hosts))}; {MAX_PAGES} pages in
-      total). For each page you get a short visible-text excerpt and a summary of every data table
-      embedded in its source: rows, columns, value counts, first and last rows. Rows dated after
-      today are marked FUTURE (the source's own forecast or schedule). Tables are named
-      P<page>.T<n>. Each page also lists the same-site links it contains that you have not been
-      shown yet. With "columns", only tables having ALL those columns are shown -- use it
-      when fetching many similar pages.
-  {{"action": "rows", "table": "P1.T2"}}
-      Every row of one table.
+      Fetches up to {MAX_URLS_PER_FETCH} pages or documents (hosts: {', '.join(sorted(hosts))};
+      {MAX_PAGES} in total). For each page you get a short visible-text excerpt, its full text
+      length, and a summary of every data table embedded in its source: rows, columns, value
+      counts, first and last rows. Rows dated after today are marked FUTURE (the source's own
+      forecast or schedule). Tables are named P<page>.T<n>. Each page also lists the same-site
+      links it contains that you have not been shown yet. With "columns", only tables having ALL
+      those columns are shown -- use it when fetching many similar pages. A document (PDF,
+      Word, Excel, PowerPoint) comes back as an excerpt of its text; a data file (CSV, TSV,
+      JSON) as a table.
+  {{"action": "text", "url": "...", "from": 0}}
+      The full visible text of one page or document, {TEXT_CHARS:,} characters at a time ("from" is
+      the character to start at; the reply says where the next part starts). Fetches the page
+      first if you have not yet. Use it when the excerpt suggests the value is written in the
+      text rather than held in a table.
+  {{"action": "rows", "table": "P1.T2", "contains": "optional word"}}
+      Every row of one table (of a very long one, its most recent rows). With "contains", only
+      the rows holding that word (any case) and how many there are -- use it to check whether
+      an item is listed; zero matching rows in a complete list is itself a finding.
   {{"action": "final", "report": "..."}}
       Ends the research with your report (markdown).
 
-You have at most {MAX_TURNS} turns. Work out which field of which table the resolution value is
-read from, find its most recent value, and anything the source says about where it is heading by
-the resolution date (history, its own forecasts). Fetch addresses from the start list, the links
+You have at most {MAX_TURNS} turns. Work out where the resolution value is read from (a table's
+field, or a sentence or figure in a page or document), find its most recent value, and anything
+the source says about where it is heading by the resolution date (history, its own forecasts). Fetch addresses from the start list, the links
 pages list, or a pattern those addresses follow (e.g. one region page's address with another
 region's id); do not guess site maps or page names. When you fill in a pattern, take each part
 from an address you have seen or from a table field that holds the same value (an id or key
 column whose values match the ones in seen addresses) -- never from a row's position in a table.
 If an address you built fails, fetch a page that links to it and use the link as listed.
 
-The report records what the source CONTAINS -- quote values exactly as the tables give them, with
-their dates and the table and URL they come from. Do NOT estimate probabilities or give a forecast;
+The report records what the source CONTAINS -- quote values exactly as the tables or text give
+them, with their dates and the table or page and URL they come from. Do NOT estimate probabilities or give a forecast;
 the forecasters do that. Include:
-1. Where the resolution value is read from (page, table, field) and how you verified it.
+1. Where the resolution value is read from (page, table and field, or the passage) and how you
+   verified it.
 2. Its most recent value and date. If it is a count over items, give the breakdown behind it.
 3. Recent dated values and how much the quantity moves from period to period.
 4. Every forecast or schedule the source itself publishes up to the resolution date, with numbers,
@@ -183,6 +209,19 @@ class _Pages:
         self.tables: dict[str, Table] = {}
         self.fetched: list[str] = []
         self.links_shown: set[str] = set()
+        # Full visible text of every page and document read, for the "text" action.
+        self.texts: dict[str, str] = {}
+        # Table digest -> id of the first table with those rows.
+        self.first_seen: dict[str, str] = {}
+
+    async def _document_text(self, url: str) -> tuple[str, str]:
+        """(text, error) for a document, read through the Fetcher."""
+        from bot.scrapers.fetch import fetch_page, search_policy
+
+        page = await fetch_page(url, search_policy())
+        if page.ok and page.content.strip():
+            return page.content, ""
+        return "", page.error or "the document returned no text"
 
     async def fetch(self, client: httpx.AsyncClient, urls: list[str], columns: list[str],
                     today: date) -> str:
@@ -196,14 +235,30 @@ class _Pages:
                 continue
             self.fetched.append(url)
             prefix = f"P{len(self.fetched)}"
-            # The embedded-data reader's fetch: raw HTML, redirect stubs
-            # followed, and a size cap (a 165 MB export once sat behind a link).
-            try:
-                fetched = await series_discovery._fetch(client, url)
-            except httpx.HTTPError as exc:
-                fetched, error = None, f"{type(exc).__name__}: {exc}"
-            else:
-                error = "HTTP error, or the page is over the size cap"
+            fetched, error, document = None, "", urlsplit(url).path.lower().endswith(DOCUMENT_SUFFIXES)
+            if not document:
+                # The embedded-data reader's fetch: raw HTML, redirect stubs
+                # followed, and a size cap (a 165 MB export once sat behind a link).
+                try:
+                    fetched = await series_discovery._fetch(client, url)
+                except httpx.HTTPError as exc:
+                    fetched, error = None, f"{type(exc).__name__}: {exc}"
+                else:
+                    error = "HTTP error, or the page is over the size cap"
+                # A document behind an address with no file extension.
+                document = (fetched is not None and bool(fetched[1]) and not fetched[1].startswith(_TEXT_TYPES)
+                            and not urlsplit(url).path.lower().endswith(DATA_SUFFIXES))
+            if document:
+                text, error = await self._document_text(url)
+                source_ledger.record_url_event(url, source_ledger.ROLE_SCRAPED, engine="source-explorer",
+                                               ok=bool(text), chars=len(text), error=error)
+                if not text:
+                    out.append(f"## {prefix} {url}\ndocument could not be read: {error}")
+                    continue
+                self.texts[url] = text
+                out.append(f"## {prefix} {url} (document, {len(text):,} chars of text; "
+                           f"\"text\" action for all of it)\ntext: {text[:700]}")
+                continue
             if fetched is None:
                 source_ledger.record_url_event(url, source_ledger.ROLE_SCRAPED, engine="source-explorer",
                                                ok=False, error=error)
@@ -212,14 +267,20 @@ class _Pages:
             page = fetched[0]
             source_ledger.record_url_event(url, source_ledger.ROLE_SCRAPED, engine="source-explorer",
                                            ok=True, chars=len(page))
+            self.texts[url] = visible_text(page, len(page))
             tables = extract_tables(url, page, id_prefix=f"{prefix}.T")
             self.tables.update((t.id, t) for t in tables)
             shown = [t for t in tables if all(c in t.columns for c in columns)] if columns else tables
             lines = [f"## {prefix} {url} ({len(page):,} bytes, "
-                     f"{len(tables)} embedded tables"
+                     f"{len(self.texts[url]):,} chars of visible text, {len(tables)} embedded tables"
                      + (f", {len(shown)} with columns {columns}" if columns else "") + ")",
-                     "visible text: " + visible_text(page, 300 if columns else 700)]
-            lines += [t.summary(today) for t in shown]
+                     "visible text: " + self.texts[url][:300 if columns else 700]]
+            # A site-wide table is summarised once: on 2026-10-30 (Q46516) the
+            # same cookie-settings table filled every one of 30 pages.
+            for t in shown:
+                first = self.first_seen.setdefault(t.digest, t.id)
+                lines.append(t.summary(today) if first == t.id
+                             else f"[{t.id}] {len(t.rows)} rows; same table as {first}")
             # A filter must never hide a table silently: on 2026-10-24 (Q46422)
             # "columns": ["cdi"] hid the regional weekly table (date, level,
             # counts) that held the source's forecast, and the model concluded
@@ -244,11 +305,29 @@ class _Pages:
                       + f"\n\n[cut at {MAX_RESULT_CHARS:,} chars -- fetch fewer pages or pass \"columns\"]")
         return result
 
-    def rows(self, table_id: str) -> str:
+    async def text(self, client: httpx.AsyncClient, url: str, start: int, today: date) -> str:
+        """The visible text of one page or document, TEXT_CHARS at a time."""
+        prelude = ""
+        if url not in self.texts:
+            prelude = await self.fetch(client, [url], [], today)
+            if url not in self.texts:
+                return prelude
+        body = self.texts[url]
+        start = min(max(0, start), len(body))
+        end = min(start + TEXT_CHARS, len(body))
+        tail = (f"\n[continues: {len(body) - end:,} more chars; ask again with \"from\": {end}]"
+                if end < len(body) else "\n[end of text]")
+        result = (f"{prelude}\n\n" if prelude else "") + (
+            f"## {url} -- text, chars {start:,}-{end:,} of {len(body):,}\n{body[start:end]}{tail}")
+        return result[:MAX_RESULT_CHARS]
+
+    def rows(self, table_id: str, contains: str = "") -> str:
         table = self.tables.get(table_id)
         if table is None:
             return f"no table {table_id!r}; tables so far: {', '.join(list(self.tables)[:40])}"
-        return table.all_rows()[:MAX_RESULT_CHARS]
+        if contains.strip():
+            return table.matching_rows(contains, MAX_RESULT_CHARS)
+        return table.all_rows(MAX_RESULT_CHARS)
 
 
 def _parse_action(text: str) -> dict:
@@ -321,13 +400,19 @@ async def explore(*, title: str, resolution_criteria: str, fine_print: str = "",
                     if kind == "fetch":
                         result = await pages.fetch(client, list(action.get("urls") or []),
                                                    [str(c) for c in action.get("columns") or []], today)
+                    elif kind == "text":
+                        try:
+                            start = int(action.get("from") or 0)
+                        except (TypeError, ValueError):
+                            start = 0
+                        result = await pages.text(client, str(action.get("url") or ""), start, today)
                     elif kind == "rows":
-                        result = pages.rows(str(action.get("table")))
+                        result = pages.rows(str(action.get("table")), str(action.get("contains") or ""))
                     elif kind == "final":
                         report = str(action.get("report") or "").strip()
                         result = ""
                     else:
-                        result = f"Unknown action {kind!r}; use fetch, rows or final."
+                        result = f"Unknown action {kind!r}; use fetch, text, rows or final."
                 if not report and turn == MAX_TURNS - 1:
                     result += "\n\nOne turn left: your next reply must be the final action."
                 research_trace.emit(
@@ -350,8 +435,8 @@ async def explore(*, title: str, resolution_criteria: str, fine_print: str = "",
         return ""
     page_lines = "\n".join(f"- {u}" for u in dict.fromkeys(pages.fetched))
     return (
-        f"_A SoCLaaS model browsed the resolution source's own pages and read the data embedded "
-        f"in their source ({len(pages.fetched)} pages). Values below are quoted from those tables; "
-        f"anything labelled as the source's forecast is the source's own projection, not a "
-        f"measurement._\n\n{report}\n\n### Pages read\n{page_lines}"
+        f"_A SoCLaaS model browsed the resolution source's own pages and documents and read their "
+        f"text and the data embedded in their source ({len(pages.fetched)} pages). Values below "
+        f"are quoted from those pages and tables; anything labelled as the source's forecast is "
+        f"the source's own projection, not a measurement._\n\n{report}\n\n### Pages read\n{page_lines}"
     )

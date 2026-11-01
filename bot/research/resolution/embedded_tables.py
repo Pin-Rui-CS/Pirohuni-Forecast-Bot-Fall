@@ -18,14 +18,27 @@ resolution week.
   4. describe each compactly: rows, columns, value counts of low-cardinality
      columns, first and last rows, with rows dated after the fetch marked as
      future (a forecast or a schedule, never a measurement).
+
+Ordinary HTML <table> elements are read too. Question 46519 (2026-10-31): WHO's
+list of medicines under prequalification assessment is one, and the explorer
+reported "0 embedded tables" for it, so no forecaster learned that moxidectin
+was not under assessment.
+
+A data file (CSV, TSV, JSON) is itself the table. Question 46516 (2026-10-30):
+the explorer fetched C3S's November series CSV, 1940-2025, holding the record
+to beat, and got "0 embedded tables" plus a 700-char excerpt of the file's
+header comments.
 """
 from __future__ import annotations
 
 from collections import Counter
+import csv
 from dataclasses import dataclass, field
 from datetime import date
 import hashlib
 import html as html_module
+from html.parser import HTMLParser
+import io
 import json
 import re
 
@@ -34,7 +47,11 @@ JSON_SCRIPT = re.compile(
     r'<script[^>]*type="application/(?:ld\+)?json"[^>]*>(.*?)</script>'
     r'|<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.S)
 TAG = re.compile(r"<[^>]+>")
-ISO_DATE = re.compile(r"^(?:\$D)?(\d{4}-\d{2}-\d{2})")
+# A day or a month ("1940-11" in monthly series), optionally Next.js-marked.
+ISO_DATE = re.compile(r"^(?:\$D)?(\d{4})-(\d{2})(?:-(\d{2}))?(?!\d)")
+MARKUP = re.compile(r"<(?:!doctype|html|head|body|div|script|p|table)\b", re.I)
+DELIMITERS = ("\t", ",", ";", "|")
+MAX_NOTES_CHARS = 600
 WORD = re.compile(r"[a-z]{4,}")
 # Rendering plumbing, not data: map-style layers and bare shape lists. Kept,
 # but ranked below tables of values. A table that merely HAS a shape column
@@ -77,8 +94,41 @@ class Table:
             lines.append(("  FUTURE " if when and when > today else "  ") + compact(row))
         return "\n".join(lines)
 
-    def all_rows(self) -> str:
-        return f"[{self.id}] from {self.url}\n" + "\n".join(compact(r) for r in self.rows)
+    def matching_rows(self, word: str, max_chars: int | None = None) -> str:
+        """The rows holding ``word`` (any case), with the count: "is X listed?"."""
+        needle = word.strip().lower()
+        hits = [compact(r) for r in self.rows
+                if needle in json.dumps(r, ensure_ascii=False, default=str).lower()]
+        head = f"[{self.id}] from {self.url}\n{len(hits)} of {len(self.rows)} rows contain {word.strip()!r}"
+        text = head + ("\n" + "\n".join(hits) if hits else "")
+        return text if max_chars is None else text[:max_chars]
+
+    @property
+    def digest(self) -> str:
+        return hashlib.sha1(json.dumps(self.rows, sort_keys=True, default=str).encode()).hexdigest()
+
+    def all_rows(self, max_chars: int | None = None) -> str:
+        """Every row. Past max_chars the newest end of a dated series is kept:
+        a cut from the top showed a daily file's 1940s and lost 2026."""
+        head = f"[{self.id}] from {self.url}"
+        lines = [compact(r) for r in self.rows]
+        text = head + "\n" + "\n".join(lines)
+        if max_chars is None or len(text) <= max_chars:
+            return text
+        first, last = (_row_date(self.rows[0]), _row_date(self.rows[-1])) if self.rows else (None, None)
+        newest_first = bool(first and last and first > last)
+        ordered = lines if newest_first else lines[::-1]
+        kept, used = [], len(head) + 100
+        for line in ordered:
+            if used + len(line) + 1 > max_chars:
+                break
+            kept.append(line)
+            used += len(line) + 1
+        if not newest_first:
+            kept.reverse()
+        where = "last" if newest_first else "first"
+        return (f"{head}\n[{where} {len(lines) - len(kept):,} of {len(lines):,} rows omitted for length]\n"
+                + "\n".join(kept))
 
 
 def compact(value) -> str:
@@ -102,8 +152,9 @@ def _row_date(row: dict) -> date | None:
         if isinstance(value, str):
             match = ISO_DATE.match(value)
             if match:
+                year, month, day = match.groups()
                 try:
-                    return date.fromisoformat(match.group(1))
+                    return date(int(year), int(month), int(day or 1))
                 except ValueError:
                     return None
     return None
@@ -177,23 +228,160 @@ def _value_counts(rows: list[dict], columns: list[str]) -> dict[str, dict]:
     return out
 
 
+def _delimited_table(text: str) -> tuple[list[dict], str] | None:
+    """(rows, notes) of a CSV/TSV body, or None if it is not one. Leading
+    "#" lines are notes (units, column meanings); the first other line must be
+    a header of distinct names, and nearly every line must have its width."""
+    lines, notes = text[:MAX_SCAN_CHARS].splitlines(), []
+    while lines and (not lines[0].strip() or lines[0].lstrip().startswith("#")):
+        notes.append(lines.pop(0).strip().lstrip("#").strip())
+    if len(lines) <= MIN_ROWS:
+        return None
+    delimiter = max(DELIMITERS, key=lines[0].count)
+    if not lines[0].count(delimiter):
+        return None
+    # Parsed as one text so a quoted cell may span lines.
+    parsed = [cells for cells in csv.reader(io.StringIO("\n".join(lines)), delimiter=delimiter)
+              if any(c.strip() for c in cells)]
+    header = [h.strip() for h in parsed[0]]
+    if len(header) < 2 or not all(header) or len(set(header)) < len(header):
+        return None
+    if sum(bool(_NUMERIC.match(h)) for h in header) > len(header) // 2:
+        return None  # the first line is data, not column names
+    body = [cells for cells in parsed[1:] if len(cells) == len(header)]
+    # A footnote or two is tolerated; more ragged lines mean this is prose.
+    if len(body) < MIN_ROWS or len(body) < 0.95 * (len(parsed) - 1):
+        return None
+    rows = [{h: c.strip() for h, c in zip(header, cells)} for cells in body]
+    # Column meanings and units first: they survive the cut, a long
+    # description of the file need not.
+    defining = [n for n in notes if n.split(":")[0].strip() in header or n.lower().startswith("units")]
+    notes = defining + [n for n in notes if n and n not in defining]
+    return rows, " / ".join(notes)[:MAX_NOTES_CHARS]
+
+
+class _HtmlTables(HTMLParser):
+    """Cell text of every <table>, row by row, each cell flagged if it is a
+    <th>. A nested table is read as a table of its own. Omitted </td>/</tr>
+    (legal HTML) close at the next cell or row."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.tables: list[tuple[list[list[tuple[str, bool]]], str]] = []
+        self._open: list[dict] = []
+        self._skip = 0  # inside <script>/<style>
+
+    def _close_cell(self, t: dict) -> None:
+        if t["cell"] is not None and t["row"] is not None:
+            t["row"].append((" ".join("".join(t["cell"]).split()), t["th"]))
+        t["cell"] = None
+
+    def _close_row(self, t: dict) -> None:
+        self._close_cell(t)
+        if t["row"]:
+            t["rows"].append(t["row"])
+        t["row"] = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style"):
+            self._skip += 1
+        elif tag == "table":
+            self._open.append({"rows": [], "row": None, "cell": None, "th": False, "caption": None})
+        elif self._open:
+            t = self._open[-1]
+            if tag == "tr":
+                self._close_row(t)
+                t["row"] = []
+            elif tag in ("td", "th"):
+                self._close_cell(t)
+                if t["row"] is None:
+                    t["row"] = []
+                t["cell"], t["th"] = [], tag == "th"
+            elif tag == "caption":
+                t["caption"] = []
+            elif tag == "br" and t["cell"] is not None:
+                t["cell"].append(" ")
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style"):
+            self._skip = max(0, self._skip - 1)
+        elif self._open:
+            t = self._open[-1]
+            if tag in ("td", "th"):
+                self._close_cell(t)
+            elif tag == "tr":
+                self._close_row(t)
+            elif tag == "table":
+                self._close_row(t)
+                self._open.pop()
+                caption = " ".join("".join(t["caption"] or []).split())
+                self.tables.append((t["rows"], caption))
+
+    def handle_data(self, data):
+        if self._skip or not self._open:
+            return
+        t = self._open[-1]
+        if t["cell"] is not None:
+            t["cell"].append(data)
+        elif t["caption"] is not None and t["row"] is None:
+            t["caption"].append(data)
+
+
+def _html_tables(page_html: str) -> list[tuple[list[dict], str]]:
+    """(rows, caption) of each <table> with a header and >= MIN_ROWS rows of
+    its width. The header is the first all-<th> row among the first three, else
+    the first row; rows of another width (section headings) are left out."""
+    parser = _HtmlTables()
+    try:
+        parser.feed(page_html[:MAX_SCAN_CHARS])
+        parser.close()
+    except Exception:  # malformed markup: keep whatever was read
+        pass
+    out = []
+    for rows, caption in parser.tables:
+        rows = [r for r in rows if any(text for text, _ in r)]
+        if len(rows) <= MIN_ROWS:
+            continue
+        at = next((i for i, r in enumerate(rows[:3]) if all(th for _, th in r)), 0)
+        names, seen = [], Counter()
+        for i, (text, _) in enumerate(rows[at]):
+            name = text or f"column {i + 1}"
+            seen[name] += 1
+            names.append(name if seen[name] == 1 else f"{name} ({seen[name]})")
+        if len(names) < 2:
+            continue
+        body = [r for r in rows[at + 1:] if len(r) == len(names)]
+        if len(body) >= MIN_ROWS:
+            out.append(([{n: text for n, (text, _) in zip(names, r)} for r in body], caption))
+    return out
+
+
 def extract_tables(url: str, page_html: str, id_prefix: str = "T") -> list[Table]:
-    """Every table embedded in one page, in page order, de-duplicated."""
+    """Every table in one page, in page order, de-duplicated: the page's HTML
+    tables, then the JSON arrays in its scripts; or a data file (CSV, TSV,
+    JSON) itself."""
     tables, seen, candidates = [], set(), []
-    for text in _payloads(page_html):
+    markup = bool(MARKUP.search(page_html[:5000]))
+    if markup:
+        candidates.extend(_html_tables(page_html))
+    else:
+        delimited = _delimited_table(page_html)
+        if delimited:
+            candidates.append(delimited)
+    for text in _payloads(page_html) if markup else [page_html]:
         for rows, prefix in _arrays_of_objects(text):
-            candidates.append((rows, prefix))
-            candidates.extend((inner, prefix) for inner in _nested_arrays(rows))
-    for rows, prefix in candidates:
+            candidates.append((rows, _context(prefix)))
+            candidates.extend((inner, _context(prefix)) for inner in _nested_arrays(rows))
+    for rows, context in candidates:
         columns = _columns(rows)
         if not columns:
             continue
-        digest = hashlib.sha1(json.dumps(rows, sort_keys=True, default=str).encode()).hexdigest()
-        if digest in seen:
+        table = Table(f"{id_prefix}{len(tables) + 1}", url, rows, columns, context)
+        if table.digest in seen:
             continue
-        seen.add(digest)
-        tables.append(Table(f"{id_prefix}{len(tables) + 1}", url, rows, columns,
-                            _context(prefix), _value_counts(rows, columns)))
+        seen.add(table.digest)
+        table.value_counts = _value_counts(rows, columns)
+        tables.append(table)
     return tables
 
 
@@ -312,8 +500,12 @@ def render_section(pages: list[tuple[str, list[Table]]], question_text: str,
     ranked = sorted(((relevance(t, words, today) + 2 * (p == 0), p, i, t)
                      for p, (_, ts) in enumerate(pages) for i, t in enumerate(ts)),
                     key=lambda x: (-x[0], x[1], x[2]))
-    out, used = [], 0
+    out, used, shown = [], 0, set()
     for *_, table in ranked:
+        # A site-wide table (cookie settings, a menu) repeats on every page.
+        if table.digest in shown:
+            continue
+        shown.add(table.digest)
         block = f"From {table.url}\n{table.summary(today)}"
         if used + len(block) > max_chars:
             continue

@@ -121,7 +121,7 @@ Return only valid JSON in this shape:
   }},
   "resolution_mechanics": {{
     "source_update_behavior": "Does the resolution source update or publish again before the resolution deadline? State the known or likely cadence, the next expected update, and what evidence would pin it down",
-    "update_content_limits": "What new information CAN appear in the source before the deadline, and what CANNOT arrive in time (reporting calendars, disclosure deadlines, data-pipeline or publication lags)",
+    "update_content_limits": "What new information CAN appear in the source before the deadline, and what CANNOT arrive in time (reporting calendars, disclosure deadlines, data-pipeline or publication lags); and whether the same measurement can already be read earlier elsewhere (a daily or preliminary series, or a tracker from the same publisher or its data provider): name it and the period it covers by now",
     "mechanics_queries": ["search query targeting the source's update schedule or the underlying reporting calendar"]
   }},
   "direct_evidence": ["Evidence that directly resolves or measures the question"],
@@ -136,7 +136,7 @@ Rules:
 - Prefer official, source-of-truth artifacts over broad news.
 - For count questions, the required artifact is usually a historical count table.
 - For direct prediction markets, distinguish exact-human/outcome markets from adjacent proxy markets.
-- When the question resolves off a curated page, tracker, leaderboard, or scheduled data release ("as shown/displayed on X as of date D"), the source's update mechanics — whether it refreshes before the deadline and what a refresh can legally or physically contain — are often MORE decision-relevant than the underlying race. Fill resolution_mechanics with concrete cadences, calendars, and lags to verify (e.g. filing deadlines, release schedules, disclosure windows), and add mechanics_queries that target them specifically.
+- When the question resolves off a curated page, tracker, leaderboard, or scheduled data release ("as shown/displayed on X as of date D"), the source's update mechanics — whether it refreshes before the deadline and what a refresh can legally or physically contain — are often MORE decision-relevant than the underlying race. Fill resolution_mechanics with concrete cadences, calendars, and lags to verify (e.g. filing deadlines, release schedules, disclosure windows), and add mechanics_queries that target them specifically. If the official figure only comes out after the period ends, look for those earlier readings; never write "no data before the release" without checking. List a partial reading of the resolution period itself under direct_evidence, a reading of the preceding period under near_proxy_evidence, and add a query for their latest values to mechanics_queries.
 - When the question resolves by direct observation of an event rather than a published source, set both resolution_mechanics text fields to "Not applicable — resolves by direct observation of the event" and leave mechanics_queries empty.
 - Do not forecast or estimate probabilities.
 """.strip()

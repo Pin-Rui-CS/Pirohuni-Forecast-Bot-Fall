@@ -733,86 +733,13 @@ async def scrape_resolution_sources(
         )
         urls = urls[:max_urls]
     logger.info("Found %d resolution URL(s): %s", len(urls), urls)
-    try:
-        results = await _scrape_resolution_urls(
-            list(urls),
-            question_text=question_text,
-            resolution_criteria=resolution_criteria,
-            max_concurrent=max_concurrent,
-            timeout=timeout,
-        )
-    finally:
-        # Resolution scraping holds first claim on the per-question Firecrawl
-        # credit budget; once its URLs are done (or failed), hand the rest of
-        # the cap to the general research path.
-        release_resolution_reserve()
-
-    # Deep series retrieval. Free (plain HTTP, no LLM, no Firecrawl), so it is
-    # not budgeted -- but it IS restricted to questions whose answer is a
-    # number, because that is the only case where a historical trend is the
-    # thing being asked for. The known-API check reads every candidate URL;
-    # discovery reads the primary (first) one.
-    series_section = ""
-    if criteria_urls or urls:
-        series_section = await _build_measured_series_section(
-            (criteria_urls or urls)[0],
-            known_series_urls=criteria_urls or urls,
-            question_text=question_text,
-            resolution_criteria=resolution_criteria,
-            question_type=question_type,
-            timeout=timeout,
-            target_date=target_date,
-        )
-    # No measured series: the source may still carry its numbers in the page
-    # source (a map's per-region classes, a chart's weekly values and forecast).
-    # Free like the series ladder, and for every question type: a snapshot can
-    # decide a binary question as easily as a count.
-    if not series_section:
-        series_section = await _build_embedded_data_section(
-            (criteria_urls or urls)[:_EMBEDDED_MAX_PAGES], question_text=question_text,
-            timeout=timeout, raw_pages={r.url: r.raw_html for r in results if r.raw_html},
-        )
-
-    criteria_url_set = set(criteria_urls)
-    sections: list[str] = []
-    cleaned_sources: list[tuple[str, str]] = []
-    for result in results:
-        if not result.success:
-            logger.warning("Failed to scrape %s: %s", result.url, result.error)
-            sections.append(f"## Source: {result.url}\n_Scrape failed: {result.error}_")
-            continue
-
-        # Criteria URLs get the full 44382-safe budget; background-only URLs
-        # get the reduced tier (they are usually context, and every char here
-        # is paid for again in the batched summary calls).
-        if use_llm_cleaning:
-            heuristic_max = (
-                _LLM_MAX_INPUT
-                if result.url in criteria_url_set
-                else _BACKGROUND_CONTENT_CHARS
-            )
-        else:
-            heuristic_max = _MAX_CONTENT_CHARS
-        cleaned = _clean_content(result.content, max_chars=heuristic_max, keep_urls=False)
-        if not cleaned.strip():
-            sections.append(f"## Source: {result.url}\n_No usable content extracted._")
-            continue
-
-        cleaned_sources.append((result.url, cleaned))
-        sections.append(
-            f"## Source: {result.url}\n"
-            f"_Scraped via {result.provider_used}_\n\n"
-            f"{cleaned}"
-        )
-
-    if not sections and not series_section:
-        return ""
 
     # Historical captures of the primary resolution URL (the page the value
     # resolves off). Gives the forecaster a same-source flow rate and update
     # cadence; soft-fails to "" when the page has no usable archive history.
-    # Runs beside the summary below rather than before it: reading up to 60
-    # archive captures takes minutes, and the summary's VALUE ON PAGE line is
+    # It needs only the URL, so it starts now, beside the page fetches, rather
+    # than after them: reading up to 60 archive captures takes minutes. The
+    # section waits for it only after the summary, whose VALUE ON PAGE line is
     # what starts the source explorer.
     async def history() -> str:
         primary_url = criteria_urls[0] if criteria_urls else urls[0]
@@ -833,6 +760,82 @@ async def scrape_resolution_sources(
 
     history_task = asyncio.create_task(history()) if use_llm_cleaning else None
     try:
+        try:
+            results = await _scrape_resolution_urls(
+                list(urls),
+                question_text=question_text,
+                resolution_criteria=resolution_criteria,
+                max_concurrent=max_concurrent,
+                timeout=timeout,
+            )
+        finally:
+            # Resolution scraping holds first claim on the per-question Firecrawl
+            # credit budget; once its URLs are done (or failed), hand the rest of
+            # the cap to the general research path.
+            release_resolution_reserve()
+
+        # Deep series retrieval. Free (plain HTTP, no LLM, no Firecrawl), so it is
+        # not budgeted -- but it IS restricted to questions whose answer is a
+        # number, because that is the only case where a historical trend is the
+        # thing being asked for. The known-API check reads every candidate URL;
+        # discovery reads the primary (first) one.
+        series_section = ""
+        if criteria_urls or urls:
+            series_section = await _build_measured_series_section(
+                (criteria_urls or urls)[0],
+                known_series_urls=criteria_urls or urls,
+                question_text=question_text,
+                resolution_criteria=resolution_criteria,
+                question_type=question_type,
+                timeout=timeout,
+                target_date=target_date,
+            )
+        # The source may also carry numbers in the page source (a map's per-region
+        # classes, a chart's weekly values and forecast). Free like the series
+        # ladder, and for every question type: a snapshot can decide a binary
+        # question as easily as a count. It runs even when a measured series was
+        # found: the series is one long history, while these tables are whatever
+        # else the page holds (it used to run only when no series was found).
+        series_section += await _build_embedded_data_section(
+            (criteria_urls or urls)[:_EMBEDDED_MAX_PAGES], question_text=question_text,
+            timeout=timeout, raw_pages={r.url: r.raw_html for r in results if r.raw_html},
+        )
+
+        criteria_url_set = set(criteria_urls)
+        sections: list[str] = []
+        cleaned_sources: list[tuple[str, str]] = []
+        for result in results:
+            if not result.success:
+                logger.warning("Failed to scrape %s: %s", result.url, result.error)
+                sections.append(f"## Source: {result.url}\n_Scrape failed: {result.error}_")
+                continue
+
+            # Criteria URLs get the full 44382-safe budget; background-only URLs
+            # get the reduced tier (they are usually context, and every char here
+            # is paid for again in the batched summary calls).
+            if use_llm_cleaning:
+                heuristic_max = (
+                    _LLM_MAX_INPUT
+                    if result.url in criteria_url_set
+                    else _BACKGROUND_CONTENT_CHARS
+                )
+            else:
+                heuristic_max = _MAX_CONTENT_CHARS
+            cleaned = _clean_content(result.content, max_chars=heuristic_max, keep_urls=False)
+            if not cleaned.strip():
+                sections.append(f"## Source: {result.url}\n_No usable content extracted._")
+                continue
+
+            cleaned_sources.append((result.url, cleaned))
+            sections.append(
+                f"## Source: {result.url}\n"
+                f"_Scraped via {result.provider_used}_\n\n"
+                f"{cleaned}"
+            )
+
+        if not sections and not series_section:
+            return ""
+
         return await _assemble_resolution_section(
             sections, cleaned_sources, series_section, history_task,
             use_llm_cleaning=use_llm_cleaning, question_text=question_text,

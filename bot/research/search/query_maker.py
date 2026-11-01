@@ -60,7 +60,7 @@ AskNews research and evidence plan already gathered:
 Create up to {max_queries} Google search queries.
 
 Search Queries Priorities:
-1. Find the required evidence artifact named in the evidence plan, especially official or primary-source data.
+1. Find the required evidence artifact named in the evidence plan, especially official or primary-source data. If the plan names an earlier reading of the resolution measurement (a daily or preliminary series, a tracker), search for its latest values: must-run.
 2. Establish a base-rate using historical trends and direct market predictions.
 3. Check for recent events that are unique to this instance.
 4. Find statistical evidence and concrete values.
