@@ -1,8 +1,8 @@
 name: Model scores on resolved questions
 
 # Scores each ensemble model's own forecast (and the bot's submitted one) on the
-# last N resolved questions in the forecast library, then compares every model
-# with a reference model. No LLM calls: it reads the library and Metaculus only.
+# last N resolved questions in the forecast library, then compares every pair of
+# models. No LLM calls: it reads the library and Metaculus only.
 # Results: the run page summary, and the "model-scores" artifact
 # (summary.md + per_forecast.csv).
 
@@ -33,11 +33,6 @@ name: Model scores on resolved questions
         description: "Only questions resolved on or after this date, YYYY-MM-DD (blank = no limit)"
         required: false
         default: ""
-        type: string
-      reference_model:
-        description: "Model every other model is compared with"
-        required: false
-        default: "anthropic/claude-opus-5.5"
         type: string
       refresh_outcomes:
         description: "Check Metaculus for newly resolved questions first"
@@ -88,7 +83,7 @@ jobs:
 
       - name: Score each model
         run: |
-          args=(--last-n "${LAST_N}" --question-type "${QUESTION_TYPE}" --reference "${REFERENCE_MODEL}" --out model-scores)
+          args=(--last-n "${LAST_N}" --question-type "${QUESTION_TYPE}" --out model-scores)
           if [ -n "${TOURNAMENT}" ]; then args+=(--tournament "${TOURNAMENT}"); fi
           if [ -n "${SINCE}" ]; then args+=(--since "${SINCE}"); fi
           poetry run python eval_tools/model_scores.py "${args[@]}"
@@ -98,7 +93,6 @@ jobs:
           QUESTION_TYPE: ${{ inputs.question_type }}
           TOURNAMENT: ${{ inputs.tournament }}
           SINCE: ${{ inputs.since }}
-          REFERENCE_MODEL: ${{ inputs.reference_model }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
 
