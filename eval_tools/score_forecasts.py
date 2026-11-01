@@ -72,11 +72,15 @@ def score_multiple_choice(per_option: dict, resolution: str) -> float | None:
 def score_numeric(record: dict, resolution: str) -> float | None:
     """CRPS of the submitted CDF in scaled-location space (range-normalized)."""
     details = record.get("question_details") or {}
-    scaling = details.get("scaling") or {}
+    return crps_from_cdf(record.get("final_forecast"), details.get("scaling") or {}, resolution)
+
+
+def crps_from_cdf(cdf, scaling: dict, resolution: str) -> float | None:
+    """CRPS of any CDF on the question's grid -- the submitted one, one model's
+    run (eval_tools/model_scores.py) or the community's -- scored identically."""
     lower = scaling.get("range_min")
     upper = scaling.get("range_max")
     zero_point = scaling.get("zero_point")
-    cdf = record.get("final_forecast")
     if lower is None or upper is None or not isinstance(cdf, list):
         return None
 
