@@ -229,8 +229,30 @@ def consume(state: StreamState, raw: str, expected_model: str) -> None:
             call["arguments"] += function.get("arguments") or ""
 
 
+def move_inline_thinking(state: StreamState) -> None:
+    """Move thinking a model streamed inside its answer (registry
+    ``inline_think`` tags) into ``state.reasoning``. Thinking that opened and
+    never closed leaves no answer, so the attempt fails as empty."""
+    model = soclaas_models.model_for_reply(state.model or "")
+    if model is None or model.inline_think is None:
+        return
+    opening, closing = model.inline_think
+    if closing in state.answer:
+        thought, _, answer = state.answer.rpartition(closing)
+    elif opening in state.answer:
+        thought, answer = state.answer, ""
+    else:
+        return
+    state.reasoning += thought.replace(opening, "")
+    state.answer = answer.lstrip()
+
+
 def check_complete(state: StreamState) -> None:
-    """Complete means [DONE] plus either an answer or at least one named tool call."""
+    """Complete means [DONE] plus either an answer or at least one named tool call.
+
+    Inline thinking is moved out of the answer first, so an answer that was
+    all thinking counts as empty."""
+    move_inline_thinking(state)
     called = any(call["name"] for call in state.tool_calls.values())
     if not state.done or state.finish not in ("stop", "tool_calls"):
         raise AttemptFailed("Incomplete stream or unexpected finish")

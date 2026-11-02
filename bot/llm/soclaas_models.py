@@ -3,7 +3,7 @@
 Every model-specific fact the bot needs to talk to a SoCLaaS model lives in
 SOCLAAS_MODELS. Which models it uses, in order, is SOCLAAS_MODEL_CHAIN:
 
-    SOCLAAS_MODEL_CHAIN="x-test-2,qwen3.8:27b"   # DeepSeek first, Qwen if it fails
+    SOCLAAS_MODEL_CHAIN="x-test-2,x-test-4,x-test-1,qwen3.8:27b"   # DeepSeek, MiniMax, GLM, Qwen
 
 Callers ask for the role name ``"soclaas"`` (SOCLAAS_ROLE) rather than a
 model id; it resolves to the head of the chain, and the request ladder
@@ -45,6 +45,9 @@ class SoclaasModel:
     # Microdollars per 1M (input, output) tokens, from GET /v1/models. No money
     # is charged, but the allowance is real, so it is tracked as quota.
     quota_rate: tuple[float, float] = (0.0, 0.0)
+    # (open, close) tags of thinking the model streams INSIDE its answer text
+    # instead of in a reasoning field. The ladder moves it out of the answer.
+    inline_think: tuple[str, str] | None = None
     note: str = ""
 
     def accepts_reply(self, name: str) -> bool:
@@ -68,6 +71,35 @@ SOCLAAS_MODELS: Final[dict[str, SoclaasModel]] = {m.model_id: m for m in (
         quota_rate=(245_125.0, 930_500.0),  # 2026-10-22
         note="DeepSeek V4.1 Flash, labelled 'Testing' on SoCLaaS; 1M-token context",
     ),
+    # GLM and MiniMax (probe, 2026-11-02): the gateway accepted every effort
+    # from "max" to "none", including ones /v1/models does not list for them,
+    # so the ladder keeps to listed efforts, as DeepSeek's does -- "high" deep,
+    # "low" light and for plumbing. Sampler as DeepSeek's: top_k is accepted
+    # but untested. Neither has been evaluated on the bot's tasks yet.
+    SoclaasModel(
+        "x-test-1",
+        # On 2026-11-01 the gateway answered 23 "x-test-2" requests as this
+        # model; those stay refused under x-test-2 and reach GLM here instead.
+        reply_names=("glm-5.3-flash",),
+        efforts=("high", "low"),
+        no_think_effort="low",
+        sampler={"temperature": 1, "top_p": .95},
+        quota_rate=(157_019.0, 507_577.0),  # 2026-11-02
+        note="GLM 5.3 Flash, labelled 'Test' on SoCLaaS; 1M-token context",
+    ),
+    SoclaasModel(
+        "x-test-4",
+        reply_names=("minimax-m3.1-flash",),
+        efforts=("high", "low"),
+        no_think_effort="low",
+        sampler={"temperature": 1, "top_p": .95},
+        quota_rate=(150_000.0, 600_000.0),  # 2026-11-02
+        # Streamed replies carry its thinking in the content: "<mm:think>The
+        # user wants ...</mm:think>OK", or just "</mm:think>OK" (2026-11-02).
+        # Non-streamed replies came back clean.
+        inline_think=("<mm:think>", "</mm:think>"),
+        note="MiniMax M3.1 Flash, labelled 'Test' on SoCLaaS; 1M-token context",
+    ),
     SoclaasModel(
         "qwen3.8:27b",
         efforts=("xhigh", "medium"),
@@ -83,7 +115,7 @@ SOCLAAS_MODELS: Final[dict[str, SoclaasModel]] = {m.model_id: m for m in (
 
 # What callers ask for when they mean "the bot's SoCLaaS model".
 SOCLAAS_ROLE: Final = "soclaas"
-DEFAULT_CHAIN: Final = "x-test-2,qwen3.8:27b"
+DEFAULT_CHAIN: Final = "x-test-2,x-test-4,x-test-1,qwen3.8:27b"
 
 # Starting rungs a label may ask for. "medium" predates per-model ladders and
 # is read as "light" for a model whose ladder has no medium rung.

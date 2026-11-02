@@ -31,7 +31,7 @@ name: Forecast via external cron
         default: true
         type: boolean
       research_models:
-        description: "SETTING 1 - research. soclaas = free SoCLaaS models, DeepSeek first and Qwen if it fails (evidence plan stays on Sonnet). soclaas-qwen-only = the previous Qwen-only setup. original = paid Sonnet/Opus. qwen = old name for soclaas."
+        description: "SETTING 1 - research. soclaas = free SoCLaaS models, DeepSeek first, then MiniMax, GLM and Qwen if each fails (evidence plan stays on Sonnet). soclaas-qwen-only = the previous Qwen-only setup. original = paid Sonnet/Opus. qwen = old name for soclaas."
         required: false
         default: "soclaas"
         type: choice
@@ -66,7 +66,7 @@ name: Forecast via external cron
         default: false
         type: boolean
       forecaster_qwen:
-        description: "Forecaster (reads the brief): the SoCLaaS model, DeepSeek first then Qwen (free)"
+        description: "Forecaster (reads the brief): the SoCLaaS model, DeepSeek first then MiniMax, GLM, Qwen (free)"
         required: false
         default: false
         type: boolean
@@ -340,7 +340,7 @@ jobs:
           # timeouts are parsed with int()/float()).
           # Which SoCLaaS models, in order; each falls back to the next. Swapping
           # in a new model: add it to bot/llm/soclaas_models.py, then put it first here.
-          SOCLAAS_MODEL_CHAIN: ${{ (inputs.research_models || 'soclaas') == 'soclaas-qwen-only' && 'qwen3.8:27b' || 'x-test-2,qwen3.8:27b' }}
+          SOCLAAS_MODEL_CHAIN: ${{ (inputs.research_models || 'soclaas') == 'soclaas-qwen-only' && 'qwen3.8:27b' || 'x-test-2,x-test-4,x-test-1,qwen3.8:27b' }}
           QWEN_RESEARCH_LABELS: ${{ (inputs.research_models || 'soclaas') != 'original' && 'recommended' || '' }}
           QWEN_LADDER: ${{ (inputs.research_models || 'soclaas') != 'original' && '1' || '' }}
           QWEN_START_EFFORT: ${{ (inputs.research_models || 'soclaas') != 'original' && 'scrape-extract=light,asknews-filter=light' || '' }}

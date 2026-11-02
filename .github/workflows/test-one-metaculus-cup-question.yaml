@@ -13,7 +13,7 @@ name: Test Metaculus Cup questions
           - "openrouter"
           - "openai"
       research_models:
-        description: "SETTING 1 - research (everything before the forecast). original = paid Sonnet/Opus. soclaas = free SoCLaaS models, DeepSeek first and Qwen if it fails (evidence plan stays on Sonnet). soclaas-qwen-only = the previous Qwen-only setup. qwen = old name for soclaas."
+        description: "SETTING 1 - research (everything before the forecast). original = paid Sonnet/Opus. soclaas = free SoCLaaS models, DeepSeek first, then MiniMax, GLM and Qwen if each fails (evidence plan stays on Sonnet). soclaas-qwen-only = the previous Qwen-only setup. qwen = old name for soclaas."
         required: true
         default: "original"
         type: choice
@@ -51,7 +51,7 @@ name: Test Metaculus Cup questions
         default: false
         type: boolean
       forecaster_qwen:
-        description: "Forecaster (reads the brief): the SoCLaaS model, DeepSeek first then Qwen (free)"
+        description: "Forecaster (reads the brief): the SoCLaaS model, DeepSeek first then MiniMax, GLM, Qwen (free)"
         required: true
         default: false
         type: boolean
@@ -405,7 +405,7 @@ jobs:
           # SETTING 1 = soclaas (or soclaas-qwen-only, or the old name qwen). Which
           # SoCLaaS models, in order; each falls back to the next. Swapping in a new
           # model: add it to bot/llm/soclaas_models.py, then put it first here.
-          SOCLAAS_MODEL_CHAIN: ${{ inputs.research_models == 'soclaas-qwen-only' && 'qwen3.8:27b' || 'x-test-2,qwen3.8:27b' }}
+          SOCLAAS_MODEL_CHAIN: ${{ inputs.research_models == 'soclaas-qwen-only' && 'qwen3.8:27b' || 'x-test-2,x-test-4,x-test-1,qwen3.8:27b' }}
           # On an original run each is off or the code default
           # (never empty: the timeouts are parsed with int()/float()).
           QWEN_RESEARCH_LABELS: ${{ inputs.research_models != 'original' && 'recommended' || '' }}
