@@ -46,7 +46,6 @@ NEXT_F = re.compile(r'self\.__next_f\.push\(\[\d+,\s*("(?:[^"\\]|\\.)*")\]\)')
 JSON_SCRIPT = re.compile(
     r'<script[^>]*type="application/(?:ld\+)?json"[^>]*>(.*?)</script>'
     r'|<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.S)
-TAG = re.compile(r"<[^>]+>")
 # A day or a month ("1940-11" in monthly series), optionally Next.js-marked.
 ISO_DATE = re.compile(r"^(?:\$D)?(\d{4})-(\d{2})(?:-(\d{2}))?(?!\d)")
 MARKUP = re.compile(r"<(?:!doctype|html|head|body|div|script|p|table)\b", re.I)
@@ -385,9 +384,43 @@ def extract_tables(url: str, page_html: str, id_prefix: str = "T") -> list[Table
     return tables
 
 
+CDATA = re.compile(r"<!\[CDATA\[(.*?)\]\]>", re.S)
+
+
+class _VisibleText(HTMLParser):
+    """Text content minus scripts, styles and comments."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self._skip = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style"):
+            self._skip += 1
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style"):
+            self._skip = max(0, self._skip - 1)
+
+    def handle_data(self, data):
+        if not self._skip:
+            self.parts.append(data)
+
+
 def visible_text(page_html: str, limit: int = 800) -> str:
-    body = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", page_html, flags=re.S)
-    return re.sub(r"\s+", " ", html_module.unescape(TAG.sub(" ", body))).strip()[:limit]
+    """A page's text, read by a parser rather than a tag regex. The regex
+    deleted each <![CDATA[...]]> block as if it were one tag -- on Q46606
+    (2026-11-02) that erased every item's date from the Dail schedule feed --
+    and leaked text from HTML comments. CDATA is unwrapped first so its
+    contents (an RSS title, or a description holding markup) are read as text."""
+    parser = _VisibleText()
+    try:
+        parser.feed(CDATA.sub(r" \1 ", page_html))
+        parser.close()
+    except Exception:  # malformed markup: keep whatever was read
+        pass
+    return re.sub(r"\s+", " ", " ".join(parser.parts)).strip()[:limit]
 
 
 def relevance(table: Table, question_words: set[str], today: date) -> float:

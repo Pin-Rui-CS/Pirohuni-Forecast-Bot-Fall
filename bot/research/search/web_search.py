@@ -477,6 +477,9 @@ Important grouping rules:
 - Put overlapping sources with the same purpose in the same group.
 - Do not repeat the same URL in multiple groups.
 - If a URL could serve multiple purposes, choose the single best group for it.
+- When a group holds several issues of the same dated series (weekly reports,
+  monthly bulletins, successive schedules), rank the most recent issue first:
+  it supersedes the earlier ones.
 - Prefer enough groups to cover different evidence types instead of letting one
   category crowd out everything else.
 - Use question-specific groups when useful. Common group types include current

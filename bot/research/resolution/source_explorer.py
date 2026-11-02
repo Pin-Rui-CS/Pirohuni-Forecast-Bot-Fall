@@ -173,6 +173,11 @@ Reply with exactly ONE JSON object per turn, nothing else:
       the character to start at; the reply says where the next part starts). Fetches the page
       first if you have not yet. Use it when the excerpt suggests the value is written in the
       text rather than held in a table.
+  {{"action": "source", "url": "...", "from": 0}}
+      The page's raw source as downloaded (HTML, XML, JSON), {TEXT_CHARS:,} characters at a time.
+      The visible text is made by code and can lose things: use this when it looks incomplete --
+      leftover markup, dates or values you expected are missing, or far fewer characters of text
+      than the page has bytes. Not available for documents (PDF, Word, Excel).
   {{"action": "rows", "table": "P1.T2", "contains": "optional word"}}
       Every row of one table (of a very long one, its most recent rows). With "contains", only
       the rows holding that word (any case) and how many there are -- use it to check whether
@@ -188,6 +193,10 @@ region's id); do not guess site maps or page names. When you fill in a pattern, 
 from an address you have seen or from a table field that holds the same value (an id or key
 column whose values match the ones in seen addresses) -- never from a row's position in a table.
 If an address you built fails, fetch a page that links to it and use the link as listed.
+A date, time or slot belongs to an item only if the item's own text or field states it. Never
+infer it from the order of items, from navigation or date-picker links, or from the page's other
+dates; if the item carries none, report "date not stated" and look for one (the raw "source"
+view, or a dated document) before using it.
 
 The report records what the source CONTAINS -- quote values exactly as the tables or text give
 them, with their dates and the table or page and URL they come from. Do NOT estimate probabilities or give a forecast;
@@ -211,6 +220,8 @@ class _Pages:
         self.links_shown: set[str] = set()
         # Full visible text of every page and document read, for the "text" action.
         self.texts: dict[str, str] = {}
+        # Raw source of every page (not documents), for the "source" action.
+        self.sources: dict[str, str] = {}
         # Table digest -> id of the first table with those rows.
         self.first_seen: dict[str, str] = {}
 
@@ -268,6 +279,7 @@ class _Pages:
             source_ledger.record_url_event(url, source_ledger.ROLE_SCRAPED, engine="source-explorer",
                                            ok=True, chars=len(page))
             self.texts[url] = visible_text(page, len(page))
+            self.sources[url] = page
             tables = extract_tables(url, page, id_prefix=f"{prefix}.T")
             self.tables.update((t.id, t) for t in tables)
             shown = [t for t in tables if all(c in t.columns for c in columns)] if columns else tables
@@ -305,20 +317,28 @@ class _Pages:
                       + f"\n\n[cut at {MAX_RESULT_CHARS:,} chars -- fetch fewer pages or pass \"columns\"]")
         return result
 
-    async def text(self, client: httpx.AsyncClient, url: str, start: int, today: date) -> str:
-        """The visible text of one page or document, TEXT_CHARS at a time."""
+    async def text(self, client: httpx.AsyncClient, url: str, start: int, today: date,
+                   source: bool = False) -> str:
+        """The visible text of one page or document -- or, with ``source``, a
+        page's raw source -- TEXT_CHARS at a time. The raw source is the check
+        on visible_text: on Q46606 the cleaned text of an RSS feed had lost
+        every item's date, and the model filled them in from navigation links."""
+        store, what = (self.sources, "raw source") if source else (self.texts, "text")
         prelude = ""
         if url not in self.texts:
             prelude = await self.fetch(client, [url], [], today)
             if url not in self.texts:
                 return prelude
-        body = self.texts[url]
+        if url not in store:
+            return (f"{prelude}\n\n" if prelude else "") + (
+                f"## {url} -- no raw source: it was read as a document; use \"text\".")
+        body = store[url]
         start = min(max(0, start), len(body))
         end = min(start + TEXT_CHARS, len(body))
         tail = (f"\n[continues: {len(body) - end:,} more chars; ask again with \"from\": {end}]"
-                if end < len(body) else "\n[end of text]")
+                if end < len(body) else f"\n[end of {what}]")
         result = (f"{prelude}\n\n" if prelude else "") + (
-            f"## {url} -- text, chars {start:,}-{end:,} of {len(body):,}\n{body[start:end]}{tail}")
+            f"## {url} -- {what}, chars {start:,}-{end:,} of {len(body):,}\n{body[start:end]}{tail}")
         return result[:MAX_RESULT_CHARS]
 
     def rows(self, table_id: str, contains: str = "") -> str:
@@ -406,13 +426,20 @@ async def explore(*, title: str, resolution_criteria: str, fine_print: str = "",
                         except (TypeError, ValueError):
                             start = 0
                         result = await pages.text(client, str(action.get("url") or ""), start, today)
+                    elif kind == "source":
+                        try:
+                            start = int(action.get("from") or 0)
+                        except (TypeError, ValueError):
+                            start = 0
+                        result = await pages.text(client, str(action.get("url") or ""), start, today,
+                                                  source=True)
                     elif kind == "rows":
                         result = pages.rows(str(action.get("table")), str(action.get("contains") or ""))
                     elif kind == "final":
                         report = str(action.get("report") or "").strip()
                         result = ""
                     else:
-                        result = f"Unknown action {kind!r}; use fetch, text, rows or final."
+                        result = f"Unknown action {kind!r}; use fetch, text, source, rows or final."
                 if not report and turn == MAX_TURNS - 1:
                     result += "\n\nOne turn left: your next reply must be the final action."
                 research_trace.emit(
