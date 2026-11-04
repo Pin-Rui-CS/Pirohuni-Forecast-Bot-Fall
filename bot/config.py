@@ -74,6 +74,12 @@ FORECASTER_TIEBREAKER_MODEL = os.getenv(
 # repair): the run is redone once on this model, so one provider's outage does
 # not shrink the ensemble. Empty = off. The raw-research run is not covered.
 FORECASTER_BACKUP_MODEL = (os.getenv("FORECASTER_BACKUP_MODEL") or "").strip()
+# Shares of the ensemble average for named models, "model=share,...", e.g.
+# "anthropic/claude-opus-5.5=0.5"; every other run splits the rest equally
+# (forecasters.base.run_weights). Empty = equal weights. Chosen 2026-11-03 from
+# 105 resolved questions: Opus at 50% beat the equal average by ~+1.5 baseline
+# points/question on binary and ~+2 on numeric, with less spread than Opus alone.
+FORECASTER_WEIGHTS = (os.getenv("FORECASTER_WEIGHTS") or "").strip()
 
 # --- Heterogeneous ensemble run ----------------------------------------------
 # When enabled (and NUM_RUNS_PER_QUESTION >= 2), the LAST ensemble run reads the

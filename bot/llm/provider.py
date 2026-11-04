@@ -949,8 +949,10 @@ def _fallback_route(model: str) -> Route:
 # ("kalshi/"). "tested" names every research task the SoCLaaS quality
 # investigation evaluated (docs/diagnostics, consolidated report section 5.3);
 # "recommended" is the same minus the evidence plan (see below).
-# The Wikipedia adapter is the one research task it never tested, so it is
-# deliberately absent. Unset means routing is unchanged.
+# The Wikipedia adapter was left out until 2026-11-04, when DeepSeek extracted
+# three election pages (Spain x2, New Zealand) with every heading, the polling
+# tables intact and 1 of 1,199 numbers not on the page -- a seat sum it flagged
+# itself. Its Sonnet calls cost ~$0.10 a page. Unset means routing is unchanged.
 #
 # The label names "Qwen" are historical: these tasks go to SOCLAAS_RESEARCH_MODEL,
 # the role that resolves to the head of SOCLAAS_MODEL_CHAIN (DeepSeek first,
@@ -973,6 +975,7 @@ QWEN_TESTED_RESEARCH_LABELS: Final[tuple[str, ...]] = (
     "resolution-scraper/wayback-history",
     "compiler/precompress",
     "compiler/research-brief",
+    "wikipedia-adapter-extract",
 )
 
 

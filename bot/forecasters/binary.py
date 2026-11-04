@@ -12,6 +12,7 @@ from bot.forecasters.base import (
     ForecastResult,
     gather_forecast_runs,
     heterogeneous_run_setup,
+    run_weights,
     short_model_name,
 )
 from bot.llm.client import call_llm
@@ -330,6 +331,7 @@ async def get_binary_gpt_prediction(
         for i, comment in enumerate(comments)
     ]
 
+    weights = run_weights(models)
     SPREAD_THRESHOLD = 30
     prob_spread = max(probabilities) - min(probabilities)
     tiebreaker_used = False
@@ -377,8 +379,11 @@ async def get_binary_gpt_prediction(
         )
         final_comment = tiebreaker_header + "\n\n".join(final_comment_sections)
     else:
-        median_probability = float(np.median(probabilities)) / 100
-        final_comment = f"Median Probability: {median_probability}\n\n" + "\n\n".join(
+        # A weighted MEAN, not a median: with Opus at half the weight a
+        # weighted median would simply return Opus's number. The tiebreaker
+        # above still handles wide disagreement.
+        median_probability = float(np.dot(weights, probabilities)) / 100
+        final_comment = f"Weighted Mean Probability: {median_probability}\n\n" + "\n\n".join(
             final_comment_sections
         )
 
@@ -392,5 +397,6 @@ async def get_binary_gpt_prediction(
             "tiebreaker_used": tiebreaker_used,
             "spread_pp": prob_spread,
             "ensemble": ensemble,
+            "weights": [{"model": m, "weight": round(w, 4)} for m, w in zip(models, weights)],
         },
     )

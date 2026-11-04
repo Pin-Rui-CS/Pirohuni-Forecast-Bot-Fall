@@ -15,6 +15,7 @@ from bot.forecasters.base import (
     ForecastResult,
     gather_forecast_runs,
     heterogeneous_run_setup,
+    run_weights,
     short_model_name,
 )
 
@@ -2360,7 +2361,7 @@ def _strictly_increasing(values: np.ndarray, epsilon: float = 1e-12) -> np.ndarr
     return values + ramp
 
 
-def quantile_average_cdfs(cdfs: list[np.ndarray]) -> np.ndarray:
+def quantile_average_cdfs(cdfs: list[np.ndarray], weights: list[float] | None = None) -> np.ndarray:
     """Average run CDFs in quantile space (horizontal averaging).
 
     Averaging quantiles preserves each run's spread instead of flattening the
@@ -2373,9 +2374,14 @@ def quantile_average_cdfs(cdfs: list[np.ndarray]) -> np.ndarray:
     recomposed afterwards. Quantile-inverting the full CDF directly would
     clamp that tail mass onto the first/last grid cell, which showed up on
     Metaculus as a huge spurious spike at the extreme.
+
+    ``weights`` (one per run, default equal) weight both the out-of-bound
+    masses and the quantile positions: the ensemble's Opus share
+    (forecasters.base.run_weights).
     """
     if len(cdfs) == 1:
         return cdfs[0]
+    weights = [1.0] * len(cdfs) if weights is None else list(weights)
 
     size = len(cdfs[0])
     xs = np.arange(size, dtype=float)
@@ -2388,7 +2394,8 @@ def quantile_average_cdfs(cdfs: list[np.ndarray]) -> np.ndarray:
     lower_masses: list[float] = []
     upper_masses: list[float] = []
     conditionals: list[np.ndarray] = []
-    for cdf in cdfs:
+    conditional_weights: list[float] = []
+    for cdf, weight in zip(cdfs, weights):
         clean = np.maximum.accumulate(np.clip(np.asarray(cdf, dtype=float), 0.0, 1.0))
         lower_masses.append(float(clean[0]))
         upper_masses.append(float(1.0 - clean[-1]))
@@ -2402,16 +2409,19 @@ def quantile_average_cdfs(cdfs: list[np.ndarray]) -> np.ndarray:
         # run's spread. Contribute the mass, abstain from the shape.
         if span > 1e-9:
             conditionals.append((clean - clean[0]) / span)
+            conditional_weights.append(weight)
 
-    average_lower = float(np.mean(lower_masses))
-    average_upper = float(np.mean(upper_masses))
+    average_lower = float(np.average(lower_masses, weights=weights))
+    average_upper = float(np.average(upper_masses, weights=weights))
     if not conditionals:
         # Every run is off-grid. There is no shape information anywhere, so the
         # only honest in-grid curve is the uniform one.
         conditionals = [np.linspace(0.0, 1.0, size)]
+        conditional_weights = [1.0]
 
     average_positions = np.zeros_like(levels)
-    for conditional in conditionals:
+    total_weight = float(sum(conditional_weights))
+    for conditional, weight in zip(conditionals, conditional_weights):
         positions = np.interp(levels, _strictly_increasing(conditional), xs)
         # The endpoints are where the run's in-grid shape starts and stops:
         # the last cell still at 0 and the first cell at 1. interp cannot find
@@ -2419,8 +2429,8 @@ def quantile_average_cdfs(cdfs: list[np.ndarray]) -> np.ndarray:
         # stays flat), so both are read off the curve directly.
         positions[0] = float(np.searchsorted(conditional, 0.0, side="right") - 1)
         positions[-1] = float(min(np.searchsorted(conditional, 1.0, side="left"), size - 1))
-        average_positions += positions
-    average_positions /= len(conditionals)
+        average_positions += weight * positions
+    average_positions /= total_weight
 
     average_positions = np.maximum.accumulate(average_positions)
     average_conditional = np.interp(
@@ -2437,7 +2447,8 @@ def quantile_average_cdfs(cdfs: list[np.ndarray]) -> np.ndarray:
     return average_lower + (1.0 - average_lower - average_upper) * average_conditional
 
 
-def aggregate_run_cdfs(cdfs: list[np.ndarray], use_pmf: bool) -> np.ndarray:
+def aggregate_run_cdfs(cdfs: list[np.ndarray], use_pmf: bool,
+                       weights: list[float] | None = None) -> np.ndarray:
     """Count questions (true PMFs over a handful of point masses) average in
     PMF space; everything else — including fine-resolution discrete questions
     rendered as smooth distributions — averages quantiles to preserve per-run
@@ -2445,9 +2456,9 @@ def aggregate_run_cdfs(cdfs: list[np.ndarray], use_pmf: bool) -> np.ndarray:
     arrays = [np.asarray(cdf, dtype=float) for cdf in cdfs]
     if use_pmf:
         all_pmfs = np.diff(np.stack(arrays), prepend=0.0, axis=1)
-        mean_pmf = np.mean(all_pmfs, axis=0)
+        mean_pmf = np.average(all_pmfs, axis=0, weights=weights)
         return np.clip(np.cumsum(mean_pmf), 0.0, 1.0)
-    return quantile_average_cdfs(arrays)
+    return quantile_average_cdfs(arrays, weights)
 
 
 # ---------------------------------------------------------------------------
@@ -3117,7 +3128,8 @@ async def get_numeric_gpt_prediction(
         kept_records[i]["coarse_support_repaired"] = True
         comments[i] += f"\n\n_Post-parse repair: {note}._"
 
-    aggregated = aggregate_run_cdfs(raw_cdfs, geometry["use_pmf"])
+    weights = run_weights([record["model"] for record in kept_records])
+    aggregated = aggregate_run_cdfs(raw_cdfs, geometry["use_pmf"], weights)
 
     standardizer = NumericDistribution(
         declared_percentiles=[
@@ -3185,7 +3197,8 @@ async def get_numeric_gpt_prediction(
         + "\n\n".join(final_comment_sections)
     )
 
-    extra = {"geometry": geometry, "ensemble": ensemble, "stage_events": stage_events}
+    extra = {"geometry": geometry, "ensemble": ensemble, "stage_events": stage_events,
+             "weights": [{"model": r["model"], "weight": round(w, 4)} for r, w in zip(kept_records, weights)]}
     if comb is not None:
         extra["comb_check"] = comb
     return ForecastResult(

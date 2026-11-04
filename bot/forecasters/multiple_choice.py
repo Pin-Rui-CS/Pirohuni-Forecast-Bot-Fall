@@ -9,6 +9,7 @@ from bot.forecasters.base import (
     ForecastResult,
     gather_forecast_runs,
     heterogeneous_run_setup,
+    run_weights,
     short_model_name,
 )
 
@@ -363,15 +364,15 @@ async def get_multiple_choice_gpt_prediction(
         f"## Rationale {i+1} — {short_model_name(models[i])}\n{comment}"
         for i, comment in enumerate(comments)
     ]
+    weights = run_weights(models)
     average_probability_yes_per_category: dict[str, float] = {}
     for option in options:
-        probabilities_for_current_option = [d[option] for d in per_run_dicts]
         average_probability_yes_per_category[option] = sum(
-            probabilities_for_current_option
-        ) / len(probabilities_for_current_option)
+            w * d[option] for w, d in zip(weights, per_run_dicts)
+        )
 
     final_comment = (
-        f"Average Probability Yes Per Category: `{average_probability_yes_per_category}`\n\n"
+        f"Weighted Average Probability Per Category: `{average_probability_yes_per_category}`\n\n"
         + "\n\n".join(final_comment_sections)
     )
     return ForecastResult(
@@ -380,5 +381,6 @@ async def get_multiple_choice_gpt_prediction(
         prompt=prompt,
         run_transcripts=transcripts,
         run_values=per_run_dicts,
-        extra={"ensemble": ensemble},
+        extra={"ensemble": ensemble,
+               "weights": [{"model": m, "weight": round(w, 4)} for m, w in zip(models, weights)]},
     )

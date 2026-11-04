@@ -40,11 +40,6 @@ name: Forecast via external cron
           - "soclaas-qwen-only"
           - "original"
           - "qwen"
-      forecaster_gemini4_argon:
-        description: "Forecaster (reads the brief): Gemini 4 Argon (replaced GPT-6 Astra 2026-10-16; ~1/5 of Astra's price)"
-        required: false
-        default: true
-        type: boolean
       forecaster_gpt6_astra:
         description: "Forecaster (reads the brief): GPT-6 Astra (~5x Opus per token). Off by default since 2026-10-16; still the tiebreaker and the backup for a failed run"
         required: false
@@ -61,9 +56,9 @@ name: Forecast via external cron
         default: true
         type: boolean
       forecaster_claude_sonnet:
-        description: "Forecaster (reads the brief): Claude Sonnet 5"
+        description: "Forecaster (reads the brief): Claude Sonnet 5 (on by default since 2026-11-03)"
         required: false
-        default: false
+        default: true
         type: boolean
       forecaster_qwen:
         description: "Forecaster (reads the brief): the SoCLaaS model, DeepSeek first then MiniMax, GLM, Qwen (free)"
@@ -82,7 +77,6 @@ name: Forecast via external cron
           - "Claude Opus 5.5"
           - "GPT-6.1 Sol"
           - "GPT-6 Astra"
-          - "Gemini 4 Argon"
           - "none"
 
 # Prevent overlapping external cron runs.
@@ -215,12 +209,10 @@ jobs:
           # swaps the LAST run onto HETEROGENEOUS_RUN_MODEL with the raw research, so
           # that run is added as run N+1 rather than replacing a ticked model.
           # Fallbacks = the input defaults, in case a cron call arrives without them.
-          FC_GEMINI4_ARGON="${FC_GEMINI4_ARGON:-true}"
           FC_GPT6_ASTRA="${FC_GPT6_ASTRA:-false}"; FC_CLAUDE_OPUS="${FC_CLAUDE_OPUS:-true}"
-          FC_GPT56_SOL="${FC_GPT56_SOL:-true}"; FC_CLAUDE_SONNET="${FC_CLAUDE_SONNET:-false}"
+          FC_GPT56_SOL="${FC_GPT56_SOL:-true}"; FC_CLAUDE_SONNET="${FC_CLAUDE_SONNET:-true}"
           FC_QWEN="${FC_QWEN:-false}"; RAW_FORECASTER="${RAW_FORECASTER:-SoCLaaS DeepSeek->Qwen (free)}"
           MODELS=()
-          [ "$FC_GEMINI4_ARGON" = "true" ] && MODELS+=("google/gemini-4-argon")
           [ "$FC_GPT6_ASTRA" = "true" ] && MODELS+=("openai/gpt-6-astra")
           [ "$FC_CLAUDE_OPUS" = "true" ] && MODELS+=("anthropic/claude-opus-5.5")
           [ "$FC_GPT56_SOL" = "true" ] && MODELS+=("openai/gpt-6.1-sol")
@@ -233,17 +225,21 @@ jobs:
             "Claude Opus 5.5") RAW_MODEL="anthropic/claude-opus-5.5" ;;
             "GPT-6.1 Sol") RAW_MODEL="openai/gpt-6.1-sol" ;;
             "GPT-6 Astra") RAW_MODEL="openai/gpt-6-astra" ;;
-            "Gemini 4 Argon") RAW_MODEL="google/gemini-4-argon" ;;
             "SoCLaaS DeepSeek->Qwen (free)") RAW_MODEL="soclaas" ;;
             "Qwen 3.8 27B (free)") RAW_MODEL="qwen3.8:27b" ;;
             "none") RAW_MODEL="" ;;
             *) echo "Unknown raw_research_forecaster: $RAW_FORECASTER" >&2; exit 1 ;;
           esac
           export FORECASTER_MODELS="$(IFS=,; echo "${MODELS[*]}")"
-          # GPT-6 Astra left the ensemble on 2026-10-16 (Gemini 4 Argon took its
-          # place) but stays as the binary tiebreaker, and as the stand-in for any
-          # brief run that fails (forecasters.base: FORECASTER_BACKUP_MODEL).
+          # GPT-6 Astra left the ensemble on 2026-10-16 but stays as the binary
+          # tiebreaker, and as the stand-in for any brief run that fails
+          # (forecasters.base: FORECASTER_BACKUP_MODEL). Gemini 4 Argon, which took
+          # its place, was removed 2026-11-03: the OpenRouter BYOK Google key is on
+          # Google's free tier with a limit of 0, so every Argon run fell back to Astra.
           export FORECASTER_TIEBREAKER_MODEL="openai/gpt-6-astra"
+          # Opus gets half the ensemble average; the other runs split the rest
+          # (forecasters.base.run_weights; chosen 2026-11-03 from 105 resolved questions).
+          export FORECASTER_WEIGHTS="anthropic/claude-opus-5.5=0.5"
           export FORECASTER_BACKUP_MODEL="openai/gpt-6-astra"
           if [ -n "$RAW_MODEL" ]; then
             export HETEROGENEOUS_RUN_ENABLED=true HETEROGENEOUS_RUN_MODEL="$RAW_MODEL"
@@ -327,7 +323,6 @@ jobs:
           # already-forecast questions are skipped.
           QUESTION_CONCURRENCY: ${{ vars.QUESTION_CONCURRENCY || '2' }}
           # SETTING 2 (inputs a cron call omits take their defaults).
-          FC_GEMINI4_ARGON: ${{ inputs.forecaster_gemini4_argon }}
           FC_GPT6_ASTRA: ${{ inputs.forecaster_gpt6_astra }}
           FC_CLAUDE_OPUS: ${{ inputs.forecaster_claude_opus }}
           FC_GPT56_SOL: ${{ inputs.forecaster_gpt56_sol }}

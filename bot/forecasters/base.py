@@ -10,6 +10,7 @@ from bot.config import (
     FORECAST_MAX_OUTPUT_TOKENS,
     FORECASTER_BACKUP_MODEL,
     FORECASTER_MODELS,
+    FORECASTER_WEIGHTS,
     HETEROGENEOUS_RUN_ENABLED,
     HETEROGENEOUS_RUN_MODEL,
 )
@@ -75,6 +76,54 @@ Validator = Callable[[str], "str | None"]
 def short_model_name(model: str) -> str:
     """`openai/gpt-5.5` -> `gpt-5.5`, for compact labels, logs, and comments."""
     return model.split("/")[-1]
+
+
+def parse_weights(spec: str) -> dict[str, float]:
+    """``"model=share,..."`` -> {model: share}. A malformed entry, a share
+    outside (0, 1], or shares adding past 1 are logged and ignored, falling
+    back toward equal weights rather than failing a forecast."""
+    shares: dict[str, float] = {}
+    for part in (spec or "").split(","):
+        if not part.strip():
+            continue
+        model, _, value = part.partition("=")
+        try:
+            share = float(value)
+        except ValueError:
+            logger.warning("[weights] ignoring %r: not model=share", part.strip())
+            continue
+        if not model.strip() or not 0 < share <= 1:
+            logger.warning("[weights] ignoring %r: share must be in (0, 1]", part.strip())
+            continue
+        shares[model.strip()] = share
+    if sum(shares.values()) > 1 + 1e-9:
+        logger.warning("[weights] shares %s add up to more than 1; using equal weights", shares)
+        return {}
+    return shares
+
+
+def run_weights(models: list[str], spec: str | None = None) -> list[float]:
+    """One weight per run for the ensemble average, summing to 1.
+
+    A model named in FORECASTER_WEIGHTS gets its share, split across its runs if
+    it ran more than once; every other run splits what is left equally. Weights
+    follow the model that ACTUALLY ran: a backup standing in for Opus gets an
+    ordinary share, not Opus's. With no named model present, weights are equal;
+    with only named models present, their shares are scaled to sum to 1.
+    """
+    if not models:
+        return []
+    shares = parse_weights(FORECASTER_WEIGHTS if spec is None else spec)
+    counts = {m: models.count(m) for m in set(models)}
+    named = {m: shares[m] for m in counts if m in shares}
+    others = [m for m in models if m not in named]
+    rest = max(0.0, 1.0 - sum(named.values()))
+    if not named:
+        return [1.0 / len(models)] * len(models)
+    if not others:
+        total = sum(named.values())
+        return [named[m] / total / counts[m] for m in models]
+    return [named[m] / counts[m] if m in named else rest / len(others) for m in models]
 
 
 def models_for_runs(num_runs: int, models: list[str] | None) -> list[str]:
