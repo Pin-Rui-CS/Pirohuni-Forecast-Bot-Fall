@@ -51,7 +51,14 @@ _ARTIFACT_CHECK_PRIORITY_WEIGHTS = (3.0, 2.0, 1.5, 1.0)
 # band is kept so the sort order and the weight table stay aligned, and so any
 # other caller of fit_artifact_check_sections still ranks it above bulk research.
 _PRIORITY_EVIDENCE_PLAN = 2
-_MAX_RETRY_QUERIES = 4
+_MAX_RETRY_QUERIES = 4  # per retry plan
+# Pooling retry plans across SoCLaaS models: each plan's top two, taken in turn,
+# near-duplicates merged, at most eight searches. Measured 2026-11-04 on three
+# saved questions: 7, 8 and 4 searches, each pool holding the decisive query.
+_MAX_POOLED_RETRY_QUERIES = 8
+_POOL_TOP_PER_PLAN = 2
+_POOL_OVERLAP = 0.6
+_PLANNER_LABEL = "artifact-check/planner"
 # Soft-stop gates against the question's reserved compile/forecast token tail
 # (see monetary_cost_manager.research_reserve_input_tokens). Sized from the
 # 44773 run ledger (chars/4 units: full search-provider pass ~50-90K, the
@@ -435,14 +442,26 @@ async def run_research(
             "\n".join(part for part in (title, resolution_criteria, background, fine_print) if part)
         )
     )
-    artifact_check = await verify_required_artifact(
-        title=title,
-        evidence_plan=evidence_plan,
-        provider_results=included_results,
-        question_dates=question_dates,
-        resolution_criteria=resolution_criteria,
-        fine_print=fine_print,
+    # The check's own model writes the verdict and one retry plan; every other
+    # SoCLaaS model in the chain writes a retry plan from the same inputs, in
+    # parallel, and the plans are pooled (pool_retry_queries). On Q46525
+    # (2026-11-03) DeepSeek alone never looked for the next hearing of the case
+    # that decided the question; GLM and Qwen both did.
+    already_tried = _already_tried_section()
+    check_kwargs = dict(title=title, evidence_plan=evidence_plan, provider_results=included_results,
+                        question_dates=question_dates, resolution_criteria=resolution_criteria,
+                        fine_print=fine_print, already_tried=already_tried)
+    planner_models = _extra_planner_models()
+    outcomes = await asyncio.gather(
+        verify_required_artifact(**check_kwargs),
+        *(verify_required_artifact(**check_kwargs, model=m, label=_PLANNER_LABEL) for m in planner_models),
+        return_exceptions=True,
     )
+    for outcome in outcomes:
+        if isinstance(outcome, HardLimitExceededError):
+            raise outcome
+    artifact_check = outcomes[0] if isinstance(outcomes[0], dict) else None
+    extra_plans = {m: o for m, o in zip(planner_models, outcomes[1:]) if isinstance(o, dict)}
     research_trace.emit(
         "artifact_check",
         "artifact check v1 (pre-retry)",
@@ -452,7 +471,8 @@ async def run_research(
         writes=[research_trace.ref_doc("artifact_check:v1")], kind="model", lane="*",
     )
 
-    # Stage 5: focused retry aimed only at the missing artifact. Reuse the search
+    # Stage 5: focused retry on whatever the check's retry planner judged most
+    # worth searching (no longer only the missing artifact). Reuse the search
     # provider that already returned usable results this run, so the retry never
     # spends a different provider's credits and always uses one proven to work. If
     # the whole main chain produced nothing, fall back to the first not-yet-
@@ -475,6 +495,20 @@ async def run_research(
             "[research] artifact check failed; treating the artifact as missing and "
             "retrying with %d evidence-plan queries", len(retry_basis["retry_queries"]),
         )
+    if extra_plans:
+        plans = [("check", retry_basis.get("retry_queries") or [])] + [
+            (model, plan.get("retry_queries") or []) for model, plan in extra_plans.items()]
+        pooled = pool_retry_queries([queries for _, queries in plans],
+                                    already_run=[q for _, _, q in source_ledger.get_queries()])
+        retry_basis = {**retry_basis, "retry_queries": pooled,
+                       "retry_plans": {model: queries for model, queries in plans}}
+        research_trace.emit(
+            "retry_pool", "retry plans pooled across models",
+            {"plans": retry_basis["retry_plans"], "pooled": pooled,
+             "reasoning": {m: (p.get("retry_plan") or {}).get("reasoning", "") for m, p in extra_plans.items()}},
+            reads=[research_trace.ref_doc("artifact_check:v1")], writes=[], kind="code", lane="*",
+        )
+        logger.info("[research] retry planners %s; pooled %d queries", list(retry_basis["retry_plans"]), len(pooled))
     retry_label = _select_retry_provider_label(chosen_search_result, ordered_search_engines)
     pre_retry_result_count = len(included_results)
 
@@ -488,9 +522,10 @@ async def run_research(
     explorer_task = None if early_explorer_result is not None else _start_source_explorer(
         run_provider, retry_basis, title=title, resolution_criteria=resolution_criteria,
         fine_print=fine_print, background=background, artifact_check=artifact_check)
+    # The retry planner decides: any queries mean a retry, whatever the artifact
+    # verdict says (2026-11-04; it used to fire only on "missing"/"partial").
     wants_artifact_retry = bool(
         retry_basis
-        and retry_basis.get("status") in {"missing", "partial"}
         and retry_basis.get("retry_queries")
         and retry_label is not None
     )
@@ -519,7 +554,7 @@ async def run_research(
     elif wants_artifact_retry:
         retry_queries = [
             str(query).strip()
-            for query in retry_basis["retry_queries"][:_MAX_RETRY_QUERIES]
+            for query in retry_basis["retry_queries"][:_MAX_POOLED_RETRY_QUERIES]
             if str(query).strip()
         ]
         if retry_queries:
@@ -570,6 +605,7 @@ async def run_research(
                     "included": retry_included,
                     "artifact_status": retry_basis.get("status"),
                     "retry_queries": retry_queries,
+                    "retry_plan": retry_basis.get("retry_plan"),
                     "retry_provider": retry_label,
                 },
                 status="ok" if retry_included else "no-usable-result",
@@ -587,14 +623,9 @@ async def run_research(
                     degraded_search_providers.append(f"Focused Artifact Retry ({retry_label})")
     else:
         no_retry_reason = (
-            "artifact status is %r (retry only fires on missing/partial)"
-            % (retry_basis or {}).get("status")
-            if (retry_basis or {}).get("status") not in {"missing", "partial"}
-            else (
-                "artifact check returned no retry queries"
-                if not (retry_basis or {}).get("retry_queries")
-                else "no retry-capable search provider available"
-            )
+            "the retry planner returned no queries"
+            if not (retry_basis or {}).get("retry_queries")
+            else "no retry-capable search provider available"
         )
         research_trace.emit(
             "retry_decision",
@@ -986,20 +1017,40 @@ The evidence plan named a required evidence artifact:
 Research gathered so far (per provider, truncated):
 {research_excerpt}
 {prior_check_section}
-Decide whether the required artifact was actually found in the research.
+What research has already tried:
+{already_tried}
 
-Return only valid JSON:
+You have two separate jobs, answered in this order.
+
+JOB 1 -- RETRY PLAN. Decide what is most worth searching for next to improve this
+forecast. Reason from the question, the research so far and what has already been tried --
+not from the evidence plan's artifact or anything else you write in this reply. Think as a
+researcher would: which unresolved fact would move the forecast most (a pending process's
+next step or date, the latest reading of a measure, a decision or document the research
+mentions but never retrieved, a newer issue of a dated series), and can a search still find
+it? Do not repeat a search already run; a promising page that was found but never read, or
+whose fetch failed, is worth a query naming it. Put no month or date into a query unless a
+source states that date. Return no queries when nothing searchable would change the forecast.
+
+JOB 2 -- ARTIFACT VERDICT. Decide whether the required artifact was actually found in the
+research. This verdict is a banner for the brief writer; it does not steer Job 1.
+
+Return only valid JSON, retry_plan first:
 {{
+  "retry_plan": {{
+    "reasoning": "two to four sentences: what has been tried, what is still unresolved, and what would most change the forecast",
+    "queries": [{{"query": "a focused web search", "why": "one line: the fact it should find"}}]
+  }},
   "status": "complete" | "partial" | "missing",
   "what_was_found": "one or two sentences quoting the key values found, or stating none were",
   "what_is_missing": "one or two sentences naming the exact rows/values still missing, or empty string",
   "closest_available": "if the EXACT resolution metric is absent but a same-family adjacent metric WAS actually retrieved (a related series, the same series on a different basis, or a different-but-comparable measure), quote that value WITH its date/period and source, and state its factual relationship to the target (e.g. 'June 2025 I-94 visitor arrivals = 5,278,944; target is I-92 Foreign Originating, which historically runs a stable fraction of this'); empty string if no adjacent value was retrieved. Quote ONLY what was retrieved: do not compute ratios, percentages, base rates, or averages from it, do not characterize it as high/low, and do not state a forecast implication — rate-construction and interpretation are the forecaster's job",
-  "forecast_swing": "low" | "moderate" | "decisive",
-  "retry_queries": ["up to {max_retry_queries} focused Google queries that target ONLY the missing artifact, e.g. secondary sources quoting it; empty list if status is complete or no query could plausibly find it"]
+  "forecast_swing": "low" | "moderate" | "decisive"
 }}
+"queries" holds at most {max_retry_queries} entries, most useful first.
 
 Rules:
-- Every field records what the research CONTAINS, not an analysis of it. In ANY field, do not perform arithmetic, construct a base rate or reference-class frequency, estimate a probability, or editorialize about what a value implies. Quote values with their dates and sources; the forecaster computes rates and draws conclusions.
+- Every verdict field (Job 2) records what the research CONTAINS, not an analysis of it. In those fields, do not perform arithmetic, construct a base rate or reference-class frequency, estimate a probability, or editorialize about what a value implies. Quote values with their dates and sources; the forecaster computes rates and draws conclusions.
 - TEMPORAL IMPOSSIBILITY: today is {today}. A report or observation whose claimed event or
   publication date is AFTER today cannot exist — its date is wrong (almost always a prior-year
   event mislabeled with the current year, e.g. a year-less "Aug 7" snippet from an old post).
@@ -1022,21 +1073,20 @@ Rules:
   member states, entries), "complete" additionally requires the row-level
   breakdown behind the headline number (which members are in which category).
   A headline count whose composition was not retrieved (e.g. a truncated table)
-  is "partial", "what_is_missing" must name the missing rows, and at least one
-  retry query must target that row-level breakdown.
+  is "partial" and "what_is_missing" must name the missing rows.
 - A retrieved value that is the right family but the WRONG exact metric does NOT make status "complete", but it MUST be recorded in "closest_available" — never silently discard a value that was actually fetched just because it is not the exact metric. It is decision-relevant and must survive into the brief.
 - forecast_swing estimates how far a reasonable forecast would plausibly move if the
   missing information were resolved one way versus the other: "low" (<5 percentage
   points), "moderate" (5-15), "decisive" (>15). Use "low" when status is "complete".
-- Retry queries must be materially different from generic restatements of the question.
-- A resolution value dated in the future does NOT by itself mean there is nothing to
-  search for: the same quantity's latest published reading, its recent history, and
-  any forecast or schedule its source publishes usually exist now. When the target
-  reading is in the future, retry queries must target those (e.g. the current value
-  on the resolution source, its row-level breakdown, the source's own outlook).
-  Return an empty retry_queries list only when even the current reading cannot exist
-  yet (a first-ever release, an event with no running measure) — searching cannot
-  find numbers that have never been published.
+Searches that have often helped in Job 1 -- ideas, not requirements:
+- The row-level breakdown behind a headline count (which members are in which category).
+- When the resolution value lies in the future: the same quantity's latest published
+  reading, its recent history, and any forecast or schedule its source publishes.
+- The most recent issue of a dated series (weekly reports, monthly bulletins) the
+  research only has older issues of.
+- The latest status and next scheduled step of a process the research found in progress
+  (a case, a vote, an application), including ones the evidence plan never named.
+A query that merely restates the question rarely finds anything new.
 """.strip()
 
 
@@ -1288,6 +1338,119 @@ def fit_artifact_check_sections(
     return excerpt
 
 
+_TRIED_LIST_CAPS = {"read": 40, "failed": 20, "unread": 30}
+
+
+def _already_tried_section() -> str:
+    """What research has tried this question, from the source ledger: the
+    searches run, the pages read, the fetches that failed, and pages a search
+    returned that were never read. The retry planner reasons from this rather
+    than from the artifact verdict (Q46525, 2026-11-03: four retries all chased
+    December dates of cases the plan named, and none looked for the next
+    hearing of the case that decided the question)."""
+    queries = list(dict.fromkeys(q for _, _, q in source_ledger.get_queries()))
+    read, failed, seen = {}, {}, {}
+    for event in source_ledger.get_events():
+        url = event.url
+        if event.role == source_ledger.ROLE_SCRAPED:
+            if event.ok:
+                read.setdefault(url, None)
+                failed.pop(url, None)
+            elif url not in read:
+                failed[url] = event.error or "failed"
+        elif event.role in (source_ledger.ROLE_CANDIDATE, source_ledger.ROLE_RANKED):
+            seen.setdefault(url, event.detail)
+    unread = [u for u in seen if u not in read and u not in failed]
+
+    def block(label: str, items: list[str], cap: int | None = None) -> str:
+        shown = items[:cap] if cap else items
+        more = f"\n  ... and {len(items) - len(shown)} more" if len(items) > len(shown) else ""
+        return f"{label} ({len(items)}):\n" + ("\n".join(f"  - {i}" for i in shown) or "  (none)") + more
+
+    return "\n".join([
+        block("Searches already run", queries),
+        block("Pages read", list(read), _TRIED_LIST_CAPS["read"]),
+        block("Pages whose fetch failed", [f"{u} ({e[:80]})" for u, e in failed.items()],
+              _TRIED_LIST_CAPS["failed"]),
+        block("Pages a search returned but nobody read", unread, _TRIED_LIST_CAPS["unread"]),
+    ])
+
+
+_QUERY_FILLER = frozenset(
+    "the a an of for and or in on to by with from site de da ve ile mi bir icin".split())
+
+
+def _query_words(query: str) -> set[str]:
+    import re
+    import unicodedata
+    text = unicodedata.normalize("NFKD", query.lower()).encode("ascii", "ignore").decode()
+    text = re.sub(r"site:\S+", " ", text)
+    return {w for w in re.findall(r"[a-z0-9]+", text)
+            if len(w) > 1 and w not in _QUERY_FILLER and not re.fullmatch(r"(19|20)\d\d", w)}
+
+
+def _query_numbers(query: str) -> set[str]:
+    """Numbers other than years: a trailing "2026" separates nothing."""
+    import re
+    return {n for n in re.findall(r"\d+", query) if not re.fullmatch(r"(19|20)\d\d", n)}
+
+
+def same_query(a: str, b: str) -> bool:
+    """Near-duplicate searches: most meaningful words shared AND the same
+    numbers. Dates are what tell "report for 3-5 November" from "report for
+    10-12 November" (word overlap 0.71) -- merging those loses the one that
+    mattered (Q46606) -- so differing numbers always keep queries apart."""
+    wa, wb = _query_words(a), _query_words(b)
+    if not wa or not wb or _query_numbers(a) != _query_numbers(b):
+        return a.strip().lower() == b.strip().lower()
+    return len(wa & wb) / len(wa | wb) >= _POOL_OVERLAP
+
+
+def pool_retry_queries(plans: list[list[str]], already_run: list[str] = (),
+                       cap: int = _MAX_POOLED_RETRY_QUERIES, top: int = _POOL_TOP_PER_PLAN) -> list[str]:
+    """One retry list from several models' plans: every plan's 1st query,
+    then every plan's 2nd, skipping near-duplicates of a kept query or of a
+    search already run. The decisive query is often a model's 2nd pick and
+    proposed by one model only, so no plan's top two are dropped for
+    agreement or order before the cap."""
+    kept: list[str] = []
+    for rank in range(top):
+        for plan in plans:
+            if rank >= len(plan) or len(kept) >= cap:
+                continue
+            query = str(plan[rank]).strip()
+            if query and not any(same_query(query, other) for other in (*kept, *already_run)):
+                kept.append(query)
+    return kept
+
+
+def _extra_planner_models() -> list[str]:
+    """SoCLaaS models that write extra retry plans beside the check's own: the
+    rest of SOCLAAS_MODEL_CHAIN, when research runs on SoCLaaS. None on an
+    all-paid ("original") run -- research never adds OpenRouter calls."""
+    from bot.llm import provider as llm_provider, soclaas_models
+    if not llm_provider.qwen_research_labels() or not llm_provider.api_key_for(llm_provider.ENDPOINT_SOCLAAS):
+        return []
+    return list(soclaas_models.chain()[1:])
+
+
+def _parse_retry_plan(parsed: dict) -> tuple[list[str], dict]:
+    """(queries, the plan as recorded). Accepts the older flat "retry_queries"."""
+    plan = parsed.get("retry_plan") if isinstance(parsed.get("retry_plan"), dict) else {}
+    entries = plan.get("queries") if isinstance(plan.get("queries"), list) else []
+    queries, whys = [], []
+    for entry in entries:
+        query = entry.get("query") if isinstance(entry, dict) else entry
+        if str(query or "").strip():
+            queries.append(str(query).strip())
+            whys.append(str(entry.get("why", "")).strip() if isinstance(entry, dict) else "")
+    if not queries and isinstance(parsed.get("retry_queries"), list):
+        queries = [str(q).strip() for q in parsed["retry_queries"] if str(q).strip()]
+        whys = [""] * len(queries)
+    return queries, {"reasoning": str(plan.get("reasoning", "")).strip(),
+                     "queries": [{"query": q, "why": w} for q, w in zip(queries, whys)]}
+
+
 async def verify_required_artifact(
     title: str,
     evidence_plan: str,
@@ -1297,6 +1460,8 @@ async def verify_required_artifact(
     question_dates: frozenset[str] | None = None,
     resolution_criteria: str = "",
     fine_print: str = "",
+    already_tried: str | None = None,
+    label: str = "artifact-check",
 ) -> dict | None:
     # The evidence plan used to reach this prompt TWICE — as
     # ``evidence_plan_excerpt`` and again as a "## Evidence Plan" section
@@ -1332,6 +1497,7 @@ async def verify_required_artifact(
         evidence_plan_excerpt=evidence_plan,
         research_excerpt=research_excerpt,
         prior_check_section=prior_check_section,
+        already_tried=already_tried if already_tried is not None else _already_tried_section(),
         max_retry_queries=_MAX_RETRY_QUERIES,
     )
     try:
@@ -1339,15 +1505,15 @@ async def verify_required_artifact(
             prompt,
             model=model,
             temperature=0.1,
-            _label="artifact-check",
+            # An extra retry planner pins its model: its label is not on the
+            # SoCLaaS research list, so the request goes to ``model`` itself.
+            _label=label,
         )
         parsed = _extract_json_object(response)
         status = str(parsed.get("status", "")).strip().lower()
         if status not in {"complete", "partial", "missing"}:
             raise ValueError(f"artifact-check returned invalid status: {status!r}")
-        retry_queries = parsed.get("retry_queries") or []
-        if not isinstance(retry_queries, list):
-            retry_queries = []
+        retry_queries, retry_plan = _parse_retry_plan(parsed)
         forecast_swing = str(parsed.get("forecast_swing", "")).strip().lower()
         if forecast_swing not in {"low", "moderate", "decisive"}:
             forecast_swing = ""
@@ -1357,7 +1523,8 @@ async def verify_required_artifact(
             "what_is_missing": str(parsed.get("what_is_missing", "")).strip(),
             "closest_available": str(parsed.get("closest_available", "")).strip(),
             "forecast_swing": forecast_swing,
-            "retry_queries": [str(query).strip() for query in retry_queries if str(query).strip()],
+            "retry_queries": retry_queries,
+            "retry_plan": retry_plan,
         }, question_dates=question_dates)
     except HardLimitExceededError:
         raise

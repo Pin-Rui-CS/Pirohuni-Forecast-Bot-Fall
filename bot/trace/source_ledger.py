@@ -50,6 +50,7 @@ class UrlEvent:
 
 _LOCK = threading.Lock()
 _EVENTS: dict[str, list[UrlEvent]] = {}
+_QUERIES: dict[str, list[tuple[str, str, str]]] = {}
 
 _SCOPE: ContextVar[str] = ContextVar("source_ledger_scope", default="global")
 _CONTEXT: ContextVar[tuple[str, str]] = ContextVar(
@@ -147,6 +148,24 @@ def record_text_urls(
     return len(seen)
 
 
+def record_queries(queries: list[str], *, tool: str | None = None, phase: str | None = None) -> None:
+    """Note the search queries a pass ran, so a later step (the artifact
+    check's retry planner) can see what was already searched."""
+    ctx_tool, ctx_phase = _CONTEXT.get()
+    scope = _SCOPE.get()
+    with _LOCK:
+        _QUERIES.setdefault(scope, []).extend(
+            (tool or ctx_tool, phase or ctx_phase, " ".join(str(q).split()))
+            for q in queries if str(q).strip())
+
+
+def get_queries(scope: str | None = None) -> list[tuple[str, str, str]]:
+    """(tool, phase, query) for every recorded search, in order."""
+    target = scope if scope is not None else _SCOPE.get()
+    with _LOCK:
+        return list(_QUERIES.get(target, []))
+
+
 def get_events(scope: str | None = None) -> list[UrlEvent]:
     target = scope if scope is not None else _SCOPE.get()
     with _LOCK:
@@ -157,6 +176,7 @@ def drain_events(scope: str | None = None) -> list[UrlEvent]:
     """Return and remove the events recorded for ``scope`` (default: active)."""
     target = scope if scope is not None else _SCOPE.get()
     with _LOCK:
+        _QUERIES.pop(target, None)
         return _EVENTS.pop(target, [])
 
 
@@ -164,6 +184,7 @@ def reset(scope: str | None = None) -> None:
     target = scope if scope is not None else _SCOPE.get()
     with _LOCK:
         _EVENTS.pop(target, None)
+        _QUERIES.pop(target, None)
 
 
 def _canonical(url: str) -> str:

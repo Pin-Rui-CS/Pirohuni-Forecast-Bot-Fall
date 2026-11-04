@@ -264,6 +264,7 @@ async def run_web_research(
         asknews_research=asknews_research,
         preset_queries=preset_queries,
     )
+    source_ledger.record_queries(queries)
     engine, hits, failures = await search_with_fallback(engines, queries, reason=reason)
     if engine is None:
         raise WebSearchFailed("; ".join(failures) or "no search engine enabled")
