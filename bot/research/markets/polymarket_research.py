@@ -30,6 +30,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from bot.llm import provider as llm_provider
 from bot.llm import clients as llm_clients
+from bot.research.markets.market_compare import compare_markets, format_comparison
 from bot.llm.cost_manager import (
     HardLimitExceededError,
 )
@@ -298,7 +299,8 @@ def _fmt_outcomes(outcomes: list[dict]) -> str:
     )
 
 
-def _format_output(input_question: str, events: list[dict], scores: list[float]) -> str:
+def _format_output(input_question: str, events: list[dict], scores: list[float],
+                   comparisons: list[dict | None] | None = None) -> str:
     lines = [
         "=" * 70,
         "POLYMARKET RESEARCH",
@@ -310,7 +312,9 @@ def _format_output(input_question: str, events: list[dict], scores: list[float])
     def _trunc_rule(rule: str, limit: int = 600) -> str:
         return rule[:limit].rstrip() + "..." if len(rule) > limit else rule
 
-    for i, (event, score) in enumerate(zip(events, scores), start=1):
+    comparisons_ran = comparisons is not None
+    comparisons = comparisons or [None] * len(events)
+    for i, (event, score, comparison) in enumerate(zip(events, scores, comparisons), start=1):
         sub_markets = event["sub_markets"]
         n_sub = len(sub_markets)
         # When an event holds several sub-markets, its volume is the SUM across
@@ -336,6 +340,8 @@ def _format_output(input_question: str, events: list[dict], scores: list[float])
         ]
         if shared_rule:
             lines.append(f"    Resolution rule (all sub-markets): {_trunc_rule(shared_rule)}")
+        if comparisons_ran:
+            lines += format_comparison(comparison)
         lines += [
             "",
             "    Active sub-markets (weight each by ITS OWN volume, not the event total):",
@@ -355,7 +361,18 @@ def _format_output(input_question: str, events: list[dict], scores: list[float])
 # Public API
 # ---------------------------------------------------------------------------
 
-def scrape_polymarket(question: str) -> str:
+def _comparison_text(event: dict) -> str:
+    """An event as the comparer reads it: title, each sub-market's price, and
+    the FULL resolution rules (the section itself shows them cut to 600 chars)."""
+    lines = [f"Polymarket event: {event['title']}"]
+    rules = list(dict.fromkeys(sm["resolution_rule"] for sm in event["sub_markets"] if sm["resolution_rule"]))
+    for sm in event["sub_markets"]:
+        lines.append(f"- {sm['label']}: {_fmt_outcomes(sm['outcomes'])}")
+    lines += [f"Resolution rule: {rule}" for rule in rules]
+    return "\n".join(lines)
+
+
+def scrape_polymarket(question: str, comparison_question: str = "") -> str:
     """
     Search Polymarket for events similar to `question`, score by relevance
     using an LLM, and return a formatted research string.
@@ -383,4 +400,7 @@ def scrape_polymarket(question: str) -> str:
             f"(threshold: {_MIN_RELEVANCE_SCORE}/10 — top candidates scored:\n{candidate_lines})"
         )
 
-    return _format_output(question, [e for e, _ in top], [s for _, s in top])
+    events = [e for e, _ in top]
+    comparisons = (compare_markets(comparison_question, [_comparison_text(e) for e in events],
+                                   "polymarket/market-comparison") if comparison_question else None)
+    return _format_output(question, events, [s for _, s in top], comparisons)

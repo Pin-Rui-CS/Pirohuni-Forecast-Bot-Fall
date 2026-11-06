@@ -187,14 +187,22 @@ async def run_research(
             on_summary=lambda text: summary_ready.done() or summary_ready.set_result(text),
         )
 
+    # What each kept market is compared against (market_compare): the question
+    # itself, criteria and fine print included, not the search text.
+    comparison_question = "\n\n".join(part for part in (
+        f"Title: {title}",
+        f"Resolution criteria:\n{resolution_criteria}" if resolution_criteria.strip() else "",
+        f"Fine print:\n{fine_print}" if fine_print.strip() else "",
+    ) if part)
+
     async def kalshi_call(market_question: str) -> str:
-        return await asyncio.to_thread(scrape_kalshi, market_question)
+        return await asyncio.to_thread(scrape_kalshi, market_question, comparison_question)
 
     async def manifold_call(market_question: str) -> str:
-        return await asyncio.to_thread(scrape_manifold, market_question)
+        return await asyncio.to_thread(scrape_manifold, market_question, comparison_question)
 
     async def polymarket_call(market_question: str) -> str:
-        return await asyncio.to_thread(scrape_polymarket, market_question)
+        return await asyncio.to_thread(scrape_polymarket, market_question, comparison_question)
 
     # Stage 1: AskNews and the resolution-source scraper start immediately.
     # The scraper is usually the slowest provider and only needs the question

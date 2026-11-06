@@ -1005,7 +1005,11 @@ Additional selection rules (these refine the rules above; where they conflict, t
 4. PRECEDENTS. If the input describes how the same event, market or series behaved in a
    prior comparable cycle, include the most relevant such precedent as an item even when it
    carries no number.
-5. MARKET BOUNDS — CHECK BOTH DIRECTIONS. For each market whose condition differs from this
+5. MARKET BOUNDS — CHECK BOTH DIRECTIONS. A market whose entry carries "How this market
+   compares to the question -> <label>" was already compared against the full resolution
+   rules: carry that label and its "Only the market counts" / "Only this question counts"
+   lines into the market bullet, and change the label only if the research contradicts one
+   of those lines (say which). For any other market whose condition differs from this
    question's, write one line of entailment before the verdict: if this question's outcome
    implies the market's event, the market price is a CEILING on that outcome's probability;
    if the market's event implies the outcome, it is a FLOOR. Example: question "Will team T
@@ -1309,7 +1313,7 @@ Omit this section entirely if you have none. Otherwise at most 3 bullets, labell
 
 ## Market Signals
 - One bullet per relevant market: question, current odds, volume/liquidity/open interest when present, URL. Real-money markets (Polymarket, Kalshi) before play-money (Manifold).
-- For every market, state in the same bullet whether its resolution condition MATCHES this question's or DIFFERS (broader/narrower/different event). A differing market is a directional floor or ceiling only — and the direction must be DERIVED BY ENTAILMENT, shown in the bullet: if the market's event requires this question's event to happen first (it sits downstream of the resolution event), its price is a FLOOR on this question; if this question's event requires the market's event, a CEILING; if neither entailment holds, write "no bound — context only". Never assert floor/ceiling without the entailment — a misassigned direction inverts how every forecaster uses the market.
+- For every market, state in the same bullet whether its resolution condition MATCHES this question's or DIFFERS (broader/narrower/different event). A differing market is a directional floor or ceiling only — and the direction must be DERIVED BY ENTAILMENT, shown in the bullet: if the market's event requires this question's event to happen first (it sits downstream of the resolution event), its price is a FLOOR on this question; if this question's event requires the market's event, a CEILING; if neither entailment holds, write "no bound — context only". Never assert floor/ceiling without the entailment — a misassigned direction inverts how every forecaster uses the market. Where the market's entry already carries "How this market compares to the question -> <label>" (Same question / Upper limit / Lower limit / Close estimate / Related only), use that label and its two difference lines instead of deriving your own: it was made from the full rules of both.
 - If no market bears directly on the question, say so in one bullet and do not pad with adjacent markets.
 
 ## Gaps And Cautions

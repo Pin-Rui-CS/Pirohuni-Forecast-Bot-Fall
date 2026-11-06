@@ -32,6 +32,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from bot.llm import provider as llm_provider
 from bot.llm import clients as llm_clients
+from bot.research.markets.market_compare import compare_markets, format_comparison
 from bot.llm.cost_manager import (
     HardLimitExceededError,
 )
@@ -392,7 +393,8 @@ def _fmt_time(value: Any) -> str:
     return str(value or "N/A")
 
 
-def _format_output(input_question: str, markets: list[dict], scores: list[float]) -> str:
+def _format_output(input_question: str, markets: list[dict], scores: list[float],
+                   comparisons: list[dict | None] | None = None) -> str:
     lines = [
         "=" * 70,
         "KALSHI RESEARCH",
@@ -401,7 +403,9 @@ def _format_output(input_question: str, markets: list[dict], scores: list[float]
         "",
         f"Found {len(markets)} relevant market(s) on Kalshi:\n",
     ]
-    for i, (market, score) in enumerate(zip(markets, scores), start=1):
+    comparisons_ran = comparisons is not None
+    comparisons = comparisons or [None] * len(markets)
+    for i, (market, score, comparison) in enumerate(zip(markets, scores, comparisons), start=1):
         lines += [
             f"[{i}] {market['title']}",
             f"    Relevance score : {score:.1f} / 10",
@@ -422,6 +426,8 @@ def _format_output(input_question: str, markets: list[dict], scores: list[float]
             lines.append(f"    Subtitle        : {market['subtitle']}")
         if market["rules"]:
             lines.append(f"    Rules           : {market['rules']}")
+        if comparisons_ran:
+            lines += format_comparison(comparison)
         lines.append("")
     lines.append("=" * 70)
     return "\n".join(lines)
@@ -431,7 +437,17 @@ def _format_output(input_question: str, markets: list[dict], scores: list[float]
 # Public API
 # ---------------------------------------------------------------------------
 
-def scrape_kalshi(question: str) -> str:
+def _comparison_text(market: dict) -> str:
+    return "\n".join(part for part in (
+        f"Kalshi market: {market['title']}",
+        f"Subtitle: {market['subtitle']}" if market["subtitle"] else "",
+        f"YES probability: {_fmt_percent(market['yes_probability'])}",
+        f"Close time: {_fmt_time(market['close_time'])}",
+        f"Rules: {market['rules']}" if market["rules"] else "Rules: not provided",
+    ) if part)
+
+
+def scrape_kalshi(question: str, comparison_question: str = "") -> str:
     """
     Search Kalshi for markets similar to `question`, score by relevance using
     an LLM, and return a formatted research string.
@@ -459,7 +475,10 @@ def scrape_kalshi(question: str) -> str:
             f"(threshold: {_MIN_RELEVANCE_SCORE}/10 - top candidates scored:\n{candidate_lines})"
         )
 
-    return _format_output(question, [m for m, _ in top], [s for _, s in top])
+    markets = [m for m, _ in top]
+    comparisons = (compare_markets(comparison_question, [_comparison_text(m) for m in markets],
+                                   "kalshi/market-comparison") if comparison_question else None)
+    return _format_output(question, markets, [s for _, s in top], comparisons)
 
 
 if __name__ == "__main__":
