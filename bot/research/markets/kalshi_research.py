@@ -48,12 +48,24 @@ logger = logging.getLogger(__name__)
 _KALSHI_SCORING_MODEL = "anthropic/claude-sonnet-5"
 
 _KALSHI_API_BASE = "https://external-api.kalshi.com/trade-api/v2"
+# Kalshi's own site search (the box on kalshi.com). Not part of the documented
+# trade API, so a failure falls back to the open-market scan below. Why it is
+# needed (2026-11-09): Kalshi lists >60,000 open markets (combos excluded) and
+# the scan reads the first 3,000, almost all sports and index brackets. It never
+# reached the market on Q46706's exact question (KXCYBERMONSPEND-26DEC01) or the
+# "Best AI at the end of 2026" / Opus 6 markets two other bots used; the search
+# returns each as its first hit.
+_KALSHI_SEARCH_URL = "https://api.elections.kalshi.com/v1/search/series"
+_SEARCH_EVENTS_PER_QUERY = 6
+_MAX_SEARCH_EVENTS = 12
+_MAX_MARKETS_PER_EVENT = 12
 _MAX_RESULTS = 3
 _FETCH_PAGE_LIMIT = 1000
 _MAX_FETCH_PAGES = 3
 _MAX_CANDIDATES_FOR_SCORING = 30
 _MIN_RELEVANCE_SCORE = 5.0
 _MAX_RULE_CHARS_FOR_SCORING = 220
+_MAX_RULE_CHARS = 1500
 
 # ---------------------------------------------------------------------------
 # Search query generation
@@ -157,6 +169,58 @@ def _fetch_open_markets() -> list[dict]:
     return markets
 
 
+def _search_event_tickers(queries: list[str]) -> list[str]:
+    """Open events Kalshi's site search returns for the queries: each query's
+    top hits in Kalshi's own order, interleaved so every query is represented.
+    Raises when no query got an answer, so the caller can fall back."""
+    per_query: list[list[str]] = []
+    answered = 0
+    for query in queries:
+        try:
+            resp = httpx.get(_KALSHI_SEARCH_URL, params={"query": query}, timeout=15)
+            resp.raise_for_status()
+            items = resp.json().get("current_page") or []
+        except Exception as exc:  # noqa: BLE001 - one query failing must not stop the rest
+            logger.info("[kalshi] site search failed for %r (%s: %s)", query, type(exc).__name__, exc)
+            continue
+        answered += 1
+        tickers = [str(item.get("event_ticker") or "") for item in items
+                   if isinstance(item, dict) and (item.get("active_market_count") or 0) > 0]
+        per_query.append([t for t in tickers if t][:_SEARCH_EVENTS_PER_QUERY])
+    if not answered:
+        raise RuntimeError("Kalshi site search answered none of the queries")
+    ordered: list[str] = []
+    for rank in range(_SEARCH_EVENTS_PER_QUERY):
+        for tickers in per_query:
+            if rank < len(tickers) and tickers[rank] not in ordered:
+                ordered.append(tickers[rank])
+    return ordered[:_MAX_SEARCH_EVENTS]
+
+
+def _fetch_event_markets(event_ticker: str) -> list[dict]:
+    """An event's open markets from the documented API (with rules and volume)."""
+    resp = httpx.get(
+        f"{_KALSHI_API_BASE}/markets",
+        params={"event_ticker": event_ticker, "status": "open", "limit": 100},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    markets = resp.json().get("markets") or []
+    return [m for m in markets if isinstance(m, dict)][:_MAX_MARKETS_PER_EVENT]
+
+
+def _searched_markets(queries: list[str]) -> list[dict]:
+    """Markets of the events the site search found, best events first.
+    Raises when the search itself is unavailable."""
+    markets: list[dict] = []
+    for event_ticker in _search_event_tickers(queries):
+        try:
+            markets.extend(_fetch_event_markets(event_ticker))
+        except Exception as exc:  # noqa: BLE001
+            logger.info("[kalshi] markets for %s unavailable (%s: %s)", event_ticker, type(exc).__name__, exc)
+    return markets
+
+
 def _candidate_text(raw: dict) -> str:
     pieces = [
         raw.get("ticker"),
@@ -214,9 +278,22 @@ def _local_match_score(raw: dict, queries: list[str], question: str) -> float:
     return score
 
 
-def _search_markets(question: str) -> list[dict]:
+def _search_markets(question: str) -> tuple[list[dict], list[dict]]:
+    """(candidates for relevance scoring, every market fetched). The second
+    list fills in each chosen event's other outcomes (_event_line)."""
     queries = _generate_search_queries(question)
-    markets = _fetch_open_markets()
+    # Kalshi's ranking is kept as a bonus: its first hits outrank later events
+    # whose titles merely share more words with the question.
+    event_rank: dict[str, int] = {}
+    try:
+        markets = _searched_markets(queries)
+        for market in markets:
+            event_rank.setdefault(str(market.get("event_ticker") or ""), len(event_rank))
+        logger.info("[kalshi] site search: %d events, %d markets", len(event_rank), len(markets))
+    except Exception as exc:  # noqa: BLE001 - the undocumented search must never cost the provider
+        logger.warning("[kalshi] site search unavailable (%s: %s); scanning open markets instead",
+                       type(exc).__name__, exc)
+        markets = _fetch_open_markets()
 
     seen_tickers: set[str] = set()
     scored: list[tuple[float, dict]] = []
@@ -226,11 +303,14 @@ def _search_markets(question: str) -> list[dict]:
             continue
         seen_tickers.add(ticker)
         score = _local_match_score(market, queries, question)
+        rank = event_rank.get(str(market.get("event_ticker") or ""))
+        if rank is not None:
+            score += 4.0 * (1 - rank / _MAX_SEARCH_EVENTS)
         if score > 0:
             scored.append((score, market))
 
     scored.sort(key=lambda pair: pair[0], reverse=True)
-    return [market for _, market in scored[:_MAX_CANDIDATES_FOR_SCORING]]
+    return [market for _, market in scored[:_MAX_CANDIDATES_FOR_SCORING]], markets
 
 
 # ---------------------------------------------------------------------------
@@ -272,14 +352,6 @@ def _yes_probability(raw: dict) -> tuple[float | None, str]:
     return None, "unavailable"
 
 
-def _first_nonempty(raw: dict, fields: tuple[str, ...]) -> str:
-    for field in fields:
-        value = str(raw.get(field) or "").strip()
-        if value:
-            return value
-    return ""
-
-
 def _parse_market(raw: dict) -> dict | None:
     ticker = str(raw.get("ticker") or "").strip()
     title = str(raw.get("title") or "").strip()
@@ -289,13 +361,21 @@ def _parse_market(raw: dict) -> dict | None:
     yes_probability, probability_source = _yes_probability(raw)
     api_url = f"{_KALSHI_API_BASE}/markets/{ticker}"
     web_url = f"https://kalshi.com/markets/{ticker}"
-    rules = _first_nonempty(raw, ("rules_primary", "rules_secondary"))
+    # Both parts: the secondary rules name the source and which report counts
+    # (Q46706: "the first official Adobe Analytics report"). With the primary
+    # alone, the comparison could not tell the market settles on the
+    # question's own source and called it "Related only".
+    rules = "\n".join(_unique_nonempty([
+        re.sub(r"\s+", " ", str(raw.get(field) or "")) for field in ("rules_primary", "rules_secondary")
+    ]))[:_MAX_RULE_CHARS]
 
     return {
         "ticker": ticker,
         "event_ticker": str(raw.get("event_ticker") or "").strip(),
         "title": title,
         "subtitle": str(raw.get("subtitle") or "").strip(),
+        "outcome": str(raw.get("yes_sub_title") or "").strip(),
+        "strike": _parse_price(raw.get("floor_strike")),
         "web_url": web_url,
         "api_url": api_url,
         "yes_probability": yes_probability,
@@ -393,8 +473,24 @@ def _fmt_time(value: Any) -> str:
     return str(value or "N/A")
 
 
+def _event_line(market: dict, pool: list[dict]) -> str:
+    """Every open outcome of the market's event, one line, ladder order:
+    "Above $14.5B 86.0% | Above $15.0B 66.5% | ..." Empty when the event
+    has a single market. A threshold ladder read as one distribution says
+    more than its three highest-scored rungs (Q46706 showed $15.5B and
+    $17.0B and dropped $14.5B and $15.0B)."""
+    siblings = [m for m in pool if m["event_ticker"] and m["event_ticker"] == market["event_ticker"]]
+    if len(siblings) < 2:
+        return ""
+    if all(m["strike"] is not None for m in siblings):
+        siblings.sort(key=lambda m: m["strike"])
+    parts = [f"{m['outcome'] or m['title']} {_fmt_percent(m['yes_probability'])}" for m in siblings]
+    return " | ".join(parts)
+
+
 def _format_output(input_question: str, markets: list[dict], scores: list[float],
-                   comparisons: list[dict | None] | None = None) -> str:
+                   comparisons: list[dict | None] | None = None,
+                   pool: list[dict] | None = None) -> str:
     lines = [
         "=" * 70,
         "KALSHI RESEARCH",
@@ -424,6 +520,9 @@ def _format_output(input_question: str, markets: list[dict], scores: list[float]
         ]
         if market["subtitle"]:
             lines.append(f"    Subtitle        : {market['subtitle']}")
+        event_line = _event_line(market, pool or [])
+        if event_line:
+            lines.append(f"    All outcomes in this event (YES probability): {event_line}")
         if market["rules"]:
             lines.append(f"    Rules           : {market['rules']}")
         if comparisons_ran:
@@ -454,17 +553,28 @@ def scrape_kalshi(question: str, comparison_question: str = "") -> str:
 
     Synchronous - call via asyncio.to_thread() from async contexts.
     """
-    raw_markets = _search_markets(question)
+    raw_markets, raw_pool = _search_markets(question)
     if not raw_markets:
         return f'No Kalshi markets results found for: "{question}"'
 
     parsed = [m for raw in raw_markets if (m := _parse_market(raw))]
     if not parsed:
         return f'No active Kalshi markets found for: "{question}"'
+    pool = [m for raw in raw_pool if (m := _parse_market(raw))]
 
     scores = _score_markets(question, parsed)
     ranked = sorted(zip(parsed, scores), key=lambda x: x[1], reverse=True)
-    top = [(m, s) for m, s in ranked if s >= _MIN_RELEVANCE_SCORE][:_MAX_RESULTS]
+    # One entry per event: its other outcomes go on the entry's event line,
+    # so three rungs of one ladder no longer crowd out every other event.
+    top: list[tuple[dict, float]] = []
+    events_taken: set[str] = set()
+    for market, score in ranked:
+        if score < _MIN_RELEVANCE_SCORE or len(top) >= _MAX_RESULTS:
+            break
+        event = market["event_ticker"] or market["ticker"]
+        if event not in events_taken:
+            events_taken.add(event)
+            top.append((market, score))
 
     if not top:
         candidate_lines = "\n".join(
@@ -478,7 +588,7 @@ def scrape_kalshi(question: str, comparison_question: str = "") -> str:
     markets = [m for m, _ in top]
     comparisons = (compare_markets(comparison_question, [_comparison_text(m) for m in markets],
                                    "kalshi/market-comparison") if comparison_question else None)
-    return _format_output(question, markets, [s for _, s in top], comparisons)
+    return _format_output(question, markets, [s for _, s in top], comparisons, pool)
 
 
 if __name__ == "__main__":

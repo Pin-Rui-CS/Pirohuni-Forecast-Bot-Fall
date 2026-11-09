@@ -52,11 +52,14 @@ _ARTIFACT_CHECK_PRIORITY_WEIGHTS = (3.0, 2.0, 1.5, 1.0)
 # other caller of fit_artifact_check_sections still ranks it above bulk research.
 _PRIORITY_EVIDENCE_PLAN = 2
 _MAX_RETRY_QUERIES = 4  # per retry plan
-# Pooling retry plans across SoCLaaS models: each plan's top two, taken in turn,
-# near-duplicates merged, at most eight searches. Measured 2026-11-04 on three
-# saved questions: 7, 8 and 4 searches, each pool holding the decisive query.
+# Pooling retry plans across SoCLaaS models: every plan's 1st pick, then every
+# 2nd, and so on through each plan's whole list, near-duplicates merged, at most
+# eight searches. Measured 2026-11-04 on three saved questions: 7, 8 and 4
+# searches, each pool holding the decisive query. Until 2026-11-09 only each
+# plan's top two were read, so on Q46579 two duplicates left the pool at 6 while
+# other 3rd picks went unread.
 _MAX_POOLED_RETRY_QUERIES = 8
-_POOL_TOP_PER_PLAN = 2
+_POOL_TOP_PER_PLAN = _MAX_RETRY_QUERIES
 _POOL_OVERLAP = 0.6
 _PLANNER_LABEL = "artifact-check/planner"
 # Soft-stop gates against the question's reserved compile/forecast token tail
@@ -1417,10 +1420,11 @@ def same_query(a: str, b: str) -> bool:
 def pool_retry_queries(plans: list[list[str]], already_run: list[str] = (),
                        cap: int = _MAX_POOLED_RETRY_QUERIES, top: int = _POOL_TOP_PER_PLAN) -> list[str]:
     """One retry list from several models' plans: every plan's 1st query,
-    then every plan's 2nd, skipping near-duplicates of a kept query or of a
-    search already run. The decisive query is often a model's 2nd pick and
-    proposed by one model only, so no plan's top two are dropped for
-    agreement or order before the cap."""
+    then every plan's 2nd, and so on, skipping near-duplicates of a kept query
+    or of a search already run, until ``cap``. The decisive query is often a
+    model's 2nd pick and proposed by one model only, so every plan's top picks
+    come before any plan's later ones; the later picks fill slots that
+    duplicates left empty."""
     kept: list[str] = []
     for rank in range(top):
         for plan in plans:
