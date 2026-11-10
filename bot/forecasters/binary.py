@@ -15,7 +15,7 @@ from bot.forecasters.base import (
     run_weights,
     short_model_name,
 )
-from bot.llm.client import call_llm
+from bot.llm.client import ResponseTruncatedError, call_llm
 
 logger = logging.getLogger(__name__)
 
@@ -360,23 +360,39 @@ async def get_binary_gpt_prediction(
             prob_spread,
             probabilities,
         )
-        final_rationale = await call_llm(
-            tiebreaker_prompt,
-            model=FORECASTER_TIEBREAKER_MODEL,
-            _label="binary-tiebreaker",
-            cache_static_prefix=True,
-            max_tokens=FORECAST_MAX_OUTPUT_TOKENS,
-            deliberate=True,
-        )
-        final_probability = extract_probability_from_response_as_percentage_not_decimal(
-            final_rationale
-        )
-        median_probability = float(final_probability) / 100
-        tiebreaker_header = (
-            f"HIGH VARIANCE DETECTED (spread: {prob_spread:.0f}pp, all values: {probabilities})\n"
-            f"Tiebreaker LLM used. Final Probability: {median_probability}\n\n"
-            f"Tiebreaker Rationale:\n{final_rationale}\n\n"
-        )
+        try:
+            final_rationale = await call_llm(
+                tiebreaker_prompt,
+                model=FORECASTER_TIEBREAKER_MODEL,
+                _label="binary-tiebreaker",
+                cache_static_prefix=True,
+                max_tokens=FORECAST_MAX_OUTPUT_TOKENS,
+                deliberate=True,
+                # A cut-off tiebreaker has no final "Probability:" line; its
+                # last percentage would come from the unfinished reasoning.
+                raise_on_truncation=True,
+            )
+        except ResponseTruncatedError as exc:
+            logger.warning("[TIEBREAKER] answer cut off (%s); using the weighted mean instead.", exc)
+            final_rationale = None
+        if final_rationale is not None:
+            final_probability = extract_probability_from_response_as_percentage_not_decimal(
+                final_rationale
+            )
+            median_probability = float(final_probability) / 100
+            tiebreaker_header = (
+                f"HIGH VARIANCE DETECTED (spread: {prob_spread:.0f}pp, all values: {probabilities})\n"
+                f"Tiebreaker LLM used. Final Probability: {median_probability}\n\n"
+                f"Tiebreaker Rationale:\n{final_rationale}\n\n"
+            )
+        else:
+            tiebreaker_used = False  # recorded as not used: its answer was discarded
+            median_probability = float(np.dot(weights, probabilities)) / 100
+            tiebreaker_header = (
+                f"HIGH VARIANCE DETECTED (spread: {prob_spread:.0f}pp, all values: {probabilities})\n"
+                "Tiebreaker answer was cut off at the length limit; "
+                f"Weighted Mean Probability used instead: {median_probability}\n\n"
+            )
         final_comment = tiebreaker_header + "\n\n".join(final_comment_sections)
     else:
         # A weighted MEAN, not a median: with Opus at half the weight a

@@ -34,7 +34,16 @@ _MAX_PROVIDER_CHARS = 24_000
 # per-provider cut silently discarded all of the YES-leaning evidence, which
 # sat deep in the search-snippet dump, and the compiler built a one-sided
 # brief from what was left.
-_COMPILER_INPUT_BUDGET_CHARS = 120_000
+#
+# Raised 120k -> 400k on 2026-11-10. 120k was sized for the paid Opus brief
+# writer; the writer is now DeepSeek on SoCLaaS (free, 1M-token context).
+# At 120k, 38 of 40 recent questions were over budget (median 197k in) and lost
+# ~41%, half of it as a plain tail cut, because precompression barely shrinks
+# text. Replaying 8 of them (eval_tools/compiler_budget_test.py, labelled facts):
+# with nothing compressed, silent drops of the facts 120k lost fell 73% -> 33%,
+# facts 120k kept were unaffected (24% -> 23%), briefs grew ~22k -> ~28k chars,
+# and no brief hit the output cap. Compression now only runs above 400k.
+_COMPILER_INPUT_BUDGET_CHARS = 400_000
 # Output cap for the brief. Was a hard-coded 6000, which 44875 hit exactly —
 # the brief died mid-token and the failure was invisible because the only
 # check was `if not content.strip()`. Output is the minority of this call's
@@ -1313,7 +1322,7 @@ Omit this section entirely if you have none. Otherwise at most 3 bullets, labell
 
 ## Market Signals
 - One bullet per relevant market: question, current odds, volume/liquidity/open interest when present, URL. Real-money markets (Polymarket, Kalshi) before play-money (Manifold).
-- For every market, state in the same bullet whether its resolution condition MATCHES this question's or DIFFERS (broader/narrower/different event). A differing market is a directional floor or ceiling only — and the direction must be DERIVED BY ENTAILMENT, shown in the bullet: if the market's event requires this question's event to happen first (it sits downstream of the resolution event), its price is a FLOOR on this question; if this question's event requires the market's event, a CEILING; if neither entailment holds, write "no bound — context only". Never assert floor/ceiling without the entailment — a misassigned direction inverts how every forecaster uses the market. Where the market's entry already carries "How this market compares to the question -> <label>" (Same question / Upper limit / Lower limit / Close estimate / Related only), use that label and its two difference lines instead of deriving your own: it was made from the full rules of both.
+- For every market, state in the same bullet whether its resolution condition MATCHES this question's or DIFFERS (broader/narrower/different event). A differing market is a directional floor or ceiling only — and the direction must be DERIVED BY ENTAILMENT, shown in the bullet: if the market's event requires this question's event to happen first (it sits downstream of the resolution event), its price is a FLOOR on this question; if this question's event requires the market's event, a CEILING; if neither entailment holds, write "no bound — context only". Never assert floor/ceiling without the entailment — a misassigned direction inverts how every forecaster uses the market. Where the market's entry already carries "How this market compares to the question -> <label>" (Same question / Upper limit / Lower limit / Close estimate / Related only), use that label and its two difference lines instead of deriving your own: it was made from the full rules of both. For a numeric question the label is "Same quantity" or "Related quantity" with one "Measured differently" line: copy the label, the market's full threshold ladder and any market-implied median verbatim, and never call a threshold price a floor or ceiling.
 - If no market bears directly on the question, say so in one bullet and do not pad with adjacent markets.
 
 ## Gaps And Cautions

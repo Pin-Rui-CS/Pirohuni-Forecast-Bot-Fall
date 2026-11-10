@@ -198,14 +198,16 @@ async def run_research(
         f"Fine print:\n{fine_print}" if fine_print.strip() else "",
     ) if part)
 
+    # The question type picks the comparison: yes/no labels, or for a numeric
+    # question "Same quantity" / "Related quantity" (market_compare).
     async def kalshi_call(market_question: str) -> str:
-        return await asyncio.to_thread(scrape_kalshi, market_question, comparison_question)
+        return await asyncio.to_thread(scrape_kalshi, market_question, comparison_question, question_type)
 
     async def manifold_call(market_question: str) -> str:
-        return await asyncio.to_thread(scrape_manifold, market_question, comparison_question)
+        return await asyncio.to_thread(scrape_manifold, market_question, comparison_question, question_type)
 
     async def polymarket_call(market_question: str) -> str:
-        return await asyncio.to_thread(scrape_polymarket, market_question, comparison_question)
+        return await asyncio.to_thread(scrape_polymarket, market_question, comparison_question, question_type)
 
     # Stage 1: AskNews and the resolution-source scraper start immediately.
     # The scraper is usually the slowest provider and only needs the question

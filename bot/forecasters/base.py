@@ -230,6 +230,12 @@ async def gather_forecast_runs(
             return_transcript=True,
             max_tokens=FORECAST_MAX_OUTPUT_TOKENS,
             deliberate=True,
+            # An answer cut off at the cap never reached its final numbers,
+            # but the parsers read numbers from the unfinished reasoning as if
+            # they were the answer: Q46579 (2026-11-08) Sonnet stopped at 20k
+            # and was read as Cyan 42% / Yellow 42%. Raising makes it a failed
+            # call: the run is redone on the backup model, or dropped.
+            raise_on_truncation=True,
         )
 
     def _short_error(exc: Exception) -> str:

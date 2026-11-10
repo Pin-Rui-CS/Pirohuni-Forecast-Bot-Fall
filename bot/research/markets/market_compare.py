@@ -43,13 +43,28 @@ MAX_QUESTION_CHARS = 4_000
 
 SAME, UPPER, LOWER, CLOSE, RELATED = (
     "Same question", "Upper limit", "Lower limit", "Close estimate", "Related only")
+# Numeric and discrete questions ask "how much", not "will it": there is no
+# single chance for a market price to cap or floor. On Q46706 (2026-11-09) a
+# Kalshi "above $15.5B" rung was labelled Upper limit. These questions get
+# their own comparison: does the market measure the same quantity?
+SAME_QTY, RELATED_QTY = "Same quantity", "Related quantity"
 _GUIDANCE = {
     SAME: "use the price directly",
     UPPER: "this question's chance is at most the market price",
     LOWER: "this question's chance is at least the market price",
     CLOSE: "a good starting point; adjust for the differences listed",
     RELATED: "context only; no limit",
+    SAME_QTY: "its prices are points on this question's distribution; adjust for the differences listed",
+    RELATED_QTY: "a different quantity; context only",
 }
+NUMERIC_TYPES = frozenset({"numeric", "discrete", "date"})
+
+
+def quantity_verdict(differences: list[dict]) -> str:
+    """Numeric questions: any large difference in what is measured -> a related
+    quantity. An unparseable size counts as large (the cautious side)."""
+    sizes = {str(d.get("size", "")).strip().lower() for d in differences}
+    return SAME_QTY if sizes <= {"small"} else RELATED_QTY
 
 
 def verdict(only_market: list[dict], only_question: list[dict]) -> str:
@@ -107,16 +122,45 @@ Return only JSON, one object per market in order:
    "only_question": [{{"text": "...", "size": "large"}}], "both": "..."}}]"""
 
 
-def compare_markets(question: str, markets: list[str], label: str) -> list[dict | None]:
+def _quantity_prompt(question: str, markets: list[str]) -> str:
+    today = datetime.date.today().isoformat()
+    numbered = "\n\n".join(f"MARKET {i + 1}:\n{text[:MAX_MARKET_TEXT_CHARS]}" for i, text in enumerate(markets))
+    return f"""This forecasting question asks for a NUMBER (how much, how many, or when). Compare
+each prediction market below with it: does the market measure the same quantity?
+
+FORECASTING QUESTION (title, resolution criteria, fine print):
+{question[:MAX_QUESTION_CHARS]}
+
+{numbered}
+
+A market often bets on one threshold of the quantity ("above X"); that is not a difference.
+List, in plain words specific to this case:
+- differences: ways the market's number is NOT the question's number. Check what is
+  measured and its definition, the source that decides, the date or window, units, and
+  rounding or which report counts (first vs revised).
+- both: one line on what they share.
+Today is {today}. Tag each difference by how much it would realistically move the number
+in this case, not by whether it is possible in principle: "small" (barely) or "large".
+An empty list means nothing. Do not estimate values or probabilities.
+
+Return only JSON, one object per market in order:
+[{{"market": 1, "differences": [{{"text": "...", "size": "small"}}], "both": "..."}}]"""
+
+
+def compare_markets(question: str, markets: list[str], label: str,
+                    question_type: str = "") -> list[dict | None]:
     """One comparison per market text (same order), or None for any market the
     call could not cover. Never raises: a failed comparison only leaves the
-    markets section as it was."""
+    markets section as it was. A numeric/discrete/date question gets the
+    quantity comparison (SAME_QTY / RELATED_QTY) instead of the yes/no one."""
     if not markets or not question.strip():
         return [None] * len(markets)
+    numeric = question_type.strip().lower() in NUMERIC_TYPES
+    prompt = _quantity_prompt(question, markets) if numeric else _prompt(question, markets)
     try:
         response = llm_clients.sync_chat(
             label, COMPARISON_MODEL,
-            {"messages": [{"role": "user", "content": _prompt(question, markets)}], "temperature": 0})
+            {"messages": [{"role": "user", "content": prompt}], "temperature": 0})
         content = (response.choices[0].message.content or "").strip()
         match = re.search(r"\[.*\]", content, re.S)
         rows = json.loads(match.group()) if match else []
@@ -130,6 +174,11 @@ def compare_markets(question: str, markets: list[str], label: str) -> list[dict 
         index = row.get("market")
         index = int(index) - 1 if isinstance(index, (int, float)) or str(index).isdigit() else position
         if not 0 <= index < len(markets):
+            continue
+        if numeric:
+            differences = _clean_items(row.get("differences"))
+            out[index] = {"verdict": quantity_verdict(differences), "differences": differences,
+                          "both": str(row.get("both", "")).strip()}
             continue
         only_market, only_question = _clean_items(row.get("only_market")), _clean_items(row.get("only_question"))
         out[index] = {"verdict": verdict(only_market, only_question), "only_market": only_market,
@@ -148,11 +197,14 @@ def format_comparison(comparison: dict | None, indent: str = "    ") -> list[str
         return "; ".join(f"{e['text']} ({e['size'] or 'size not stated'})" for e in entries)
 
     v = comparison["verdict"]
-    lines = [
-        f"{indent}How this market compares to the question -> {v} ({_GUIDANCE[v]})",
-        f"{indent}  Only the market counts: {items(comparison['only_market'])}",
-        f"{indent}  Only this question counts: {items(comparison['only_question'])}",
-    ]
+    lines = [f"{indent}How this market compares to the question -> {v} ({_GUIDANCE[v]})"]
+    if "differences" in comparison:
+        lines.append(f"{indent}  Measured differently: {items(comparison['differences'])}")
+    else:
+        lines += [
+            f"{indent}  Only the market counts: {items(comparison['only_market'])}",
+            f"{indent}  Only this question counts: {items(comparison['only_question'])}",
+        ]
     if comparison.get("both"):
         lines.append(f"{indent}  Both: {comparison['both']}")
     return lines

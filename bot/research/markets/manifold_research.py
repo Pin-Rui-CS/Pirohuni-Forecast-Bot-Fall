@@ -343,7 +343,7 @@ def _comparison_text(market: dict) -> str:
     ])
 
 
-def scrape_manifold(question: str, comparison_question: str = "") -> str:
+def scrape_manifold(question: str, comparison_question: str = "", question_type: str = "") -> str:
     """
     Search Manifold Markets for markets similar to `question`, score by relevance
     using an LLM, and return a formatted research string.
@@ -373,7 +373,8 @@ def scrape_manifold(question: str, comparison_question: str = "") -> str:
 
     markets = [m for m, _ in top]
     comparisons = (compare_markets(comparison_question, [_comparison_text(m) for m in markets],
-                                   "manifold/market-comparison") if comparison_question else None)
+                                   "manifold/market-comparison", question_type)
+                   if comparison_question else None)
     return _format_output(question, markets, [s for _, s in top], comparisons)
 
 

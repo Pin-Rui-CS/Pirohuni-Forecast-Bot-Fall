@@ -372,7 +372,7 @@ def _comparison_text(event: dict) -> str:
     return "\n".join(lines)
 
 
-def scrape_polymarket(question: str, comparison_question: str = "") -> str:
+def scrape_polymarket(question: str, comparison_question: str = "", question_type: str = "") -> str:
     """
     Search Polymarket for events similar to `question`, score by relevance
     using an LLM, and return a formatted research string.
@@ -402,5 +402,6 @@ def scrape_polymarket(question: str, comparison_question: str = "") -> str:
 
     events = [e for e, _ in top]
     comparisons = (compare_markets(comparison_question, [_comparison_text(e) for e in events],
-                                   "polymarket/market-comparison") if comparison_question else None)
+                                   "polymarket/market-comparison", question_type)
+                   if comparison_question else None)
     return _format_output(question, events, [s for _, s in top], comparisons)

@@ -376,6 +376,7 @@ def _parse_market(raw: dict) -> dict | None:
         "subtitle": str(raw.get("subtitle") or "").strip(),
         "outcome": str(raw.get("yes_sub_title") or "").strip(),
         "strike": _parse_price(raw.get("floor_strike")),
+        "strike_type": str(raw.get("strike_type") or "").strip().lower(),
         "web_url": web_url,
         "api_url": api_url,
         "yes_probability": yes_probability,
@@ -485,7 +486,29 @@ def _event_line(market: dict, pool: list[dict]) -> str:
     if all(m["strike"] is not None for m in siblings):
         siblings.sort(key=lambda m: m["strike"])
     parts = [f"{m['outcome'] or m['title']} {_fmt_percent(m['yes_probability'])}" for m in siblings]
-    return " | ".join(parts)
+    line = " | ".join(parts)
+    median = _implied_median(siblings)
+    return f"{line} -> market-implied median ≈ {median}" if median else line
+
+
+def _implied_median(siblings: list[dict]) -> str:
+    """Where an "above X" ladder crosses 50%, interpolated between the two
+    rungs either side, e.g. 66.5% above 15.0 and 36% above 15.5 -> ~15.27.
+    Empty unless every rung is a "greater" strike with a price; a ladder that
+    never crosses 50% gives a bound ("above 17" / "below 13")."""
+    if len(siblings) < 3 or not all(m["strike_type"] in {"greater", "greater_or_equal"}
+                                    and m["strike"] is not None and m["yes_probability"] is not None
+                                    for m in siblings):
+        return ""
+    rungs = sorted((m["strike"], m["yes_probability"]) for m in siblings)
+    if rungs[0][1] < 50:
+        return f"below {rungs[0][0]:g}"
+    if rungs[-1][1] >= 50:
+        return f"above {rungs[-1][0]:g}"
+    for (lo, p_lo), (hi, p_hi) in zip(rungs, rungs[1:]):
+        if p_lo >= 50 > p_hi:
+            return f"{lo + (hi - lo) * (p_lo - 50) / (p_lo - p_hi):.4g}"
+    return ""  # not monotone: no single crossing to report
 
 
 def _format_output(input_question: str, markets: list[dict], scores: list[float],
@@ -546,7 +569,7 @@ def _comparison_text(market: dict) -> str:
     ) if part)
 
 
-def scrape_kalshi(question: str, comparison_question: str = "") -> str:
+def scrape_kalshi(question: str, comparison_question: str = "", question_type: str = "") -> str:
     """
     Search Kalshi for markets similar to `question`, score by relevance using
     an LLM, and return a formatted research string.
@@ -587,7 +610,8 @@ def scrape_kalshi(question: str, comparison_question: str = "") -> str:
 
     markets = [m for m, _ in top]
     comparisons = (compare_markets(comparison_question, [_comparison_text(m) for m in markets],
-                                   "kalshi/market-comparison") if comparison_question else None)
+                                   "kalshi/market-comparison", question_type)
+                   if comparison_question else None)
     return _format_output(question, markets, [s for _, s in top], comparisons, pool)
 
 
