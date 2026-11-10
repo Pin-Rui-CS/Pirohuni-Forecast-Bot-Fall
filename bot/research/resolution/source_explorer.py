@@ -77,6 +77,8 @@ DATA_SUFFIXES = (".csv", ".tsv", ".txt", ".json")
 # Same-site links listed per fetched page, so the model follows real addresses
 # instead of guessing them (2026-10-24: 5 of 8 turns went on guessed 404s).
 MAX_LINKS_PER_PAGE = 40
+MAX_FIND_HITS = 15
+FIND_CONTEXT = 200
 _HREF = re.compile(r'href="([^"#]+)', re.IGNORECASE)
 _ABS_URL = re.compile(r"https?://[^\s\"'<>\\)]+")
 _ASSET = re.compile(r"(/_next/|/static/|\.(?:js|css|png|jpe?g|svg|gif|ico|woff2?|map|webp)(?:\?|$))",
@@ -103,6 +105,55 @@ def enabled() -> bool:
 def _host(url: str) -> str:
     host = (urlsplit(url).hostname or "").lower()
     return host[4:] if host.startswith("www.") else host
+
+
+# Sites a page's code may name that never hold the page's data: analytics,
+# ads, social embeds, fonts, script CDNs, schema namespaces.
+_NOT_DATA_HOSTS = (
+    "google-analytics.com", "googletagmanager.com", "doubleclick.net", "googlesyndication.com",
+    "google.com", "googleapis.com", "gstatic.com", "facebook.com", "facebook.net", "twitter.com",
+    "x.com", "instagram.com", "youtube.com", "linkedin.com", "tiktok.com", "pinterest.com",
+    "hotjar.com", "sentry.io", "cloudflare.com", "cloudflareinsights.com", "jsdelivr.net", "unpkg.com",
+    "w3.org", "schema.org", "gravatar.com", "wp.com", "wordpress.org", "addtoany.com", "recaptcha.net",
+)
+_SETTING = re.compile(
+    # The suffix must follow a lower-case letter or digit (camelCase), so
+    # constants like HYBRID or ANDROID are not read as ids.
+    r"""\b([A-Za-z_$][\w$]*[a-z0-9](?:Url|URL|Uri|URI|Id|ID|Endpoint|Path|Base|Host))\s*[:=]\s*("[^"\n]{1,160}"|'[^'\n]{1,160}'|\d{1,15})""")
+_API_HINT = re.compile(r"/api\b|/v\d+/|\.json\b|geojson|graphql|/data\b|/feeds?\b", re.IGNORECASE)
+_SECRET = re.compile(r"key|secret|token|passw|auth|credential", re.IGNORECASE)
+_TEMPLATE = re.compile(r"`([^`\n]{0,160}\$\{[^`\n]{0,200})`")
+MAX_CODE_POINTERS = 25
+
+
+def _data_host(host: str) -> bool:
+    return bool(host) and not any(host == h or host.endswith("." + h) for h in _NOT_DATA_HOSTS)
+
+
+def code_pointers(page: str, site_hosts: set[str]) -> tuple[list[str], list[str], list[str]]:
+    """(addresses on OTHER sites, settings, address templates) a page's code
+    names. A map or tracker page often draws its data from another site's API
+    at run time: on 2026-11-08 (Q46580) OCEARCH's tracker named
+    baseApiUrl "https://www.mapotic.com/api/v1/", ocearchMapoticMapId 3413 and
+    `${this.mapsApiUrl}${x}/pois/${D}/motion/with-meta/` inside a 2 MB script,
+    and the shark's latest ping sat behind them. Settings that look like keys
+    or passwords are never shown."""
+    unescaped = page.replace('\\"', '"').replace("\\/", "/")
+    external = []
+    for url in _ABS_URL.findall(unescaped):
+        url = url.rstrip(".,;'\"`")
+        host = _host(url)
+        if host and host not in site_hosts and _data_host(host) and not _ASSET.search(url):
+            external.append(url)
+    settings = [f"{name}: {value}" for name, value in _SETTING.findall(unescaped)
+                if not _SECRET.search(name)]
+    templates = [t for t in _TEMPLATE.findall(unescaped) if "/" in t]
+    # Data addresses first: a page's code also names sponsors, app stores, video.
+    external = sorted(dict.fromkeys(external), key=lambda u: not _API_HINT.search(u))
+    settings.sort(key=lambda s: "http" not in s and not s.split(": ", 1)[1].isdigit())
+    return (external[:MAX_CODE_POINTERS],
+            list(dict.fromkeys(settings))[:MAX_CODE_POINTERS],
+            list(dict.fromkeys(templates))[:MAX_CODE_POINTERS])
 
 
 def start_points(resolution_urls: list[str]) -> tuple[list[str], set[str]]:
@@ -159,8 +210,11 @@ a text scraper never sees it. Your tools read all three:
 Reply with exactly ONE JSON object per turn, nothing else:
 
   {{"action": "fetch", "urls": ["...", ...], "columns": ["optional", "column", "names"]}}
-      Fetches up to {MAX_URLS_PER_FETCH} pages or documents (hosts: {', '.join(sorted(hosts))};
-      {MAX_PAGES} in total). For each page you get a short visible-text excerpt, its full text
+      Fetches up to {MAX_URLS_PER_FETCH} pages or documents ({MAX_PAGES} in total) from the source's sites
+      ({', '.join(sorted(hosts))}) and from any other site their pages' code calls -- a map or
+      tracker page often loads its data from another site's API (JSON) after the page opens; such a
+      page lists those addresses, the settings in its code (base addresses, ids) and its address
+      templates. For each page you get a short visible-text excerpt, its full text
       length, and a summary of every data table embedded in its source: rows, columns, value
       counts, first and last rows. Rows dated after today are marked FUTURE (the source's own
       forecast or schedule). Tables are named P<page>.T<n>. Each page also lists the same-site
@@ -178,6 +232,11 @@ Reply with exactly ONE JSON object per turn, nothing else:
       The visible text is made by code and can lose things: use this when it looks incomplete --
       leftover markup, dates or values you expected are missing, or far fewer characters of text
       than the page has bytes. Not available for documents (PDF, Word, Excel).
+  {{"action": "find", "url": "...", "word": "..."}}
+      Every place a word occurs in a page's raw source (a document's text), with
+      {FIND_CONTEXT} characters either side. Use it on large pages and scripts (a site's .js file can be
+      millions of characters) to find an API address, an id or a field name instead of paging
+      through "source".
   {{"action": "rows", "table": "P1.T2", "contains": "optional word"}}
       Every row of one table (of a very long one, its most recent rows). With "contains", only
       the rows holding that word (any case) and how many there are -- use it to check whether
@@ -189,9 +248,10 @@ You have at most {MAX_TURNS} turns. Work out where the resolution value is read 
 field, or a sentence or figure in a page or document), find its most recent value, and anything
 the source says about where it is heading by the resolution date (history, its own forecasts). Fetch addresses from the start list, the links
 pages list, or a pattern those addresses follow (e.g. one region page's address with another
-region's id); do not guess site maps or page names. When you fill in a pattern, take each part
-from an address you have seen or from a table field that holds the same value (an id or key
-column whose values match the ones in seen addresses) -- never from a row's position in a table.
+region's id), or a template in the site's code; do not guess site maps or page names. When you
+fill in a pattern, take each part from an address you have seen, from a setting in the site's
+code, or from a table field that holds the same value (an id or key column whose values match the
+ones in seen addresses) -- never from a row's position in a table.
 If an address you built fails, fetch a page that links to it and use the link as listed.
 A date, time or slot belongs to an item only if the item's own text or field states it. Never
 infer it from the order of items, from navigation or date-picker links, or from the page's other
@@ -214,7 +274,11 @@ the forecasters do that. Include:
 
 class _Pages:
     def __init__(self, hosts: set[str]):
-        self.hosts = hosts
+        # The resolution source's own sites. ``hosts`` (what may be fetched)
+        # grows by the sites their pages' code calls -- one step only: a page
+        # on such a site never adds further sites.
+        self.site_hosts = set(hosts)
+        self.hosts = set(hosts)
         self.tables: dict[str, Table] = {}
         self.fetched: list[str] = []
         self.links_shown: set[str] = set()
@@ -310,6 +374,18 @@ class _Pages:
                 more = f", first {MAX_LINKS_PER_PAGE}" if len(links) > MAX_LINKS_PER_PAGE else ""
                 lines.append(f"links ({len(links)} new same-site{more}): "
                              + " ".join(links[:MAX_LINKS_PER_PAGE]))
+            if _host(url) in self.site_hosts:
+                external, settings, templates = code_pointers(page, self.site_hosts)
+                new_hosts = sorted({_host(u) for u in external} - self.hosts)
+                self.hosts.update(_host(u) for u in external)
+                if external:
+                    lines.append("other sites this page's code calls (now fetchable"
+                                 + (f"; new: {', '.join(new_hosts)}" if new_hosts else "") + "): "
+                                 + " ".join(external))
+                if settings:
+                    lines.append("settings in its code: " + "; ".join(settings))
+                if templates:
+                    lines.append("address templates in its code: " + " | ".join(templates))
             out.append("\n".join(lines))
         result = "\n\n".join(out)
         if len(result) > MAX_RESULT_CHARS:
@@ -339,6 +415,30 @@ class _Pages:
                 if end < len(body) else f"\n[end of {what}]")
         result = (f"{prelude}\n\n" if prelude else "") + (
             f"## {url} -- {what}, chars {start:,}-{end:,} of {len(body):,}\n{body[start:end]}{tail}")
+        return result[:MAX_RESULT_CHARS]
+
+    async def find(self, client: httpx.AsyncClient, url: str, word: str, today: date) -> str:
+        """Every place a word occurs in a page's raw source (or a document's
+        text), with the text around it -- the way into a large script, where
+        the "source" action would need dozens of turns."""
+        word = word.strip()
+        if not word:
+            return 'give a "word" to look for'
+        prelude = ""
+        if url not in self.texts:
+            prelude = await self.fetch(client, [url], [], today)
+            if url not in self.texts:
+                return prelude
+        body = self.sources.get(url) or self.texts[url]
+        lowered, needle = body.lower(), word.lower()
+        hits, at = [], lowered.find(needle)
+        while at >= 0 and len(hits) < MAX_FIND_HITS:
+            hits.append(f"[char {at:,}] ...{body[max(0, at - FIND_CONTEXT):at + len(word) + FIND_CONTEXT]}...")
+            at = lowered.find(needle, at + len(needle))
+        total = lowered.count(needle)
+        head = f"## {url} -- {total} occurrence(s) of {word!r}" + (
+            f", first {MAX_FIND_HITS} shown" if total > len(hits) else "")
+        result = (f"{prelude}\n\n" if prelude else "") + head + "\n" + "\n".join(hits)
         return result[:MAX_RESULT_CHARS]
 
     def rows(self, table_id: str, contains: str = "") -> str:
@@ -433,13 +533,16 @@ async def explore(*, title: str, resolution_criteria: str, fine_print: str = "",
                             start = 0
                         result = await pages.text(client, str(action.get("url") or ""), start, today,
                                                   source=True)
+                    elif kind == "find":
+                        result = await pages.find(client, str(action.get("url") or ""),
+                                                  str(action.get("word") or ""), today)
                     elif kind == "rows":
                         result = pages.rows(str(action.get("table")), str(action.get("contains") or ""))
                     elif kind == "final":
                         report = str(action.get("report") or "").strip()
                         result = ""
                     else:
-                        result = f"Unknown action {kind!r}; use fetch, text, source, rows or final."
+                        result = f"Unknown action {kind!r}; use fetch, text, source, find, rows or final."
                 if not report and turn == MAX_TURNS - 1:
                     result += "\n\nOne turn left: your next reply must be the final action."
                 research_trace.emit(

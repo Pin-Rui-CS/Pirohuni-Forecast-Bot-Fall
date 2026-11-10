@@ -132,14 +132,22 @@ class Table:
 
 def compact(value) -> str:
     """One-line JSON with long or deeply nested values cut down."""
+    def small_flat(v) -> bool:
+        # A short run of plain values (coordinates [lon, lat], {"en": "Sharks"})
+        # costs a few characters at any depth; on Q46580 the ping positions were
+        # hidden as "[...]" two levels down in {"point": {"coordinates": [...]}}.
+        items = v.values() if isinstance(v, dict) else v
+        return len(v) <= 4 and all(isinstance(x, (str, int, float, bool)) or x is None for x in items)
+
     def shrink(v, depth):
         if isinstance(v, str):
             v = v[2:] if v.startswith("$D") else v  # Next.js date marker
             return v if len(v) <= MAX_CELL else v[:MAX_CELL] + "..."
         if isinstance(v, dict):
-            return {k: shrink(x, depth + 1) for k, x in v.items()} if depth < 2 else "{...}"
+            return ({k: shrink(x, depth + 1) for k, x in v.items()} if depth < 2 or small_flat(v)
+                    else "{...}")
         if isinstance(v, list):
-            if depth >= 2:
+            if depth >= 2 and not small_flat(v):
                 return "[...]"
             return [shrink(x, depth + 1) for x in v[:4]] + (["..."] if len(v) > 4 else [])
         return v
