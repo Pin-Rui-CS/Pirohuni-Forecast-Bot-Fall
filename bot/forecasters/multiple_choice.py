@@ -307,6 +307,9 @@ async def get_multiple_choice_gpt_prediction(
         run_prompts=run_prompts,
         validate=_make_mc_validator(options),
         repair_instruction=repair_instruction,
+        # A trial model's per-option probabilities, shaped like a run_values entry.
+        shadow_parse=lambda response: generate_multiple_choice_forecast(
+            options, extract_option_probabilities_from_response(response, options)),
     )
 
     per_run_dicts: list[dict[str, float]] = []

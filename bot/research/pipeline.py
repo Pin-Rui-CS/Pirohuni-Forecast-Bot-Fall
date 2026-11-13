@@ -13,15 +13,15 @@ from bot.config import (
     APIAGENT_TIMEOUT_SECONDS,
     ENABLE_APIAGENT_RESEARCH,
     ENABLE_ASKNEWS_RESEARCH,
-    ENABLE_FIRECRAWL_RESEARCH,
     ENABLE_PREDICTION_MARKET_RESEARCH,
     ENABLE_RESOLUTION_SOURCE_RESEARCH,
-    ENABLE_SERPAPI_RESEARCH,
-    ENABLE_TAVILY_RESEARCH,
 )
 from bot.llm.client import call_llm
 from bot.llm.cost_manager import HardLimitExceededError, MonetaryCostManager
-from bot.research.search import web_search
+from bot.research.search import search_service, web_search
+# The near-duplicate test lives with the shared search function, which uses it
+# to keep every tool from repeating a search.
+from bot.research.search.search_service import same_query
 from bot.utils import _truncate_text, find_future_full_dates
 from bot.trace import research_trace
 from bot.trace import source_ledger
@@ -60,7 +60,6 @@ _MAX_RETRY_QUERIES = 4  # per retry plan
 # other 3rd picks went unread.
 _MAX_POOLED_RETRY_QUERIES = 8
 _POOL_TOP_PER_PLAN = _MAX_RETRY_QUERIES
-_POOL_OVERLAP = 0.6
 _PLANNER_LABEL = "artifact-check/planner"
 # Soft-stop gates against the question's reserved compile/forecast token tail
 # (see monetary_cost_manager.research_reserve_input_tokens). Sized from the
@@ -225,9 +224,9 @@ async def run_research(
         if ENABLE_RESOLUTION_SOURCE_RESEARCH
         else None
     )
-    # The source explorer starts once the resolution summary says the value is
-    # not on the scraped page and web search has listed its results, and runs
-    # beside the scrape cycles.
+    # The source explorer runs on every question with a resolution link. It
+    # starts once the resolution summary is in and web search has listed its
+    # results, and runs beside the scrape cycles.
     early_explorer_task = _start_early_source_explorer(
         run_provider, summary_ready, resolution_task, search_ready, title=title,
         resolution_criteria=resolution_criteria, fine_print=fine_print, background=background)
@@ -345,19 +344,18 @@ async def run_research(
     # extraction run once on its results (see web_search). An engine that
     # fails with an out-of-credits / auth / missing-key signal is remembered
     # for the rest of the process so later questions skip it.
-    ordered_search_engines = [
-        web_search.ENGINES[label]
-        for label, enabled in (
-            ("SerpAPI Google", ENABLE_SERPAPI_RESEARCH),
-            ("Tavily Search", ENABLE_TAVILY_RESEARCH),
-            ("Firecrawl Search", ENABLE_FIRECRAWL_RESEARCH),
-        )
-        if enabled
-    ]
+    ordered_search_engines = search_service.enabled_engines()
 
     def candidates_listed() -> None:
         if not search_ready.done():
             search_ready.set_result(None)
+
+    # The history builder (off unless HISTORY_BUILDER is set) starts once web
+    # search has listed its results, so it begins from the pages already found
+    # and never repeats one of the main pass's searches.
+    history_task = _start_history_builder(
+        run_provider, search_ready, title=title, resolution_criteria=resolution_criteria,
+        fine_print=fine_print, background=background, evidence_plan=evidence_plan, feeds=plan_feeds)
 
     try:
         chosen_search_result, search_provider_errors = await _run_web_search(
@@ -393,6 +391,9 @@ async def run_research(
     early_explorer_result = await early_explorer_task if early_explorer_task is not None else None
     if early_explorer_result is not None:
         results.append(early_explorer_result)
+    # Likewise the history tables: the check and the brief both read them.
+    if history_task is not None:
+        results.append(await history_task)
 
     # AskNews and prediction-market providers embed source URLs in their text
     # output rather than scraping pages individually. Record those URLs as
@@ -525,16 +526,6 @@ async def run_research(
     retry_label = _select_retry_provider_label(chosen_search_result, ordered_search_engines)
     pre_retry_result_count = len(included_results)
 
-    # Stage 5a, backstop: the explorer normally starts early, from the
-    # resolution summary. When it did not (the summary found the value, or
-    # never ran) but the check still calls the artifact missing, a SoCLaaS
-    # model browses the resolution source's own pages now (Q46422: every value
-    # the brief lacked sat in pages the bot had scraped as text). Runs beside
-    # the web-search retry below, never instead of it; free, and skipped
-    # entirely unless research is on SoCLaaS.
-    explorer_task = None if early_explorer_result is not None else _start_source_explorer(
-        run_provider, retry_basis, title=title, resolution_criteria=resolution_criteria,
-        fine_print=fine_print, background=background, artifact_check=artifact_check)
     # The retry planner decides: any queries mean a retry, whatever the artifact
     # verdict says (2026-11-04; it used to fire only on "missing"/"partial").
     wants_artifact_retry = bool(
@@ -652,19 +643,6 @@ async def run_research(
             },
             reads=[research_trace.ref_doc("artifact_check:v1")], writes=[], kind="note", lane="*",
         )
-
-    if explorer_task is not None:
-        explorer_result = await explorer_task
-        explorer_included = should_include_provider_result(*explorer_result)
-        research_trace.emit(
-            "provider", explorer_result[0], explorer_result[1] or "",
-            status="included" if explorer_included else "excluded",
-            reads=research_trace.outputs_of(explorer_result[0]),
-            writes=[research_trace.ref_section(explorer_result[0])], kind="model",
-            lane=explorer_result[0],
-        )
-        if explorer_included:
-            included_results.append((explorer_result[0], explorer_result[1] or ""))
 
     # Stage 5.5: if the focused retry actually added evidence, re-run the
     # verification gate on the augmented evidence. The Stage-4 check ran on
@@ -1159,8 +1137,16 @@ def _start_early_source_explorer(run_provider, summary_ready: asyncio.Future,
                                  search_ready: asyncio.Future, *, title: str,
                                  resolution_criteria: str, fine_print: str,
                                  background: str) -> "asyncio.Task | None":
-    """Start a task that runs the explorer once the resolution summary is in,
-    if the summary says the value is not (or only partly) on the scraped page.
+    """Start a task that runs the explorer on every question that names a
+    resolution link, once the resolution summary is in.
+
+    The summary's VALUE ON PAGE line tells the explorer what the text scrape
+    could not find; it no longer decides whether the explorer runs. Until
+    2026-11-12 the explorer ran only on "partly"/"no", with a second start
+    after the artifact check for the rest. Over 53 questions (3-12 Nov) that
+    was 50 early runs and 2 late ones, so the condition saved almost nothing,
+    and a "yes" summary cannot see the history or the source's own forecast
+    held in the page's data.
 
     It also waits for web search to list its results: those are often the
     only way into the site's deeper pages. On 2026-10-30 (Q46422) an explorer
@@ -1174,7 +1160,7 @@ def _start_early_source_explorer(run_provider, summary_ready: asyncio.Future,
     from bot.research.resolution import source_explorer
     from bot.research.resolution.resolution_criteria_scraper import extract_urls, value_on_page
 
-    if resolution_task is None or not source_explorer.enabled():
+    if not source_explorer.enabled():
         return None
     urls = (extract_urls("\n".join(p for p in (resolution_criteria, fine_print) if p))
             or extract_urls(background or ""))
@@ -1182,20 +1168,19 @@ def _start_early_source_explorer(run_provider, summary_ready: asyncio.Future,
         return None
 
     async def run():
-        await asyncio.wait({summary_ready, resolution_task}, return_when=asyncio.FIRST_COMPLETED)
-        text = summary_ready.result() if summary_ready.done() else (resolution_task.result()[1] or "")
+        text = ""
+        if resolution_task is not None:
+            await asyncio.wait({summary_ready, resolution_task}, return_when=asyncio.FIRST_COMPLETED)
+            text = summary_ready.result() if summary_ready.done() else (resolution_task.result()[1] or "")
         status, missing = value_on_page(text)
-        if status not in {"partly", "no"}:
-            return None
         try:
             await asyncio.wait_for(asyncio.shield(search_ready), _EARLY_EXPLORER_SEARCH_WAIT_SECONDS)
         except TimeoutError:
             logger.info("[research] web search has listed no results after %ds; exploring without them",
                         _EARLY_EXPLORER_SEARCH_WAIT_SECONDS)
-        logger.info("[research] Resolution summary: value %s on the scraped page; exploring the "
-                    "resolution source now (%s)", "partly" if status == "partly" else "not",
-                    ", ".join(urls[:3]))
-        gap = {"status": "partial" if status == "partly" else "missing",
+        logger.info("[research] Resolution summary: value on the scraped page = %s; exploring the "
+                    "resolution source now (%s)", status or "no summary", ", ".join(urls[:3]))
+        gap = {"status": {"partly": "partial", "no": "missing", "yes": "found"}.get(status or "", "unknown"),
                "what_is_missing": missing or None}
         return await run_provider(
             source_explorer.SECTION_NAME,
@@ -1209,33 +1194,36 @@ def _start_early_source_explorer(run_provider, summary_ready: asyncio.Future,
     return asyncio.create_task(run())
 
 
-def _start_source_explorer(run_provider, retry_basis: dict | None, *, title: str,
+def _start_history_builder(run_provider, search_ready: asyncio.Future, *, title: str,
                            resolution_criteria: str, fine_print: str, background: str,
-                           artifact_check: dict | None) -> "asyncio.Task | None":
-    """Start the resolution-source explorer as a task, or None when it does not apply.
+                           evidence_plan: str, feeds: list[str]) -> "asyncio.Task | None":
+    """Start the history builder as a task, or None when it is switched off.
 
-    Applies when the artifact is missing or partial (or the check failed),
-    research runs on SoCLaaS, and the question names a resolution URL.
+    It waits for web search to list its results (as the source explorer does)
+    and then runs beside the scrape cycles. The task returns the builder's
+    ``(name, section)``.
     """
-    from bot.research.resolution import source_explorer
-    from bot.research.resolution.resolution_criteria_scraper import extract_urls
+    from bot.research.history import history_builder
 
-    if (retry_basis or {}).get("status") not in {"missing", "partial"} or not source_explorer.enabled():
+    if not history_builder.enabled():
         return None
-    urls = (extract_urls("\n".join(p for p in (resolution_criteria, fine_print) if p))
-            or extract_urls(background or ""))
-    if not urls:
-        return None
-    logger.info("[research] Required artifact %s; exploring the resolution source (%s)",
-                retry_basis.get("status"), ", ".join(urls[:3]))
-    return asyncio.create_task(run_provider(
-        source_explorer.SECTION_NAME,
-        lambda: source_explorer.explore(
-            title=title, resolution_criteria=resolution_criteria, fine_print=fine_print,
-            artifact_check=artifact_check, resolution_urls=urls),
-        feeds=[research_trace.ref_doc("artifact_check:v1")],
-        lane=source_explorer.SECTION_NAME,
-    ))
+
+    async def run():
+        try:
+            await asyncio.wait_for(asyncio.shield(search_ready), _EARLY_EXPLORER_SEARCH_WAIT_SECONDS)
+        except TimeoutError:
+            logger.info("[research] web search has listed no results after %ds; building history without them",
+                        _EARLY_EXPLORER_SEARCH_WAIT_SECONDS)
+        return await run_provider(
+            history_builder.SECTION_NAME,
+            lambda: history_builder.build(
+                title=title, resolution_criteria=resolution_criteria, fine_print=fine_print,
+                background=background, evidence_plan=evidence_plan),
+            feeds=feeds,
+            lane=history_builder.SECTION_NAME,
+        )
+
+    return asyncio.create_task(run())
 
 
 def _artifact_check_section_priority(name: str) -> int:
@@ -1249,7 +1237,9 @@ def _artifact_check_section_priority(name: str) -> int:
     lowered = name.lower()
     if "retry" in lowered:
         return 0
-    if "resolution" in lowered:
+    # The history tables are often the artifact itself (31 of 52 plans asked
+    # for a history table or series, 3-12 Nov 2026).
+    if "resolution" in lowered or "history tables" in lowered:
         return 1
     if "evidence plan" in lowered:
         return _PRIORITY_EVIDENCE_PLAN
@@ -1387,36 +1377,6 @@ def _already_tried_section() -> str:
               _TRIED_LIST_CAPS["failed"]),
         block("Pages a search returned but nobody read", unread, _TRIED_LIST_CAPS["unread"]),
     ])
-
-
-_QUERY_FILLER = frozenset(
-    "the a an of for and or in on to by with from site de da ve ile mi bir icin".split())
-
-
-def _query_words(query: str) -> set[str]:
-    import re
-    import unicodedata
-    text = unicodedata.normalize("NFKD", query.lower()).encode("ascii", "ignore").decode()
-    text = re.sub(r"site:\S+", " ", text)
-    return {w for w in re.findall(r"[a-z0-9]+", text)
-            if len(w) > 1 and w not in _QUERY_FILLER and not re.fullmatch(r"(19|20)\d\d", w)}
-
-
-def _query_numbers(query: str) -> set[str]:
-    """Numbers other than years: a trailing "2026" separates nothing."""
-    import re
-    return {n for n in re.findall(r"\d+", query) if not re.fullmatch(r"(19|20)\d\d", n)}
-
-
-def same_query(a: str, b: str) -> bool:
-    """Near-duplicate searches: most meaningful words shared AND the same
-    numbers. Dates are what tell "report for 3-5 November" from "report for
-    10-12 November" (word overlap 0.71) -- merging those loses the one that
-    mattered (Q46606) -- so differing numbers always keep queries apart."""
-    wa, wb = _query_words(a), _query_words(b)
-    if not wa or not wb or _query_numbers(a) != _query_numbers(b):
-        return a.strip().lower() == b.strip().lower()
-    return len(wa & wb) / len(wa | wb) >= _POOL_OVERLAP
 
 
 def pool_retry_queries(plans: list[list[str]], already_run: list[str] = (),

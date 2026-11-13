@@ -275,6 +275,8 @@ async def get_binary_gpt_prediction(
         run_prompts=run_prompts,
         validate=_validate_binary_response,
         repair_instruction=_BINARY_REPAIR_INSTRUCTION,
+        # A trial model's probability, in percent like the ensemble records.
+        shadow_parse=extract_probability_from_response_as_percentage_not_decimal,
     )
 
     # Valid runs feed the aggregate; ``probabilities``/``models``/``comments``

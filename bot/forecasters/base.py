@@ -6,6 +6,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+import datetime
+from contextvars import ContextVar
+
 from bot.config import (
     FORECAST_MAX_OUTPUT_TOKENS,
     FORECASTER_BACKUP_MODEL,
@@ -13,11 +16,45 @@ from bot.config import (
     FORECASTER_WEIGHTS,
     HETEROGENEOUS_RUN_ENABLED,
     HETEROGENEOUS_RUN_MODEL,
+    SHADOW_FORECASTER_MODELS,
+    SHADOW_FORECASTER_UNTIL,
 )
 from bot.trace import research_trace
 from bot.llm.client import call_llm
 
 logger = logging.getLogger(__name__)
+
+# A shadow run may take as long as a forecast run, but must never hold up a
+# question that has its real forecasts.
+SHADOW_TIMEOUT_SECONDS = 900
+# The current question's shadow records, set by gather_forecast_runs in the
+# question's own task and collected by the orchestrator (take_shadow_records).
+_SHADOW_RECORDS: ContextVar[list[dict] | None] = ContextVar("shadow_records", default=None)
+
+
+def shadow_models(today: datetime.date | None = None) -> list[str]:
+    """The models on trial right now: SHADOW_FORECASTER_MODELS, or none once
+    SHADOW_FORECASTER_UNTIL has passed (an unreadable date also means none --
+    a trial that cannot tell when it ends does not run)."""
+    if not SHADOW_FORECASTER_MODELS:
+        return []
+    if SHADOW_FORECASTER_UNTIL:
+        try:
+            until = datetime.date.fromisoformat(SHADOW_FORECASTER_UNTIL)
+        except ValueError:
+            logger.warning("[shadow] SHADOW_FORECASTER_UNTIL=%r is not YYYY-MM-DD; shadow runs are off.",
+                           SHADOW_FORECASTER_UNTIL)
+            return []
+        if (today or datetime.date.today()) > until:
+            return []
+    return list(SHADOW_FORECASTER_MODELS)
+
+
+def take_shadow_records() -> list[dict]:
+    """The shadow records of the question just forecast (and clear them)."""
+    records = _SHADOW_RECORDS.get() or []
+    _SHADOW_RECORDS.set(None)
+    return records
 
 
 # Prepended to the research handed to the heterogeneous (raw-input) ensemble
@@ -171,6 +208,7 @@ async def gather_forecast_runs(
     repair_instruction: str | None = None,
     run_prompts: list[str] | None = None,
     backup: str | None = None,
+    shadow_parse: Callable[[str], Any] | None = None,
 ) -> list[ForecastRun]:
     """Run the forecast prompt ``num_runs`` times in parallel across an ensemble
     of models — one model per run, cycling the pool.
@@ -339,4 +377,45 @@ async def gather_forecast_runs(
             error=error,
         )
 
-    return list(await asyncio.gather(*[one_run(i, m) for i, m in enumerate(assigned)]))
+    async def shadow_run(model: str) -> dict:
+        """One trial forecast from the brief prompt. Recorded, never counted:
+        it is not in the returned runs, so no aggregate, tiebreaker or comment
+        can see it. Any failure -- call error, cut-off answer, time-out,
+        unparseable reply, budget refusal -- only marks the record invalid."""
+        tag = short_model_name(model)
+        record: dict = {"model": model, "valid": False}
+        transcript = ""
+        try:
+            response, transcript = await asyncio.wait_for(
+                _call(prompt, model, f"{label}[{tag}]/shadow"), SHADOW_TIMEOUT_SECONDS)
+            error = validate(response) if validate else None
+            if error is None and shadow_parse is not None:
+                record["value"] = shadow_parse(response)
+            record["valid"] = error is None
+            if error is not None:
+                record["error"] = str(error)[:500]
+        except BaseException as exc:  # noqa: BLE001 - a trial run must never sink the question
+            if isinstance(exc, (KeyboardInterrupt, SystemExit, asyncio.CancelledError)):
+                raise
+            record["valid"] = False
+            record.pop("value", None)
+            record["error"] = _short_error(exc)
+        logger.info("[shadow] %s %s: %s", label, model,
+                    "ok" if record["valid"] else f"invalid ({record.get('error')})")
+        research_trace.emit(
+            "shadow_forecast", f"{label} shadow · {tag} (not counted)",
+            transcript or f"# shadow run failed for {model}\n{record.get('error', '')}",
+            status="ok" if record["valid"] else "failed", error=record.get("error", ""),
+            meta={"model": model, "counted": False},
+            reads=[research_trace.ref_doc("brief")], writes=[], kind="model", lane="*",
+        )
+        return record
+
+    shadows = shadow_models()
+    results = await asyncio.gather(
+        *[one_run(i, m) for i, m in enumerate(assigned)],
+        *[shadow_run(m) for m in shadows],
+    )
+    if shadows:
+        _SHADOW_RECORDS.set(list(results[len(assigned):]))
+    return list(results[:len(assigned)])

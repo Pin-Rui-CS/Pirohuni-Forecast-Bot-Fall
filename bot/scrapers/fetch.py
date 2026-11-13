@@ -130,6 +130,8 @@ class FetchPolicy:
     # Obey ENABLE_FIRECRAWL_GENERAL_SCRAPE (the general research switch).
     # Resolution pages always try Firecrawl while credits last.
     firecrawl_switchable: bool = True
+    # The caller has used up its own share of Firecrawl credits: free rungs only.
+    firecrawl_off: bool = False
     crawl_timeout: int | None = None
     adapter_timeout: float = 30.0
     # Keep the page's raw HTML (script blocks included) for the embedded-data
@@ -252,7 +254,8 @@ async def fetch_page(url: str, policy: FetchPolicy, *, query: str = "") -> Fetch
         engines_tried.append(f"adapter:{adapter.name}")
         errors.append(f"adapter:{adapter.name}: {adapter_error}")
 
-    firecrawl_on = not policy.firecrawl_switchable or ENABLE_FIRECRAWL_GENERAL_SCRAPE
+    firecrawl_on = not policy.firecrawl_off and (
+        not policy.firecrawl_switchable or ENABLE_FIRECRAWL_GENERAL_SCRAPE)
 
     async def firecrawl(engine: str, timeout: int, **kwargs) -> FetchedPage | None:
         from bot.scrapers.firecrawl_scrape import (

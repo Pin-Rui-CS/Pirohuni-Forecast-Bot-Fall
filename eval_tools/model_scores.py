@@ -166,6 +166,38 @@ def _grid_size(run: dict) -> int:
     return int(count) + 1 if count else 201
 
 
+SHADOW_PREFIX = "shadow:"
+
+
+def shadow_forecasts(run: dict) -> list[tuple[str, str | None, Any]]:
+    """[("shadow:<model>", None, forecast)] for each trial model's usable
+    forecast (extra.shadow, written by forecasters.base.gather_forecast_runs).
+    A shadow run was never part of the submitted forecast; it is scored beside
+    the ensemble members so a model on trial can be compared on the same
+    questions. Values have the ensemble's own shapes: binary in percent, a
+    per-option dict, or a parsed numeric distribution with a "spec"."""
+    group = _group_of(run.get("question_type"))
+    scaling = run.get("scaling") or {}
+    out = []
+    for record in (run.get("extra") or {}).get("shadow") or []:
+        if not isinstance(record, dict) or not record.get("valid") or record.get("value") is None:
+            continue
+        name, value = f"{SHADOW_PREFIX}{record.get('model')}", record["value"]
+        try:
+            if group == "binary":
+                out.append((name, None, float(value) / 100))
+            elif group == "multiple_choice":
+                if isinstance(value, dict):
+                    out.append((name, None, value))
+            elif isinstance(value, dict) and value.get("spec") and scaling.get("range_min") is not None:
+                grid = nominal_grid(float(scaling["range_min"]), float(scaling["range_max"]),
+                                    _grid_size(run), scaling.get("zero_point"))
+                out.append((name, None, spec_to_cdf(value["spec"], grid)))
+        except Exception:  # noqa: BLE001 - one unreadable shadow run must not drop the question
+            continue
+    return out
+
+
 def model_forecasts(run: dict) -> list[tuple[str, str | None, Any]] | None:
     """[(model, backup_for, forecast)] for each usable run on this question, or
     None when the record cannot be lined up (run_values and the non-dropped
@@ -249,6 +281,7 @@ def score_questions(selected: list[tuple[dict, dict]]) -> tuple[list[dict], Coun
             skipped["runs could not be lined up with their models"] += 1
         else:
             entries.extend(per_model)
+        entries.extend(shadow_forecasts(run))
         for entity, backup_for, forecast in entries:
             for metric, score in score_forecast(group, forecast, resolution, scaling).items():
                 rows.append({**base, "entity": entity or "unknown", "backup_for": backup_for or "",
@@ -323,6 +356,9 @@ def build_summary(rows: list[dict], selected: list[tuple[dict, dict]], skipped: 
     if backups:
         lines.append("- Backup runs, counted under the model that ran them: "
                      + ", ".join(f"`{m}` {n}" for m, n in backups.items()) + ".")
+    if any(str(r["entity"]).startswith(SHADOW_PREFIX) for r in rows):
+        lines.append(f"- `{SHADOW_PREFIX}<model>` rows are models on trial: they forecast the same "
+                     "questions from the same brief but were never counted in the submitted forecast.")
     lines.append("- The Metaculus community prediction is not included: the API returns no "
                  "aggregations to the bot's account.")
     lines.append("")

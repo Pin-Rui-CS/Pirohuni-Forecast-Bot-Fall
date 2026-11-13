@@ -147,6 +147,12 @@ async def search_with_fallback(
 
     Returns ``(engine, hits, failures)``; ``engine`` is None when none did.
     ``failures`` reads "<engine> (<why>)" for every engine tried or skipped.
+
+    Every search that returned results is noted in the source ledger here, the
+    one place all searches pass through (main pass, focused retry, research
+    agents), with its results. Until 2026-11-12 only the retry noted its
+    queries, so the retry planner's "Searches already run" list and the pool's
+    duplicate check never saw the main pass's searches.
     """
     failures: list[str] = []
     for engine in engines:
@@ -168,8 +174,21 @@ async def search_with_fallback(
             logger.warning("[web-search] %s returned no results; trying the next engine", engine.label)
             failures.append(f"{engine.label} (no results)")
             continue
+        source_ledger.record_queries(queries, tool=engine.label, phase=reason or None)
+        source_ledger.record_search_hits(hits)
         return engine, hits, failures
     return None, [], failures
+
+
+def record_candidates(hits: list[SearchHit]) -> None:
+    """List every search result in the source ledger as a page found, not read."""
+    for hit in hits:
+        source_ledger.record_url_event(
+            hit.url,
+            source_ledger.ROLE_CANDIDATE,
+            round_label="search",
+            detail=" | ".join([f"query: {hit.query}", *(f"{k.lower()}: {v}" for k, v in hit.extras)]),
+        )
 
 
 async def research_from_hits(
@@ -195,13 +214,7 @@ async def research_from_hits(
     ``on_candidates()`` is called once every result is in the source ledger
     (the source explorer starts from the resolution site's pages listed there).
     """
-    for hit in hits:
-        source_ledger.record_url_event(
-            hit.url,
-            source_ledger.ROLE_CANDIDATE,
-            round_label="search",
-            detail=" | ".join([f"query: {hit.query}", *(f"{k.lower()}: {v}" for k, v in hit.extras)]),
-        )
+    record_candidates(hits)
     if on_candidates is not None:
         on_candidates()
     research_trace.emit(
@@ -264,7 +277,6 @@ async def run_web_research(
         asknews_research=asknews_research,
         preset_queries=preset_queries,
     )
-    source_ledger.record_queries(queries)
     engine, hits, failures = await search_with_fallback(engines, queries, reason=reason)
     if engine is None:
         raise WebSearchFailed("; ".join(failures) or "no search engine enabled")

@@ -112,6 +112,17 @@ HETEROGENEOUS_RUN_MODEL = os.getenv(
 # and take its one repair retry. Raise the cap rather than letting that recur.
 FORECAST_MAX_OUTPUT_TOKENS = int(os.getenv("FORECAST_MAX_OUTPUT_TOKENS", "20000"))
 
+# --- Shadow forecasters ------------------------------------------------------
+# Models on trial: each forecasts every question from the same brief prompt as
+# the ensemble, in parallel, but is NEVER counted in the submitted forecast,
+# the tiebreaker or the comment. Its parsed forecast is saved in forecast.json
+# (extra.shadow) so it can be scored against the ensemble members once
+# questions resolve. One call per question: no repair retry, no backup model.
+# Empty = off. SHADOW_FORECASTER_UNTIL (YYYY-MM-DD, inclusive) ends a trial on
+# its own, so a forgotten switch cannot keep spending.
+SHADOW_FORECASTER_MODELS = _env_list("SHADOW_FORECASTER_MODELS", [])
+SHADOW_FORECASTER_UNTIL = (os.getenv("SHADOW_FORECASTER_UNTIL") or "").strip()
+
 SKIP_PREVIOUSLY_FORECASTED_QUESTIONS = True
 METACULUS_MAX_CONCURRENT_REQUESTS = int(os.getenv("METACULUS_MAX_CONCURRENT_REQUESTS", "1"))
 METACULUS_API_RATE_LIMITER = asyncio.Semaphore(METACULUS_MAX_CONCURRENT_REQUESTS)

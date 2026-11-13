@@ -26,3 +26,9 @@ class UrlAdapter(ABC):
     @abstractmethod
     async def extract(self, url: str, query: str = "", timeout: float = 30.0) -> AdapterResult:
         ...
+
+    async def raw_page(self, url: str, timeout: float = 30.0) -> str | None:
+        """The page as the site serves it (HTML), for a caller that reads the
+        page's own tables or checks a quote against its exact text. None when
+        the adapter has no such path (the default)."""
+        return None

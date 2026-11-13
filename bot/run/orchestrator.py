@@ -16,7 +16,7 @@ from bot.run.artifacts import QuestionArtifacts
 from bot.run.forecast_comment import short_comment
 from bot.llm import provider as llm_provider
 from bot.config import API_BASE_URL, OPENROUTER_API_KEY
-from bot.forecasters.base import ForecastResult
+from bot.forecasters.base import ForecastResult, take_shadow_records
 from bot.forecasters.binary import get_binary_gpt_prediction
 from bot.forecasters.multiple_choice import get_multiple_choice_gpt_prediction
 from bot.forecasters.numeric import get_numeric_gpt_prediction
@@ -283,6 +283,11 @@ async def forecast_individual_question(
             )
         else:
             raise ValueError(f"Unknown question type: {question_type}")
+        # Trial models' forecasts (bot.config SHADOW_FORECASTER_MODELS): saved
+        # beside the ensemble for later scoring, never part of the forecast.
+        shadow_records = take_shadow_records()
+        if shadow_records:
+            result.extra["shadow"] = shadow_records
         forecast_seconds = time.monotonic() - forecast_started
         total_seconds = time.monotonic() - question_started
         estimated_tokens = question_cost_manager.total_tokens

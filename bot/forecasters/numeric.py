@@ -2897,6 +2897,9 @@ async def get_numeric_gpt_prediction(
         run_prompts=run_prompts,
         validate=_make_numeric_validator(geometry),
         repair_instruction=_NUMERIC_REPAIR_INSTRUCTION,
+        # A trial model's parsed distribution, shaped like a run_values entry
+        # (its "spec" is what the per-model scorer turns into a curve).
+        shadow_parse=lambda response: numeric_response_to_raw_cdf(response, geometry, grid)[1],
     )
 
     raw_cdfs: list[np.ndarray] = []

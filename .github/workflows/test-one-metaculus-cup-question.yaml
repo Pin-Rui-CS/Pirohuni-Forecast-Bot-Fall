@@ -53,7 +53,7 @@ name: Test Metaculus Cup questions
       raw_research_forecaster:
         description: "Raw-research forecaster: one extra run that reads the raw research instead of the brief (catches evidence the brief dropped)"
         required: true
-        default: "Claude Sonnet 5"
+        default: "SoCLaaS DeepSeek->Qwen (free)"
         type: choice
         options:
           - "Claude Sonnet 5"
@@ -411,6 +411,10 @@ jobs:
           # limit is 20 min (1200). Paid runs keep the defaults.
           QUESTION_TIMEOUT_SECONDS: ${{ inputs.research_models != 'original' && '10800' || '1200' }}
           ARTIFACT_RETRY_TIMEOUT_SECONDS: ${{ inputs.research_models != 'original' && '3600' || '150' }}
+          # History builder (bot/research/history): checked tables of past values and
+          # cases. "auto" = on whenever research runs on SoCLaaS (free model; about 5
+          # searches a question). Set to "off" to switch it off.
+          HISTORY_BUILDER: auto
 
       - name: Publish run to the forecast library
         # Never fails or blocks forecasting: a no-op until the SUPABASE_*

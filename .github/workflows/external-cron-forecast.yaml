@@ -56,14 +56,23 @@ name: Forecast via external cron
         default: true
         type: boolean
       forecaster_claude_sonnet:
-        description: "Forecaster (reads the brief): Claude Sonnet 5 (on by default since 2026-11-03)"
+        # Off by default since 2026-11-12: ~10k hidden thinking tokens per call made it
+        # pricier than Opus ($0.19 vs $0.14), it was cut off on ~1 in 4 calls (each then
+        # redone on Astra at ~$0.47), and it caused every question over $1. Without it the
+        # 30 questions since 2026-11-03 cost $0.26 on average, $0.32 at most.
+        description: "Forecaster (reads the brief): Claude Sonnet 5 (off by default since 2026-11-12: cost)"
         required: false
-        default: true
+        default: false
         type: boolean
       forecaster_qwen:
         description: "Forecaster (reads the brief): the SoCLaaS model, DeepSeek first then MiniMax, GLM, Qwen (free)"
         required: false
         default: false
+        type: boolean
+      shadow_fable:
+        description: "Shadow trial: Claude Fable 5.2 also forecasts (about $0.39 a question) but is not counted in the submitted forecast. Ends by itself after 2026-11-17."
+        required: false
+        default: true
         type: boolean
       raw_research_forecaster:
         description: "Raw-research forecaster: one extra run that reads the raw research instead of the brief (catches evidence the brief dropped). SoCLaaS models are free."
@@ -210,7 +219,7 @@ jobs:
           # that run is added as run N+1 rather than replacing a ticked model.
           # Fallbacks = the input defaults, in case a cron call arrives without them.
           FC_GPT6_ASTRA="${FC_GPT6_ASTRA:-false}"; FC_CLAUDE_OPUS="${FC_CLAUDE_OPUS:-true}"
-          FC_GPT56_SOL="${FC_GPT56_SOL:-true}"; FC_CLAUDE_SONNET="${FC_CLAUDE_SONNET:-true}"
+          FC_GPT56_SOL="${FC_GPT56_SOL:-true}"; FC_CLAUDE_SONNET="${FC_CLAUDE_SONNET:-false}"
           FC_QWEN="${FC_QWEN:-false}"; RAW_FORECASTER="${RAW_FORECASTER:-SoCLaaS DeepSeek->Qwen (free)}"
           MODELS=()
           [ "$FC_GPT6_ASTRA" = "true" ] && MODELS+=("openai/gpt-6-astra")
@@ -241,6 +250,16 @@ jobs:
           # (forecasters.base.run_weights; chosen 2026-11-03 from 105 resolved questions).
           export FORECASTER_WEIGHTS="anthropic/claude-opus-5.5=0.5"
           export FORECASTER_BACKUP_MODEL="openai/gpt-6-astra"
+          # Shadow trial (bot.config SHADOW_FORECASTER_MODELS): Fable 5.2 forecasts every
+          # question from the brief but is NOT counted in the submitted forecast; its answer
+          # is saved in forecast.json (extra.shadow) and scored by model-scores once questions
+          # resolve. ~$0.39 per question on top; ends by itself after SHADOW_UNTIL (inclusive).
+          # Started 2026-11-12 after a 7-question backtest (Fable beat Opus on 6); the question
+          # is whether it should replace Opus. ~30 questions, about $12.
+          SHADOW_FABLE="${SHADOW_FABLE:-true}"; SHADOW_UNTIL="2026-11-17"
+          if [ "$SHADOW_FABLE" = "true" ]; then
+            export SHADOW_FORECASTER_MODELS="anthropic/claude-fable-5.2" SHADOW_FORECASTER_UNTIL="$SHADOW_UNTIL"
+          fi
           if [ -n "$RAW_MODEL" ]; then
             export HETEROGENEOUS_RUN_ENABLED=true HETEROGENEOUS_RUN_MODEL="$RAW_MODEL"
             NUM_RUNS=$(( ${#MODELS[@]} + 1 ))
@@ -327,6 +346,7 @@ jobs:
           FC_CLAUDE_OPUS: ${{ inputs.forecaster_claude_opus }}
           FC_GPT56_SOL: ${{ inputs.forecaster_gpt56_sol }}
           FC_CLAUDE_SONNET: ${{ inputs.forecaster_claude_sonnet }}
+          SHADOW_FABLE: ${{ inputs.shadow_fable }}
           FC_QWEN: ${{ inputs.forecaster_qwen }}
           RAW_FORECASTER: ${{ inputs.raw_research_forecaster || 'SoCLaaS DeepSeek->Qwen (free)' }}
           RESEARCH_MODELS: ${{ inputs.research_models || 'soclaas' }}
@@ -345,6 +365,10 @@ jobs:
           # Qwen research measured 44-67 min per question; the default limit is 20 min.
           QUESTION_TIMEOUT_SECONDS: ${{ (inputs.research_models || 'soclaas') != 'original' && '10800' || '1200' }}
           ARTIFACT_RETRY_TIMEOUT_SECONDS: ${{ (inputs.research_models || 'soclaas') != 'original' && '3600' || '150' }}
+          # History builder (bot/research/history): checked tables of past values and
+          # cases. "auto" = on whenever research runs on SoCLaaS (free model; about 5
+          # searches a question). Set to "off" to switch it off.
+          HISTORY_BUILDER: auto
 
       - name: Publish run to the forecast library
         # Never fails or blocks forecasting: a no-op until the SUPABASE_*

@@ -32,7 +32,8 @@ class WikipediaAdapter(UrlAdapter):
         parsed = urlparse(url)
         return _api_host(parsed.netloc) is not None and _page_title(parsed) is not None
 
-    async def extract(self, url: str, query: str = "", timeout: float = 30.0) -> AdapterResult:
+    async def _page(self, url: str, timeout: float) -> tuple[dict, str, str, str]:
+        """(API payload, API url, host, title) for a Wikipedia page URL."""
         parsed = urlparse(url)
         host = _api_host(parsed.netloc)
         title = _page_title(parsed)
@@ -51,6 +52,16 @@ class WikipediaAdapter(UrlAdapter):
         payload = response.json()
         if not isinstance(payload, dict):
             raise ValueError("Wikipedia API response was not a JSON object.")
+        return payload, api_url, host, title
+
+    async def raw_page(self, url: str, timeout: float = 30.0) -> str | None:
+        """The article's HTML from the same API call ``extract`` makes, with no
+        model in between."""
+        payload, *_ = await self._page(url, timeout)
+        return str(payload.get("html") or "") or None
+
+    async def extract(self, url: str, query: str = "", timeout: float = 30.0) -> AdapterResult:
+        payload, api_url, host, title = await self._page(url, timeout)
 
         html = str(payload.get("html") or "")
         source_markdown = html_to_forecast_markdown(html)

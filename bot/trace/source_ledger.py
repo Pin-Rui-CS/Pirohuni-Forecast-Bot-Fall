@@ -51,6 +51,7 @@ class UrlEvent:
 _LOCK = threading.Lock()
 _EVENTS: dict[str, list[UrlEvent]] = {}
 _QUERIES: dict[str, list[tuple[str, str, str]]] = {}
+_HITS: dict[str, list] = {}
 
 _SCOPE: ContextVar[str] = ContextVar("source_ledger_scope", default="global")
 _CONTEXT: ContextVar[tuple[str, str]] = ContextVar(
@@ -166,6 +167,21 @@ def get_queries(scope: str | None = None) -> list[tuple[str, str, str]]:
         return list(_QUERIES.get(target, []))
 
 
+def record_search_hits(hits: list) -> None:
+    """Keep the results a search returned (SearchHit objects, each carrying its
+    query), so a tool asking for a search already run gets those results back
+    instead of paying for the search again."""
+    scope = _SCOPE.get()
+    with _LOCK:
+        _HITS.setdefault(scope, []).extend(hits)
+
+
+def get_search_hits(scope: str | None = None) -> list:
+    target = scope if scope is not None else _SCOPE.get()
+    with _LOCK:
+        return list(_HITS.get(target, []))
+
+
 def get_events(scope: str | None = None) -> list[UrlEvent]:
     target = scope if scope is not None else _SCOPE.get()
     with _LOCK:
@@ -177,6 +193,7 @@ def drain_events(scope: str | None = None) -> list[UrlEvent]:
     target = scope if scope is not None else _SCOPE.get()
     with _LOCK:
         _QUERIES.pop(target, None)
+        _HITS.pop(target, None)
         return _EVENTS.pop(target, [])
 
 
@@ -185,6 +202,7 @@ def reset(scope: str | None = None) -> None:
     with _LOCK:
         _EVENTS.pop(target, None)
         _QUERIES.pop(target, None)
+        _HITS.pop(target, None)
 
 
 def _canonical(url: str) -> str:
