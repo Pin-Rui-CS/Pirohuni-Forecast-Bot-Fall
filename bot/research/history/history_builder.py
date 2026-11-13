@@ -152,6 +152,11 @@ Reply with exactly ONE JSON object per turn, nothing else:
       count to the report, up to {MAX_COUNTS} per table. Ask for the counts a forecaster would want: how
       many rows are at or past the question's threshold, how many cases ended the way the question
       asks about.
+  SAVE TURNS: adding rows and counting need no turn of their own. Any other action (search,
+      fetch, text, find, rows, plan, final) may carry them:
+      {{"action": "fetch", "urls": ["..."], "add_rows": [{{"table": "A", "rows": [...]}}], "count": [{{"table": "A", "where": [...]}}]}}
+      The rows are added first, and the reply reports them together with the action's result. Use
+      add_rows or count as an action by itself only when you have nothing else to do that turn.
   {{"action": "final", "coverage": {{"A": {{"complete": false, "text": "..."}}}}, "also_noted": [{{"text": "...", "url": "...", "quote": "..."}}], "could_not_find": "..."}}
       Ends the work. "coverage": for each table, "complete": true ONLY if the table holds every
       row of its kind for the period it covers (every year, every case, hits and misses alike);
@@ -164,8 +169,8 @@ Reply with exactly ONE JSON object per turn, nothing else:
 You have {MAX_TURNS} turns, {MAX_SEARCHES} searches and {MAX_PAGES} pages; each reply tells you what is left. Rules:
 - Rows come only from pages you fetched in this run. If you remember a value, find a page that
   states it; do not add it from memory.
-- Add rows as you find them: when a page you just read states a row, send add_rows on your next
-  turn, before reading further. Rows of one table may come from different pages, one or two per
+- Add rows as you find them: when a page you just read states a row, send it with your very next
+  action (carried as "add_rows"). Rows of one table may come from different pages, one or two per
   page. Do not wait for a single page that lists everything; if you never find it, the rows you
   did not add are lost. A table of three checked rows is useful; an empty one is not.
 - A table holds at most {MAX_ROWS} rows. If the history is longer, choose the spacing that suits the
@@ -196,6 +201,12 @@ class BuildResult:
     notes: int = 0
     stopped: str = ""
     actions: list[str] = field(default_factory=list)
+
+
+def _as_list(value) -> list[dict]:
+    """One {...} or a list of them, as a list of dicts."""
+    items = value if isinstance(value, list) else [value]
+    return [item for item in items if isinstance(item, dict)]
 
 
 async def build(*, title: str, resolution_criteria: str = "", fine_print: str = "", background: str = "",
@@ -255,6 +266,24 @@ async def run(*, title: str, resolution_criteria: str = "", fine_print: str = ""
         async def count(action: dict) -> str:
             return store.count(action.get("table"), action.get("where") or [])
 
+        def carried(action: dict) -> str:
+            """Rows and counts sent along with another action. Adding rows used
+            to need a turn of its own (1-5 of 14 turns in the 2026-11-13
+            replay), though its reply gives the model nothing new to read."""
+            out = []
+            for item in _as_list(action.get("add_rows")):
+                out.append(store.add_rows(item.get("table"), item.get("rows") or []))
+            for item in _as_list(action.get("count")):
+                out.append(store.count(item.get("table"), item.get("where") or []))
+            return "\n".join(out)
+
+        def with_carried(handler):
+            async def run_both(action: dict) -> str:
+                first = carried(action)
+                result = await handler(action)
+                return f"{first}\n\n{result}" if first else result
+            return run_both
+
         replies = 0
 
         def status_line() -> str:
@@ -272,14 +301,17 @@ async def run(*, title: str, resolution_criteria: str = "", fine_print: str = ""
 
         outcome = await loop.run(
             system=system,
-            handlers={"plan": plan, "search": search, "fetch": fetch, "text": text, "find": find,
-                      "rows": rows, "add_rows": add_rows, "count": count},
+            handlers={**{name: with_carried(handler) for name, handler in (
+                          ("plan", plan), ("search", search), ("fetch", fetch), ("text", text),
+                          ("find", find), ("rows", rows))},
+                      "add_rows": add_rows, "count": count},
             label=LABEL, trace_stage="history", trace_name="history builder",
             max_turns=MAX_TURNS, wall_seconds=WALL_SECONDS,
             meta=lambda: {"pages_fetched": len(pages.fetched), "searches": budget.used,
                           "rows": store.row_count(), "rejected": store.rejected},
             status_line=status_line)
     if outcome.final is not None:
+        carried(outcome.final)   # rows and counts sent with the final action
         store.finish(outcome.final)
     logger.info("[history-builder] %d turns, %d searches, %d pages, %d rows kept, %d rejected%s",
                 outcome.turns, budget.used, len(pages.fetched), store.row_count(), store.rejected,
