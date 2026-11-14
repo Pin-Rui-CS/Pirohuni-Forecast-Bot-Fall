@@ -267,6 +267,70 @@ def _delimited_table(text: str) -> tuple[list[dict], str] | None:
     return rows, " / ".join(notes)[:MAX_NOTES_CHARS]
 
 
+MAX_XML_CELL = 300
+
+
+def _local(tag: str) -> str:
+    return str(tag).rsplit("}", 1)[-1]
+
+
+def _xml_records(text: str) -> list[tuple[list[dict], str]]:
+    """(rows, context) for every run of repeated record elements in an XML
+    data file: >= MIN_ROWS sibling elements of one name, each holding >= 2
+    fields. A row's columns are its leaf elements, however deeply nested.
+
+    Question 46726 (2026-11-13): Berkshire's 13F information table is such a
+    file, 89 <infoTable> records. No table was read from it, the text that
+    reached the model had lost every tag and separator
+    ("...02079K305596807916700SHDFND2,4,111670000..."), and the model split
+    16,700 shares into 16,700,000, which put a false 122.7M-share baseline
+    into the brief.
+    """
+    import xml.etree.ElementTree as ET
+
+    body = text[:MAX_SCAN_CHARS].lstrip("﻿ \t\r\n")
+    # Entity declarations are how an XML file is made to expand without bound.
+    if not body.startswith("<") or "<!ENTITY" in body[:100_000].upper():
+        return []
+    try:
+        root = ET.fromstring(body)
+    except ET.ParseError:
+        return []
+
+    def record(element) -> dict:
+        row: dict[str, str] = {}
+
+        def walk(node, parent: str) -> None:
+            children = list(node)
+            if not children:
+                value = " ".join((node.text or "").split())[:MAX_XML_CELL]
+                if value:
+                    name = _local(node.tag)
+                    # The same field name under two parents (a "value" in two
+                    # groups) keeps both, told apart by the parent's name.
+                    key = name if name not in row else f"{parent}.{name}"
+                    row[key] = f"{row[key]} | {value}" if key in row else value
+                return
+            for child in children:
+                walk(child, _local(node.tag))
+
+        walk(element, _local(element.tag))
+        return row
+
+    out = []
+    for parent in root.iter():
+        groups: dict[str, list] = {}
+        for child in parent:
+            groups.setdefault(_local(child.tag), []).append(child)
+        for name, members in groups.items():
+            if len(members) < MIN_ROWS:
+                continue
+            rows = [r for r in (record(m) for m in members) if len(r) >= 2]
+            if len(rows) >= MIN_ROWS:
+                out.append((rows, f"{_local(parent.tag)} / {name}"))
+    return out
+
+
 class _HtmlTables(HTMLParser):
     """Cell text of every <table>, row by row, each cell flagged if it is a
     <th>. A nested table is read as a table of its own. Omitted </td>/</tr>
@@ -366,7 +430,7 @@ def _html_tables(page_html: str) -> list[tuple[list[dict], str]]:
 def extract_tables(url: str, page_html: str, id_prefix: str = "T") -> list[Table]:
     """Every table in one page, in page order, de-duplicated: the page's HTML
     tables, then the JSON arrays in its scripts; or a data file (CSV, TSV,
-    JSON) itself."""
+    JSON, XML) itself."""
     tables, seen, candidates = [], set(), []
     markup = bool(MARKUP.search(page_html[:5000]))
     if markup:
@@ -375,6 +439,9 @@ def extract_tables(url: str, page_html: str, id_prefix: str = "T") -> list[Table
         delimited = _delimited_table(page_html)
         if delimited:
             candidates.append(delimited)
+    # An XML data file (a filing's data table, a feed): its repeated records.
+    if not markup or page_html.lstrip("﻿ \t\r\n").startswith("<?xml"):
+        candidates.extend(_xml_records(page_html))
     for text in _payloads(page_html) if markup else [page_html]:
         for rows, prefix in _arrays_of_objects(text):
             candidates.append((rows, _context(prefix)))

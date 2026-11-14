@@ -4,6 +4,7 @@ from bot.scrapers.adapters.GoogleSheets import GoogleSheetsAdapter
 from bot.scrapers.adapters.GoogleTrends import GoogleTrendsAdapter
 from bot.scrapers.adapters.Metaculus import MetaculusAdapter
 from bot.scrapers.adapters.Pdf import PdfAdapter
+from bot.scrapers.adapters.SecEdgar import SecEdgarAdapter
 from bot.scrapers.adapters.base import UrlAdapter
 from bot.scrapers.adapters.Wikipedia import WikipediaAdapter
 from bot.scrapers.adapters.YahooQuotes import YahooQuotesAdapter
@@ -15,6 +16,7 @@ ADAPTERS: list[UrlAdapter] = [
     GoogleSheetsAdapter(),
     WikipediaAdapter(),
     YahooQuotesAdapter(),
+    SecEdgarAdapter(),
     # Extension-based, so it goes after the host-specific adapters.
     PdfAdapter(),
 ]

@@ -83,6 +83,21 @@ def _validate(response: Any) -> str | None:
     return "empty answer and no tool call"
 
 
+_TOOL_REQUEST_MARKS = ("<tool_call>", "</tool_call>", "<invoke name=", "</invoke>", "<function_calls>")
+
+
+def _is_tool_request_text(text: str) -> bool:
+    """A reply whose text is a tool request written out, not an answer.
+
+    Q46726 (2026-11-13): on its last step, with tools removed, MiniMax wrote
+    ']<]minimax[>[<tool_call> ... <invoke name="call_api">...' as plain text.
+    That string became the Public Data APIs section's whole summary, so the
+    brief got tool markup where the retrieved filings list should have been.
+    Treated as no answer, the section falls back to the rows it retrieved.
+    """
+    return any(mark in text for mark in _TOOL_REQUEST_MARKS)
+
+
 def _parse_args(raw: str) -> Any:
     try:
         return json.loads(raw) if raw else {}
@@ -204,7 +219,8 @@ async def run_apiagent_research(
                 break
         message = response.choices[0].message
         text = (message.content or "").strip()
-        answer = text or answer
+        # A model that writes a tool request out as text has not answered.
+        answer = ("" if _is_tool_request_text(text) else text) or answer
         calls = [{"id": c.id, "name": c.function.name,
                   "args": _parse_args(c.function.arguments)}
                  for c in (getattr(message, "tool_calls", None) or [])]

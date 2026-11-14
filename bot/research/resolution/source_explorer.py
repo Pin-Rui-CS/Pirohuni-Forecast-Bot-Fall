@@ -52,6 +52,11 @@ MAX_TURNS = int(os.getenv("SOURCE_EXPLORER_MAX_TURNS", "8"))
 MAX_PAGES = int(os.getenv("SOURCE_EXPLORER_MAX_PAGES", "60"))
 WALL_SECONDS = float(os.getenv("SOURCE_EXPLORER_TIMEOUT_SECONDS", "1500"))
 MAX_START_URLS = 25
+# Pages that may use the Fetcher's Firecrawl rung. Since 2026-11-13 a page the
+# plain download cannot get goes to the Fetcher; on Q46726 that day every
+# sec.gov page did, and with the history builder the question's whole Firecrawl
+# budget (25 of 25) was spent. Later pages still get the free rungs.
+MAX_PAID_FETCHES = int(os.getenv("SOURCE_EXPLORER_MAX_PAID_FETCHES", "5"))
 
 
 def enabled() -> bool:
@@ -194,7 +199,7 @@ async def explore(*, title: str, resolution_criteria: str, fine_print: str = "",
     system = _system_prompt(title=title, resolution_criteria=resolution_criteria, fine_print=fine_print,
                             artifact_check=artifact_check, start_urls=start_urls, hosts=hosts,
                             today=today.isoformat())
-    pages = PageReader(hosts, engine=LABEL, max_pages=MAX_PAGES)
+    pages = PageReader(hosts, engine=LABEL, max_pages=MAX_PAGES, max_paid_fetches=MAX_PAID_FETCHES)
     async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT}, timeout=30,
                                  follow_redirects=True) as client:
 

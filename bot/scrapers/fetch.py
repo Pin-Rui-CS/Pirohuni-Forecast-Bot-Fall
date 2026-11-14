@@ -17,6 +17,7 @@ full text.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -97,7 +98,33 @@ def scrape_adequacy(content: str) -> tuple[bool, str]:
             f"only {len(text)} chars, under the {_MIN_SUBSTANTIVE_SCRAPE_CHARS}-char "
             "substantive-content floor (navigation/boilerplate shell)"
         )
+    if separators_lost(text):
+        return False, SEPARATORS_LOST_REASON
     return True, ""
+
+
+_GLUED_NUMBERS = re.compile(r"\d{15,}")
+_ADDRESS = re.compile(r"https?://\S+|\S*/\S*")
+SEPARATORS_LOST_REASON = (
+    "a data file with its tags or separators stripped, so numbers from different fields "
+    "are glued into single runs of digits"
+)
+
+
+def separators_lost(text: str) -> bool:
+    """Whether a text looks like a data file with its structure stripped:
+    several runs of 15 or more digits (two or more numbers glued together) in
+    its first part. Ordinary pages and intact data files have none or one.
+
+    Question 46726 (2026-11-13): a 13F holdings XML came back from a scrape
+    rung as "...02079K305596807916700SHDFND2,4,111670000...". Two research
+    agents read share counts out of it; one split 16,700 shares into
+    16,700,000, and the brief carried a false baseline 16.7M shares too high.
+    """
+    # Web addresses and file paths carry long ids of their own (an EDGAR
+    # accession number is 18 digits), so they are left out.
+    prose = _ADDRESS.sub(" ", (text or "")[:20_000])
+    return len(set(_GLUED_NUMBERS.findall(prose))) >= 3
 
 
 def thin_content_banner(reason: str, engines_tried: Iterable[str]) -> str:
@@ -108,6 +135,15 @@ def thin_content_banner(reason: str, engines_tried: Iterable[str]) -> str:
     the silence as evidence the value does not exist.
     """
     tried = ", ".join(dict.fromkeys(e for e in engines_tried if e)) or "all engines"
+    if reason == SEPARATORS_LOST_REASON:
+        return (
+            "[SCRAPE WARNING — FIELDS RAN TOGETHER] This fetch returned "
+            f"{reason}. Engines tried: {tried}. Splitting a run of digits back into its "
+            "fields is guesswork (a wrong split once turned 16,700 shares into 16,700,000). "
+            "Do NOT report any number from the text below. The same data must be read where "
+            "each number keeps its label: the source's complete text file, another format of "
+            "the same file, or a site that tabulates it.\n\n"
+        )
     return (
         "[SCRAPE WARNING — INADEQUATE CONTENT] This fetch succeeded but returned "
         f"{reason}. Engines tried: {tried}. The page is most likely client-side "

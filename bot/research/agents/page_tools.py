@@ -23,6 +23,7 @@ import httpx
 
 from bot.research.resolution import series_discovery
 from bot.research.resolution.embedded_tables import Table, extract_tables, visible_text
+from bot.scrapers.fetch import separators_lost
 from bot.trace import source_ledger
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,17 @@ _API_HINT = re.compile(r"/api\b|/v\d+/|\.json\b|geojson|graphql|/data\b|/feeds?\
 _SECRET = re.compile(r"key|secret|token|passw|auth|credential", re.IGNORECASE)
 _TEMPLATE = re.compile(r"`([^`\n]{0,160}\$\{[^`\n]{0,200})`")
 MAX_CODE_POINTERS = 25
+
+
+# The test itself (separators_lost) lives with the Fetcher, which applies it to
+# every scrape; here it decides what an agent is told and may quote.
+FLATTENED_WARNING = (
+    "WARNING -- FIELDS RAN TOGETHER: this file reached the bot with its tags or separators "
+    "stripped, so numbers belonging to different fields are glued into one run of digits. "
+    "Splitting a run is guesswork (a wrong split once turned 16,700 shares into 16,700,000). "
+    "Do NOT report any value from this text and do not quote it. Find the same data where "
+    "each number keeps its label: the source's complete text file, another format of the "
+    "same file, or a site that tabulates it.")
 
 
 def host_of(url: str) -> str:
@@ -141,6 +153,9 @@ class PageReader:
         # of its own; the question's shared Firecrawl cap still applies).
         self.max_paid_fetches = max_paid_fetches
         self.paid_fetches = 0
+        self.served_by = ""
+        # Pages whose text arrived with its field separators stripped.
+        self.flattened: set[str] = set()
         self.tables: dict[str, Table] = {}
         self.fetched: list[str] = []
         self.links_shown: set[str] = set()
@@ -206,6 +221,7 @@ class PageReader:
         if capped:
             policy = replace(policy, firecrawl_off=True)
         page = await fetch_page(url, policy)
+        self.served_by = page.engine   # for the source ledger: which rung answered
         free = (page.engine in (source_ledger.ENGINE_CACHE, source_ledger.ENGINE_SKIPPED_DUPLICATE)
                 or page.engine.startswith("adapter:"))
         if not capped and not free:
@@ -236,16 +252,24 @@ class PageReader:
                 # A document, or a page the plain download could not get (on
                 # Q46722 pnc.com refused every plain request): the Fetcher.
                 kind = "document" if document else "page, read through the fetcher after the plain download failed"
+                self.served_by = ""
                 text, fetcher_error = await self._fetcher_text(url)
-                source_ledger.record_url_event(url, source_ledger.ROLE_SCRAPED, engine=self.engine,
+                # The rung that answered (firecrawl-scrape, crawl4ai-basic, an
+                # adapter...), so the audit shows what each agent page cost.
+                source_ledger.record_url_event(url, source_ledger.ROLE_SCRAPED,
+                                               engine=self.served_by or self.engine,
                                                ok=bool(text), chars=len(text), error=fetcher_error or error)
                 if not text:
                     what = "document could not be read" if document else "fetch failed"
                     out.append(f"## {prefix} {url}\n{what}: {fetcher_error or error}")
                     continue
                 self.texts[url] = text
+                warning = ""
+                if separators_lost(text):
+                    self.flattened.add(url)
+                    warning = "\n" + FLATTENED_WARNING
                 out.append(f"## {prefix} {url} ({kind}, {len(text):,} chars of text; "
-                           f"\"text\" action for all of it)\ntext: {text[:700]}")
+                           f"\"text\" action for all of it){warning}\ntext: {text[:700]}")
                 continue
             page = fetched[0]
             source_ledger.record_url_event(url, source_ledger.ROLE_SCRAPED, engine=self.engine,
@@ -325,6 +349,8 @@ class PageReader:
                 if end < len(body) else f"\n[end of {what}]")
         result = (f"{prelude}\n\n" if prelude else "") + (
             f"## {url} -- {what}, chars {start:,}-{end:,} of {len(body):,}\n{body[start:end]}{tail}")
+        if url in self.flattened:
+            result = f"{FLATTENED_WARNING}\n\n{result}"
         return result[:MAX_RESULT_CHARS]
 
     async def find(self, client: httpx.AsyncClient, url: str, word: str, today: date) -> str:
@@ -349,6 +375,8 @@ class PageReader:
         head = f"## {url} -- {total} occurrence(s) of {word!r}" + (
             f", first {MAX_FIND_HITS} shown" if total > len(hits) else "")
         result = (f"{prelude}\n\n" if prelude else "") + head + "\n" + "\n".join(hits)
+        if url in self.flattened:
+            result = f"{FLATTENED_WARNING}\n\n{result}"
         return result[:MAX_RESULT_CHARS]
 
     def rows(self, table_id: str, contains: str = "") -> str:
@@ -365,7 +393,8 @@ class PageReader:
         its raw source, or a table of it the model was shown -- ignoring case
         and runs of whitespace."""
         needle = _squash(quote)
-        if not needle:
+        # Nothing can be checked against a page whose fields ran together.
+        if not needle or url in self.flattened:
             return False
         bodies = {"text": self.texts.get(url, ""), "source": self.sources.get(url, ""),
                   "shown": "\n".join(self.shown.get(url, []))}
