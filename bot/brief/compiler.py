@@ -1177,25 +1177,30 @@ async def _audit_brief(
 
 def _format_artifact_check(artifact_check: dict | None) -> str:
     if not artifact_check:
-        return "No automated artifact check was run."
-    lines = [
-        f"Status: {artifact_check.get('status', 'unknown')}",
-        f"What was found: {artifact_check.get('what_was_found') or 'Not stated.'}",
-        f"What is missing: {artifact_check.get('what_is_missing') or 'Nothing noted.'}",
-    ]
+        return "No automated check was run."
+    if artifact_check.get("resolution_value") == "found":
+        lines = [f"Resolution value: already in the research — "
+                 f"{artifact_check.get('resolution_value_quote') or 'not quoted'}"]
+    else:
+        lines = ["Resolution value: not published yet (normal for a forecast)."]
+    for name, entry in (artifact_check.get("inputs") or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        label = name.replace("_", " ")
+        if name == "signal" and entry.get("name"):
+            label = f"main signal ({entry['name']}) and its track record"
+        lines.append(
+            f"Input {label}: {entry.get('status', 'unknown')}. "
+            f"Found: {entry.get('found') or 'nothing'}. Missing: {entry.get('missing') or 'nothing'}."
+        )
     closest_available = artifact_check.get("closest_available")
     if closest_available:
         lines.append(
-            "Closest available adjacent metric (carry forward into Key Evidence UNLESS the "
+            "Related value retrieved (carry forward into Key Evidence UNLESS the "
             "scraped research explicitly corrects, redates, or refutes it — a correction found "
             "in the research outranks this line; in that case carry the CORRECTED fact instead "
             "and flag the discrepancy in Gaps And Cautions): "
             f"{closest_available}"
-        )
-    forecast_swing = artifact_check.get("forecast_swing")
-    if forecast_swing:
-        lines.append(
-            f"Estimated forecast swing if the missing information were resolved: {forecast_swing}"
         )
     return "\n".join(lines)
 
@@ -1244,7 +1249,7 @@ Background:
 Fine print:
 {fine_print or "Not provided."}
 
-Automated check of whether the required evidence artifact was found:
+Automated check of which forecasting inputs the research holds:
 {_format_artifact_check(artifact_check)}
 
 RESOLUTION SOURCE material (AUTHORITATIVE — this is the page/feed the question
@@ -1282,12 +1287,13 @@ Output exactly these Markdown sections:
 
 ## Extracted Artifact Rows
 - Name the artifact the Evidence Plan says is most important.
-- Do NOT write a found / partial / not-found verdict here — the authoritative artifact status is shown to the forecaster in a separate fixed banner above this brief. This section is only for the data itself.
+- Do NOT write a found / partial / not-found verdict here — the automated Forecasting Inputs check is shown to the forecaster in a separate fixed banner above this brief. This section is only for the data itself.
 - If it is a table or time series and any rows were extracted, reproduce those rows here verbatim, and mark the resolution-target row as "not yet released" when the resolution source does not show it. This is the single most important section.
 - Never present a secondary or year-ago figure as if it were the confirmed resolution value.
 - A "Data embedded in the resolution source" section, or a "Resolution Source Explorer" retry section, was read from the resolution source's own data tables. Reproduce the rows that bear on the resolution value verbatim, with their dates, and keep every forecast or schedule the source publishes for dates up to the resolution date — labelled as the source's own forecast, never as a measurement.
 - A "History Tables" section holds past values or past cases that a research step copied from pages it read; code checked each row's quoted text against its source page and computed the counts. Reproduce each table whole — every row with its source mark, CONFLICT marks, the coverage line (COMPLETE or NOT a complete list), any "WORKED OUT, NOT COPIED" line, the "Computed by code" lines, the counts, any "Years ... with no row" line and the source list — and any "Also noted" lines as Key Evidence items. Do not add rows to it from other sections, do not recompute its counts, and do not turn a count into a probability; when the table is marked NOT a complete list, say beside every count taken from it that it describes only the rows found.
-- If the automated check lists a "Closest available adjacent metric", reproduce it here and carry it into Key Evidence as an `adjacent-metric` item. Never omit a value that was actually retrieved just because it is not the exact metric.
+- If the automated check lists a "Related value retrieved", reproduce it here and carry it into Key Evidence as an `adjacent-metric` item. Never omit a value that was actually retrieved just because it is not the exact metric.
+- When the research holds the main signal's track record (a past poll, guidance, consensus or stated date next to what actually happened), reproduce those rows here too: they tell the forecaster how far to trust the signal this time. A past forecast next to its outcome is track-record evidence, not stale coverage.
 
 ## Resolution Mechanics
 Only when the question resolves off a published source (a curated page, tracker, leaderboard, or scheduled data release) rather than by direct observation of an event; if it resolves by direct observation, write the bullet "Not applicable — resolves by direct observation of the event" — and when that event is one step inside a longer causal sequence (steps that must precede it, steps that normally follow it), add one bullet writing out the chain in order with the resolution event marked (e.g. "confidential draft → review → PUBLIC FILING (resolution event) → roadshow → listing"), so the forecaster can classify each report and market as upstream or downstream of the resolution event. State the chain as the sources describe it; do not attach timing conclusions to it here. Otherwise, at most 4 bullets, each citing its evidence:
@@ -1328,7 +1334,7 @@ Omit this section entirely if you have none. Otherwise at most 3 bullets, labell
 
 ## Gaps And Cautions
 - At most 6 bullets: missing facts, stale data, conflicting reports, resolution-source access failures, and revision risks.
-- If the required artifact is missing or partial, say what that implies for forecast uncertainty in one bullet.
+- If one of the three forecasting inputs (current state, rate, main signal's track record) is missing, name it in one bullet. Do not list the not-yet-published resolution value as a gap: before the event it cannot exist.
 
 Rules:
 - Do not make a probability estimate.

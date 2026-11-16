@@ -493,6 +493,11 @@ Important grouping rules:
 - When a group holds several issues of the same dated series (weekly reports,
   monthly bulletins, successive schedules), rank the most recent issue first:
   it supersedes the earlier ones.
+- A page comparing a PAST forecast-like signal with what then happened (an
+  earlier poll next to the election result, past guidance next to the reported
+  figure, an announced date next to the real one) is track-record evidence, not
+  stale coverage: within its group, rank it above pages that only repeat the
+  current signal. It tells a forecaster how far to trust that signal.
 - Prefer enough groups to cover different evidence types instead of letting one
   category crowd out everything else.
 - Use question-specific groups when useful. Common group types include current

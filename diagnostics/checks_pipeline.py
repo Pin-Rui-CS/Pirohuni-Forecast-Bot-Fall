@@ -85,7 +85,13 @@ def artifact_retry(a: RunArtifacts) -> Check:
               f"retry {'ran' if decision.get('ran') else 'did not run'}"
               + (f" ({decision.get('reason')})" if decision.get("reason") else "")
               + (", result included" if decision.get("included") else ""))
-    missing = (a.forecast.get("artifact_check") or {}).get("what_is_missing") or ""
+    check = a.forecast.get("artifact_check") or {}
+    # Since 2026-11-15 the check reports three forecasting inputs; older runs
+    # carry a single "what_is_missing".
+    inputs = check.get("inputs") if isinstance(check.get("inputs"), dict) else {}
+    missing = "; ".join(f"{name}: {entry.get('missing')}" for name, entry in inputs.items()
+                        if isinstance(entry, dict) and entry.get("status") != "found" and entry.get("missing")
+                        ) or check.get("what_is_missing") or ""
     return Check(f"{CAT}.artifact_retry", CAT, title, status, detail,
                  value={"versions": versions, "final": final, "retry": decision},
                  evidence=[f"still missing: {missing[:400]}"] if missing else [])

@@ -19,6 +19,12 @@ _MAX_ASKNEWS_CHARS = 40_000
 # (plan_sections). Both _format_plan and _fallback_plan use these constants,
 # so a renamed heading cannot silently stop matching.
 ARTIFACT_HEADING = "Required Evidence Artifact"
+# The forecast-like signal the forecast will most likely lean on (a poll,
+# guidance, consensus, a stated plan, a betting favourite) and the record that
+# shows how far to trust it. Added 2026-11-15: in the worst-scoring resolved
+# questions the missing piece was often that record (Q46724's poll vs past
+# results, NYT's guidance vs actuals), which no step asked for.
+MAIN_SIGNAL_HEADING = "Main Signal And Its Track Record"
 DIRECT_EVIDENCE_HEADING = "Direct Evidence To Find"
 NEAR_PROXY_HEADING = "Near Proxy Evidence To Find"
 # What the prediction-market searches read: enough to recognise a market that
@@ -114,10 +120,15 @@ AskNews research already gathered:
 Return only valid JSON in this shape:
 {{
   "required_artifact": {{
-    "name": "The one evidence artifact most needed before forecasting",
+    "name": "The one evidence artifact most needed before forecasting: a record that EXISTS TODAY (past values, past cases, a series), never the result the question is waiting for",
     "why_it_matters": "Why this is the base-rate anchor",
     "ideal_sources": ["official source", "primary dataset"],
     "fields_to_extract": ["year", "value", "source_url", "notes"]
+  }},
+  "main_signal": {{
+    "signal": "The forward-looking signal a forecaster will most likely lean on (a poll, company guidance, an analyst consensus, an official forecast, a party's stated plan or date, a betting favourite), or 'none'",
+    "track_record_needed": "The record that shows how far to trust that KIND of signal: its past values next to what actually happened (past polls vs results, past guidance vs reported figures, past stated dates vs when things happened), or empty when signal is 'none'",
+    "track_record_queries": ["search query for that record"]
   }},
   "resolution_mechanics": {{
     "source_update_behavior": "Does the resolution source update or publish again before the resolution deadline? State the known or likely cadence, the next expected update, and what evidence would pin it down",
@@ -133,6 +144,7 @@ Return only valid JSON in this shape:
 }}
 
 Rules:
+- The required artifact is something a forecaster can use BEFORE the outcome is known: how often or how fast this kind of thing has happened (past values of the quantity, past cases of the event). Never name the resolution result itself (the election's official results, the filing the question waits for): it cannot exist yet. The resolution source belongs under resolution_mechanics.
 - Prefer official, source-of-truth artifacts over broad news.
 - For count questions, the required artifact is usually a historical count table.
 - For direct prediction markets, distinguish exact-human/outcome markets from adjacent proxy markets.
@@ -166,9 +178,16 @@ def _extract_json_object(text: str) -> dict:
 def _format_plan(plan: dict) -> str:
     artifact = plan.get("required_artifact") if isinstance(plan.get("required_artifact"), dict) else {}
     mechanics = plan.get("resolution_mechanics") if isinstance(plan.get("resolution_mechanics"), dict) else {}
+    signal = plan.get("main_signal") if isinstance(plan.get("main_signal"), dict) else {}
     search_queries = plan.get("search_queries") if isinstance(plan.get("search_queries"), list) else []
     mechanics_queries = mechanics.get("mechanics_queries") if isinstance(mechanics.get("mechanics_queries"), list) else []
-    combined_queries = list(search_queries) + [q for q in mechanics_queries if q not in search_queries]
+    signal_queries = signal.get("track_record_queries") if isinstance(signal.get("track_record_queries"), list) else []
+    combined_queries = list(search_queries)
+    for query in mechanics_queries + signal_queries:
+        if query not in combined_queries:
+            combined_queries.append(query)
+    signal_name = str(signal.get("signal") or "").strip()
+    no_signal = not signal_name or signal_name.lower() in {"none", "n/a", "not applicable"}
     lines = [
         "# Evidence Plan",
         "",
@@ -177,6 +196,10 @@ def _format_plan(plan: dict) -> str:
         f"- Why it matters: {artifact.get('why_it_matters') or 'Not stated.'}",
         f"- Ideal sources: {_format_list(artifact.get('ideal_sources'))}",
         f"- Fields to extract: {_format_list(artifact.get('fields_to_extract'))}",
+        "",
+        f"## {MAIN_SIGNAL_HEADING}",
+        f"- Signal: {'None identified.' if no_signal else signal_name}",
+        f"- Track record to find: {'Not applicable.' if no_signal else (str(signal.get('track_record_needed') or '').strip() or 'Not stated.')}",
         "",
         "## Resolution Mechanics",
         f"- Source update behavior: {mechanics.get('source_update_behavior') or 'Not assessed.'}",
@@ -214,6 +237,10 @@ Evidence planning failed: {type(exc).__name__}: {exc}
 - Why it matters: The forecast should be anchored to the most direct base-rate or official artifact available.
 - Ideal sources: official source, primary dataset, reputable archive
 - Fields to extract: date or year, value or status, source_url, notes
+
+## {MAIN_SIGNAL_HEADING}
+- Signal: Not assessed (evidence planning failed).
+- Track record to find: Not assessed (evidence planning failed).
 
 ## Resolution Mechanics
 - Source update behavior: Not assessed (evidence planning failed).

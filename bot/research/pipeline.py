@@ -916,68 +916,73 @@ def _build_raw_research_view(provider_results: list[tuple[str, str]]) -> str:
     return joined
 
 
+_INPUT_LABELS = (
+    ("current_state", "A. Current state"),
+    ("rate", "B. Rate (how often / how fast this kind of thing happens)"),
+    ("signal", "C. Main signal's track record"),
+)
+
+
 def _apply_artifact_status_banner(report: str, artifact_check: dict | None) -> str:
-    """Inject the authoritative artifact-status verdict at the top of the brief.
+    """Inject the check's Forecasting Inputs verdict at the top of the brief.
 
     The forecaster consumes only ``compiled_report``. This deterministic injection
     is the single authoritative status block (the compiler is told NOT to emit its
     own verdict), so the true status survives even if the compiler LLM tries to
     upgrade it. Mirrors ``_apply_degradation_warning``.
+
+    Until 2026-11-15 this was "Required Artifact Status", judged against the
+    resolution value: PARTIAL or MISSING on 164 of 184 resolved questions, each
+    time with "widen your interval". The bot's binary forecasts were then
+    underconfident (60-75% forecasts came true 86% of the time).
     """
-    if not artifact_check:
+    if not artifact_check or not isinstance(artifact_check.get("inputs"), dict):
         return report
-    status = (artifact_check.get("status") or "").strip().lower()
-    if status not in {"complete", "partial", "missing"}:
-        return report
-
-    if status == "complete":
-        label = "FOUND — the resolution value appears in the research (see rows below)"
-        header = "## Required Artifact Status (authoritative — do not override)"
-    elif status == "partial":
-        label = "PARTIAL — the exact resolution value is NOT confirmed"
-        header = "## Required Artifact Status (starting point — reconstruct and reconcile)"
-    else:
-        label = "MISSING — the resolution value was not found in the research"
-        header = "## Required Artifact Status (starting point — reconstruct and reconcile)"
-
-    lines = [
-        header,
-        f"The resolution-target artifact is **{label}**.",
-    ]
-    if artifact_check.get("what_was_found"):
-        lines.append(f"- What was found: {artifact_check['what_was_found']}")
-    if artifact_check.get("what_is_missing"):
-        lines.append(f"- Still missing: {artifact_check['what_is_missing']}")
-    if artifact_check.get("closest_available"):
-        if status == "complete":
-            lines.append(
-                f"- Closest available adjacent metric (use it, do not ignore it): "
-                f"{artifact_check['closest_available']}"
-            )
-        else:
-            lines.append(
-                f"- Closest available adjacent metric (a STARTING reference only — not the "
-                f"answer; re-derive the outside view yourself from the Key Evidence below and "
-                f"reconcile any disagreement with this figure): "
-                f"{artifact_check['closest_available']}"
-            )
-    if artifact_check.get("forecast_swing"):
-        lines.append(f"- Forecast swing if resolved: {artifact_check['forecast_swing']}")
-    if status == "complete":
+    found = artifact_check.get("resolution_value") == "found"
+    lines = ["## Forecasting Inputs (automated check — do not override)"]
+    if found:
         lines.append(
-            "- Forecasting rule: weight this confirmed value heavily, but still sanity-check it "
-            "against the resolution source and the recent trajectory before collapsing your distribution."
+            "- Resolution value: **ALREADY IN THE RESEARCH** — "
+            f"{artifact_check.get('resolution_value_quote') or 'see the rows below'}"
         )
     else:
         lines.append(
-            "- Forecasting rule: build your own outside view; do not anchor on any single figure "
-            "above. If the brief contains a reference class of comparable prior cases, construct "
-            "the base rate yourself — identify the qualifying instances, state the count and the "
-            "denominator, and adjust for how this case differs (selection or conditioning effects). "
-            "If there is no comparable prior class (a novel, unprecedented, or one-off event), "
-            "reason from mechanism and drivers instead and say so — do not force a base rate. Either "
-            "way, widen your interval and do NOT treat any secondary, year-ago, or adjacent-metric "
-            "figure as the resolved value."
+            "- Resolution value: not published yet. That is normal for a forecast and is not by "
+            "itself a reason to move toward 50% or to widen."
+        )
+    for name, label in _INPUT_LABELS:
+        entry = artifact_check["inputs"].get(name) or {}
+        status = (entry.get("status") or "unknown").upper()
+        if name == "signal" and entry.get("name"):
+            label = f"{label} ({entry['name']})"
+        parts = [f"- {label}: **{status}**"]
+        if entry.get("found"):
+            parts.append(f"Found: {entry['found']}")
+        if entry.get("missing") and status != "FOUND":
+            missing = f"Missing: {entry['missing']}"
+            if entry.get("would_move"):
+                missing += f" (finding it could move the forecast: {entry['would_move']})"
+            parts.append(missing)
+        lines.append(" ".join(parts) if len(parts) == 1 else parts[0] + "\n  - " + "\n  - ".join(parts[1:]))
+    if artifact_check.get("closest_available"):
+        lines.append(
+            "- Related value retrieved (evidence, but not the resolution value itself): "
+            f"{artifact_check['closest_available']}"
+        )
+    if found:
+        lines.append(
+            "- Forecasting rule: weight the confirmed resolution value heavily, but still sanity-check "
+            "it against the resolution source and the recent trajectory before collapsing your distribution."
+        )
+    else:
+        lines.append(
+            "- Forecasting rule: build the forecast from these inputs. Start from the rate — if the "
+            "brief holds comparable prior cases, construct the base rate yourself (qualifying "
+            "instances, count and denominator) and adjust for how this case differs; if there is no "
+            "comparable class, reason from mechanism and say so. Place the current state against it, "
+            "and weigh the main signal by its track record. Move toward 50% (or widen) only for an "
+            "input marked missing, by about as much as it could move the forecast — not because the "
+            "outcome is still unknown."
         )
     banner = "\n".join(lines)
 
@@ -1002,7 +1007,7 @@ Resolution criteria:
 Fine print:
 {fine_print}
 
-The evidence plan named a required evidence artifact:
+The evidence plan (what research was asked to find):
 {evidence_plan_excerpt}
 
 Research gathered so far (per provider, truncated):
@@ -1021,10 +1026,25 @@ next step or date, the latest reading of a measure, a decision or document the r
 mentions but never retrieved, a newer issue of a dated series), and can a search still find
 it? Do not repeat a search already run; a promising page that was found but never read, or
 whose fetch failed, is worth a query naming it. Put no month or date into a query unless a
-source states that date. Return no queries when nothing searchable would change the forecast.
+source states that date. A forecast needs three inputs (Job 2 lists them); one that research
+lacks and a search can still find is often the most useful query. Return no queries when
+nothing searchable would change the forecast.
 
-JOB 2 -- ARTIFACT VERDICT. Decide whether the required artifact was actually found in the
-research. This verdict is a banner for the brief writer; it does not steer Job 1.
+JOB 2 -- FORECASTING INPUTS. The question's outcome normally has not happened yet, so its
+result is normally absent: that is expected and is NOT a research gap. Report instead whether
+research holds the three inputs a forecaster needs, and separately whether the resolution value
+itself already appears. This report is a banner for the forecasters; it does not steer Job 1.
+  current_state -- the latest dated reading or status of the thing the question asks about (the
+      latest value of the quantity, how far a process has got, who has declared, the latest poll),
+      and how much time is left before the resolution date.
+  rate -- how often or how fast this kind of thing has happened: past values of the quantity,
+      past cases of the event, how far the quantity has moved over a similar span. The evidence
+      plan's required artifact is usually this input.
+  signal -- the forward-looking signal a forecast would lean on (a poll, company guidance, an
+      analyst consensus, an official forecast, a stated plan or date, a betting favourite; the
+      plan's "Main Signal" names one) and its TRACK RECORD: that kind of signal's past values next
+      to what actually happened. Name the signal; then say whether its track record was found.
+      Use name "none" and status "missing" when no such signal exists.
 
 Return only valid JSON, retry_plan first:
 {{
@@ -1032,16 +1052,22 @@ Return only valid JSON, retry_plan first:
     "reasoning": "two to four sentences: what has been tried, what is still unresolved, and what would most change the forecast",
     "queries": [{{"query": "a focused web search", "why": "one line: the fact it should find"}}]
   }},
-  "status": "complete" | "partial" | "missing",
-  "what_was_found": "one or two sentences quoting the key values found, or stating none were",
-  "what_is_missing": "one or two sentences naming the exact rows/values still missing, or empty string",
-  "closest_available": "if the EXACT resolution metric is absent but a same-family adjacent metric WAS actually retrieved (a related series, the same series on a different basis, or a different-but-comparable measure), quote that value WITH its date/period and source, and state its factual relationship to the target (e.g. 'June 2025 I-94 visitor arrivals = 5,278,944; target is I-92 Foreign Originating, which historically runs a stable fraction of this'); empty string if no adjacent value was retrieved. Quote ONLY what was retrieved: do not compute ratios, percentages, base rates, or averages from it, do not characterize it as high/low, and do not state a forecast implication — rate-construction and interpretation are the forecaster's job",
-  "forecast_swing": "low" | "moderate" | "decisive"
+  "resolution_value": "found" | "not_yet",
+  "resolution_value_quote": "only when found: the resolution value as the research states it, with its date and source; otherwise empty string",
+  "inputs": {{
+    "current_state": {{"status": "found" | "partial" | "missing", "found": "quote the values with their dates and sources, or empty", "missing": "what is still missing, or empty", "would_move": "low" | "moderate" | "large"}},
+    "rate": {{"status": "...", "found": "...", "missing": "...", "would_move": "..."}},
+    "signal": {{"name": "the signal, or none", "status": "...", "found": "the signal's current value AND any past values next to outcomes, quoted", "missing": "...", "would_move": "..."}}
+  }},
+  "closest_available": "if the EXACT resolution metric is absent but a same-family adjacent metric WAS actually retrieved (a related series, the same series on a different basis, or a different-but-comparable measure), quote that value WITH its date/period and source, and state its factual relationship to the target (e.g. 'June 2025 I-94 visitor arrivals = 5,278,944; target is I-92 Foreign Originating, which historically runs a stable fraction of this'); empty string if no adjacent value was retrieved. Quote ONLY what was retrieved: do not compute ratios, percentages, base rates, or averages from it, do not characterize it as high/low, and do not state a forecast implication — rate-construction and interpretation are the forecaster's job"
 }}
 "queries" holds at most {max_retry_queries} entries, most useful first.
+"would_move" is how far a reasonable forecast could plausibly move if that input's missing part
+were found: "low" (<5 percentage points), "moderate" (5-15), "large" (>15). Use "low" when the
+input is found.
 
 Rules:
-- Every verdict field (Job 2) records what the research CONTAINS, not an analysis of it. In those fields, do not perform arithmetic, construct a base rate or reference-class frequency, estimate a probability, or editorialize about what a value implies. Quote values with their dates and sources; the forecaster computes rates and draws conclusions.
+- Every Job 2 field records what the research CONTAINS, not an analysis of it. In those fields, do not perform arithmetic, construct a base rate or reference-class frequency, estimate a probability, or editorialize about what a value implies. Quote values with their dates and sources; the forecaster computes rates and draws conclusions.
 - TEMPORAL IMPOSSIBILITY: today is {today}. A report or observation whose claimed event or
   publication date is AFTER today cannot exist — its date is wrong (almost always a prior-year
   event mislabeled with the current year, e.g. a year-less "Aug 7" snippet from an old post).
@@ -1054,21 +1080,23 @@ Rules:
   or retracts a claim made elsewhere in the research (e.g. "Important note: this event is dated
   8 August 2025, not 2026"), the correction wins. Report the corrected fact and do not restate
   the superseded claim anywhere in your output.
-- "complete" only if the artifact's actual values/rows appear in the research text.
-- The resolution criteria and fine print define the target: the exact metric, source,
-  units and date the question resolves on. The evidence plan's artifact is a planner's
-  reading of them. Where the two differ, judge against the resolution criteria, and say
-  in "what_is_missing" what the plan's artifact got wrong.
-- Mentions that the artifact exists, without its values, count as "partial" at best.
-- If the resolution value is a count or aggregate over an enumerable set (rows,
-  member states, entries), "complete" additionally requires the row-level
-  breakdown behind the headline number (which members are in which category).
-  A headline count whose composition was not retrieved (e.g. a truncated table)
-  is "partial" and "what_is_missing" must name the missing rows.
-- A retrieved value that is the right family but the WRONG exact metric does NOT make status "complete", but it MUST be recorded in "closest_available" — never silently discard a value that was actually fetched just because it is not the exact metric. It is decision-relevant and must survive into the brief.
-- forecast_swing estimates how far a reasonable forecast would plausibly move if the
-  missing information were resolved one way versus the other: "low" (<5 percentage
-  points), "moderate" (5-15), "decisive" (>15). Use "low" when status is "complete".
+- Every "missing" entry must name something that EXISTS TODAY ({today}) and could be found now.
+  Never list the resolution value itself, a release or result scheduled after today, or a
+  reading for a date after today as missing: before the event it cannot exist, and listing it
+  would tell the forecaster to hedge for nothing. If the latest reading that exists today was
+  found, current_state is "found" even though the resolution value is still to come.
+- An input is "found" only if its actual values or rows appear in the research text. Mentions
+  that a table or record exists, without its values, count as "partial" at best.
+- The resolution criteria and fine print define the target: the exact metric, source, units
+  and date the question resolves on. "resolution_value" is "found" only when that exact value,
+  for that exact date or period, appears in the research. If the resolution value is a count
+  or aggregate over an enumerable set (rows, member states, entries), "found" also requires the
+  row-level breakdown behind the headline number; a headline count whose composition was not
+  retrieved goes under current_state as "partial", naming the missing rows.
+- current_state is about the resolution target itself (its latest reading on the same metric
+  and source when one exists). A related value on a different metric, basis or date belongs in
+  "closest_available" too — never silently discard a value that was actually fetched just
+  because it is not the exact metric. It is decision-relevant and must survive into the brief.
 Searches that have often helped in Job 1 -- ideas, not requirements:
 - The row-level breakdown behind a headline count (which members are in which category).
 - When the resolution value lies in the future: the same quantity's latest published
@@ -1116,19 +1144,27 @@ def _flag_future_dated_claims(
     important evidence field.
     """
     today = today or datetime.date.today()
-    for field_name in ("what_was_found", "closest_available"):
-        text = check.get(field_name) or ""
+
+    def flagged(text: str) -> str:
         future_dates = find_future_full_dates(text, today, exclude=question_dates)
-        if future_dates:
-            check[field_name] = (
-                f"{text} [TEMPORAL FLAG — automated gate: this field mentions "
-                f"{', '.join(future_dates)}, which is after today ({today.isoformat()}). "
-                f"If the text presents that date as when the evidence was published or "
-                f"observed, the item is misdated — a report about a future date cannot "
-                f"exist yet — and its value must not be treated as current or in-window. "
-                f"If the date is a deadline, target, or scheduled effective date that the "
-                f"evidence merely mentions, this flag is a false positive; disregard it.]"
-            )
+        if not future_dates:
+            return text
+        return (
+            f"{text} [TEMPORAL FLAG — automated gate: this field mentions "
+            f"{', '.join(future_dates)}, which is after today ({today.isoformat()}). "
+            f"If the text presents that date as when the evidence was published or "
+            f"observed, the item is misdated — a report about a future date cannot "
+            f"exist yet — and its value must not be treated as current or in-window. "
+            f"If the date is a deadline, target, or scheduled effective date that the "
+            f"evidence merely mentions, this flag is a false positive; disregard it.]"
+        )
+
+    for field_name in ("what_was_found", "resolution_value_quote", "closest_available"):
+        if check.get(field_name):
+            check[field_name] = flagged(check[field_name])
+    for entry in (check.get("inputs") or {}).values():
+        if isinstance(entry, dict) and entry.get("found"):
+            entry["found"] = flagged(entry["found"])
     return check
 
 
@@ -1425,6 +1461,51 @@ def _parse_retry_plan(parsed: dict) -> tuple[list[str], dict]:
                      "queries": [{"query": q, "why": w} for q, w in zip(queries, whys)]}
 
 
+INPUT_NAMES = ("current_state", "rate", "signal")
+_INPUT_STATUSES = {"found", "partial", "missing"}
+_WOULD_MOVE = {"low", "moderate", "large"}
+
+
+def _parse_inputs_verdict(parsed: dict) -> dict:
+    """The check's Job 2: whether the resolution value is already in, and the three inputs.
+
+    Until 2026-11-15 the verdict was complete/partial/missing against the resolution
+    value itself, which before the event can only be partial or missing: 164 of 184
+    resolved questions' briefs said so, and the forecasters were told to widen every
+    time. ``status`` is kept, derived from the new fields, for logs and older readers:
+    "complete" only when the resolution value is already in the research.
+    """
+    resolution_value = str(parsed.get("resolution_value", "")).strip().lower().replace(" ", "_")
+    if resolution_value not in {"found", "not_yet"}:
+        raise ValueError(f"artifact-check returned invalid resolution_value: {resolution_value!r}")
+    raw_inputs = parsed.get("inputs") if isinstance(parsed.get("inputs"), dict) else {}
+    inputs = {}
+    for name in INPUT_NAMES:
+        entry = raw_inputs.get(name) if isinstance(raw_inputs.get(name), dict) else {}
+        status = str(entry.get("status", "")).strip().lower()
+        would_move = str(entry.get("would_move", "")).strip().lower()
+        inputs[name] = {
+            "status": status if status in _INPUT_STATUSES else "unknown",
+            "found": str(entry.get("found", "") or "").strip(),
+            "missing": str(entry.get("missing", "") or "").strip(),
+            "would_move": would_move if would_move in _WOULD_MOVE else "",
+        }
+        if name == "signal":
+            inputs[name]["name"] = str(entry.get("name", "") or "").strip()
+    if resolution_value == "found":
+        status = "complete"
+    elif all(entry["status"] in {"missing", "unknown"} for entry in inputs.values()):
+        status = "missing"
+    else:
+        status = "partial"
+    return {
+        "status": status,
+        "resolution_value": resolution_value,
+        "resolution_value_quote": str(parsed.get("resolution_value_quote", "") or "").strip(),
+        "inputs": inputs,
+    }
+
+
 async def verify_required_artifact(
     title: str,
     evidence_plan: str,
@@ -1484,19 +1565,11 @@ async def verify_required_artifact(
             _label=label,
         )
         parsed = _extract_json_object(response)
-        status = str(parsed.get("status", "")).strip().lower()
-        if status not in {"complete", "partial", "missing"}:
-            raise ValueError(f"artifact-check returned invalid status: {status!r}")
+        verdict = _parse_inputs_verdict(parsed)
         retry_queries, retry_plan = _parse_retry_plan(parsed)
-        forecast_swing = str(parsed.get("forecast_swing", "")).strip().lower()
-        if forecast_swing not in {"low", "moderate", "decisive"}:
-            forecast_swing = ""
         return _flag_future_dated_claims({
-            "status": status,
-            "what_was_found": str(parsed.get("what_was_found", "")).strip(),
-            "what_is_missing": str(parsed.get("what_is_missing", "")).strip(),
+            **verdict,
             "closest_available": str(parsed.get("closest_available", "")).strip(),
-            "forecast_swing": forecast_swing,
             "retry_queries": retry_queries,
             "retry_plan": retry_plan,
         }, question_dates=question_dates)

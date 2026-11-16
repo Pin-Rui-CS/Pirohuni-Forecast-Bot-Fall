@@ -30,7 +30,7 @@ You must complete every phase below in order. At the end of each phase, state yo
 Discipline rules that apply to every phase:
 - The research material labels evidence items with IDs like [E1], [E2]. Every shift of your central estimate or your interval must cite the specific evidence item(s) that justify it. A shift with no citable evidence must be small and explicitly labelled as judgment.
 - Keep arithmetic simple and show it in-line. State the data values you use explicitly. Do not perform calculations you cannot show.
-- If the Required Artifact Status says the key evidence is missing or partial, your final 90% interval must be meaningfully wider than it would be with the artifact in hand. Say so explicitly. Do not fill gaps with invented certainty.
+- The resolution value has normally not been published yet; that alone is no reason to widen. The Forecasting Inputs block says which inputs were found: the current level, the rate or measured movement, and the track record of the main signal (e.g. a guidance or consensus figure). Widen only for a specific missing input you name, by the amount the INTERVAL SIZING rules below give for it, and say so explicitly. Do not fill gaps with invented certainty.
 - Avoid double-counting correlated evidence. Items tracing to the same source, event, or announcement are largely one signal — corroboration of reliability, not additive weight — so update for them roughly once, and do not re-apply a fact in both the base rate and an inside-view update. Evidence items may end with a source-document tag like [D2]: items sharing a tag come from ONE underlying document and count as a single signal however many items carry it. Genuinely independent lines of evidence that happen to agree DO each add weight; the caution is against inflating one signal into many, not against real confirmation.
 - Apply each named discount or drag factor (source-update lag, veto risk, seasonal slowdown, reporting delay, etc.) in EXACTLY ONE phase. Keep a running ledger of the discounts you have applied and where; a later phase may cite a discount as already applied but must not shift your estimate or interval for it again. If you notice the same consideration moving your numbers a second time, undo the second application and say so.
 - Timing or pace evidence about a process must show its comparison before it moves your numbers: elapsed time vs the comparator's duration (while elapsed < comparator the case is ON SCHEDULE — no "running slower" penalty until elapsed actually exceeds it), and statutory minimum intervals vs typical practice (a legal minimum is a floor, not the central case).
@@ -1404,7 +1404,7 @@ def answer_space_blocks(
         "prior, NOT a hard limit and NOT a substitute for your own analysis — questions "
         "do resolve outside their range, which is why the bound is open. Give it MORE "
         "weight when the research failed to retrieve the current level of the quantity "
-        "(see the Required Artifact Status), because it is then the only anchor you have "
+        "(see the current state in the Forecasting Inputs block), because it is then the only anchor you have "
         "that did not depend on that retrieval succeeding. Give it LESS weight when you "
         "hold dated, on-metric measurements that disagree with it — but say so.",
     ]

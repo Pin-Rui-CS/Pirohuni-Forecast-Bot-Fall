@@ -35,7 +35,7 @@ import httpx
 from bot.llm import provider as llm_provider
 from bot.research.agents import loop
 from bot.research.agents.page_tools import FIND_CONTEXT, MAX_URLS_PER_FETCH, TEXT_CHARS, USER_AGENT, PageReader
-from bot.research.evidence_plan import ARTIFACT_HEADING, plan_sections
+from bot.research.evidence_plan import ARTIFACT_HEADING, MAIN_SIGNAL_HEADING, plan_sections
 from bot.research.history.table_store import MAX_COLUMNS, MAX_COUNTS, MAX_NOTES, MAX_ROWS, MAX_TABLES, TableStore
 from bot.research.search import search_service
 from bot.trace import source_ledger
@@ -101,9 +101,14 @@ it. Build at most {MAX_TABLES} small tables of PAST values or PAST cases, copied
 
   Table A -- the history the question is about: past values of the quantity it asks about, or past
       cases of the kind of event it asks about. The plan above usually names it.
-  Table B (optional) -- ONE different comparison group: a second, honest way to ask "how often does
-      this kind of thing happen", wider or narrower than Table A. Build it only if it could give a
-      forecaster a different starting number, and only after Table A has rows.
+  Table B (optional) -- ONE of these, only after Table A has rows:
+      (1) the track record of the main signal the plan names (a poll, guidance, a consensus, a stated
+          plan or date): one row per past case, with the signal's value and what actually happened
+          (past polls next to the results, past guidance next to the reported figures, past announced
+          dates next to the real ones). Prefer this when the plan names a signal: it tells a
+          forecaster how far to trust that signal this time.
+      (2) a different comparison group: a second, honest way to ask "how often does this kind of
+          thing happen", wider or narrower than Table A, if it could give a different starting number.
 
 You do NOT forecast. Never write a probability, a rate you worked out yourself, or an opinion on
 the answer. Code computes the counts; the forecasters do the judging.
@@ -226,7 +231,8 @@ async def run(*, title: str, resolution_criteria: str = "", fine_print: str = ""
     budget = search_service.SearchBudget(MAX_SEARCHES)
     system = _system_prompt(
         title=title, resolution_criteria=resolution_criteria, fine_print=fine_print, background=background,
-        artifact=plan_sections(evidence_plan, (ARTIFACT_HEADING,)), found=start_hits(), today=today.isoformat())
+        artifact=plan_sections(evidence_plan, (ARTIFACT_HEADING, MAIN_SIGNAL_HEADING)), found=start_hits(),
+        today=today.isoformat())
 
     async def run_search(queries) -> str:
         queries = [str(q) for q in (queries if isinstance(queries, list) else [])][:MAX_QUERIES_PER_SEARCH]

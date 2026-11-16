@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import datetime
 import logging
+import math
+import os
 import re
 
 import numpy as np
@@ -19,6 +21,34 @@ from bot.llm.client import ResponseTruncatedError, call_llm
 
 logger = logging.getLogger(__name__)
 
+# The final probability is pushed away from 50%: logit(p') = STRETCH * logit(p).
+# Language models trained with human feedback hedge: AIA Forecaster (arXiv
+# 2511.07678) reports a true ~0.85 coming out as ~0.6 and prompt fixes as
+# "largely ineffective", and applies a fixed sqrt(3). Every model in this bot
+# hedged too: over 82 resolved binary questions (to 2026-11-13) its 60-75%
+# forecasts came true 86% of the time and its 10-25% ones 5%, and the best
+# per-model factor was 1.4-2.05. A fixed, published factor rather than one fitted
+# to 82 questions; sqrt(3) took the Brier score from 0.146 to 0.135. The raw
+# value is kept in ``extra`` so the factor can be re-fitted later.
+CALIBRATION_STRETCH = float(os.getenv("BINARY_CALIBRATION_STRETCH", "1.732"))
+# The stretch stops at 5% / 95%. Metaculus points are log scores, which punish a
+# confident miss hard: on the 82 questions, stopping at 1% / 99% gained +2.4 peer
+# points per question with a 20% chance the true effect is a loss (one question,
+# 9% -> 2%, lost 162 points); stopping at 5% / 95% gained +3.0 with 9%. A raw
+# forecast already beyond 5% / 95% is left as the models gave it: the cap limits
+# the stretch, it never pulls a forecast back toward 50%.
+_STRETCH_FLOOR, _STRETCH_CEILING = 0.05, 0.95
+
+
+def stretch_probability(probability: float, factor: float = CALIBRATION_STRETCH) -> float:
+    """``probability`` moved away from 0.5 by ``factor`` on the log-odds scale, stopping at
+    5% / 95%; a probability already beyond those bounds is returned unchanged."""
+    p = float(probability)
+    if factor == 1.0 or p == 0.5 or p <= _STRETCH_FLOOR or p >= _STRETCH_CEILING:
+        return p
+    stretched = 1.0 / (1.0 + math.exp(-factor * math.log(p / (1.0 - p))))
+    return round(min(max(stretched, _STRETCH_FLOOR), _STRETCH_CEILING), 4)
+
 
 BINARY_PROMPT_TEMPLATE = """
 You are a Superforecaster — a disciplined, calibrated prediction engine trained in the methods described in Philip Tetlock's research on superior forecasting. You will be given a forecasting question and supporting research material. Your job is to produce a well-reasoned probability estimate by working through a structured analytical process.
@@ -28,10 +58,10 @@ You must complete every phase below in order. At the end of each phase, state yo
 Discipline rules that apply to every phase:
 - Every probability adjustment you make must cite the specific evidence that justifies it. When the research material labels evidence items with IDs like [E1], [E2], cite those IDs; when it carries no such labels (raw, uncompiled research), cite the source name or URL instead — the requirement is a citable source, not the label format. An adjustment with no citable evidence must be small and explicitly labelled as judgment.
 - Keep arithmetic simple and show it in-line (e.g. "3 of 14 similar cases -> ~21%"). Do not perform calculations you cannot show.
-- If the Required Artifact Status says the key evidence is missing or partial, WIDEN your uncertainty and say so. Then classify each missing fact before reacting to it:
+- The outcome has not happened yet, so its absence from the research is normal and is NOT a reason to move toward 50%. The Forecasting Inputs block says which inputs were found: the current state, the rate (how often or how fast this kind of thing happens), and the track record of the main signal. Move toward 50% only for a specific missing input or fact you name, and say how far it moves you and why; when the inputs you hold point the same way, commit to where they point. Classify each missing fact before reacting to it:
   - Contingent / current facts (vote counts, schedules, who has committed, current status): do NOT guess — treat as genuinely unknown.
   - Stable institutional, legal, or procedural facts (how an established process works, fixed rules, well-documented precedent): you MAY resolve these from your own established knowledge. Label such reasoning "[from background knowledge]" so it is auditable, and reason from it rather than leaving it "unresolved".
-  A partial artifact means WIDEN — it does NOT mean default to the nearest prediction market or refuse to apply knowledge you reliably hold. Widening means more uncertainty about the open outcome; it never licenses inventing probability mass for a specific unobserved state. In particular, size any "already happened but not yet reported" branch by how observable the source is — for a real-time, publicly monitored source (a live public register, a heavily watched feed) that branch is well under 1%, not a round 5%.
+  A missing input does NOT mean default to the nearest prediction market or refuse to apply knowledge you reliably hold. The uncertainty it leaves is about the open outcome; it never licenses inventing probability mass for a specific unobserved state. In particular, size any "already happened but not yet reported" branch by how observable the source is — for a real-time, publicly monitored source (a live public register, a heavily watched feed) that branch is well under 1%, not a round 5%.
 - Avoid double-counting correlated evidence. Items tracing to the same source, event, or announcement are largely one signal — corroboration of reliability, not additive weight — so update for them roughly once, and do not re-apply a fact in both the base rate and an inside-view update. Evidence items may end with a source-document tag like [D2]: items sharing a tag come from ONE underlying document and count as a single signal however many items carry it. Genuinely independent lines of evidence that happen to agree DO each add weight; the caution is against inflating one signal into many, not against real confirmation.
 - Apply each named discount or drag factor (source-update lag, veto risk, seasonal slowdown, reporting delay, etc.) in EXACTLY ONE phase. Keep a running ledger of the discounts you have applied and where; a later phase may cite a discount as already applied but must not shift probability for it again. If you notice the same consideration moving your numbers a second time, undo the second application and say so.
 
@@ -405,6 +435,15 @@ async def get_binary_gpt_prediction(
             final_comment_sections
         )
 
+    raw_probability = median_probability
+    median_probability = stretch_probability(raw_probability)
+    if median_probability != raw_probability:
+        final_comment = (
+            f"Calibrated Probability: {median_probability} (from {round(raw_probability, 4)}, "
+            f"pushed away from 50% by a fixed factor of {CALIBRATION_STRETCH} on the log-odds scale, "
+            f"because language-model forecasts hedge toward 50%)\n\n" + final_comment
+        )
+
     return ForecastResult(
         forecast=median_probability,
         comment=final_comment,
@@ -413,6 +452,8 @@ async def get_binary_gpt_prediction(
         run_values=[p / 100 for p in probabilities],
         extra={
             "tiebreaker_used": tiebreaker_used,
+            "raw_probability": round(raw_probability, 4),
+            "calibration_stretch": CALIBRATION_STRETCH,
             "spread_pp": prob_spread,
             "ensemble": ensemble,
             "weights": [{"model": m, "weight": round(w, 4)} for m, w in zip(models, weights)],
