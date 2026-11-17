@@ -203,7 +203,7 @@ class PageReader:
             return (raw, "text/html", url), ""
         return None, error
 
-    async def _fetcher_text(self, url: str) -> tuple[str, str]:
+    async def _fetcher_text(self, url: str, free_only: bool = False) -> tuple[str, str]:
         """(text, error) for a document or a page the plain download could not
         get, read through the bot's Fetcher.
 
@@ -211,13 +211,14 @@ class PageReader:
         which web search needs too. A reader with ``max_paid_fetches`` stops
         using that rung after that many pages went past the free first rungs;
         later pages still get the free rungs (adapters, Crawl4AI, Wayback).
+        ``free_only`` keeps the paid rung off for this page whatever is left.
         """
         from dataclasses import replace
 
         from bot.scrapers.fetch import fetch_page, search_policy
 
         policy = search_policy()
-        capped = self.max_paid_fetches is not None and self.paid_fetches >= self.max_paid_fetches
+        capped = free_only or (self.max_paid_fetches is not None and self.paid_fetches >= self.max_paid_fetches)
         if capped:
             policy = replace(policy, firecrawl_off=True)
         page = await fetch_page(url, policy)
@@ -326,6 +327,52 @@ class PageReader:
             result = (result[:MAX_RESULT_CHARS]
                       + f"\n\n[cut at {MAX_RESULT_CHARS:,} chars -- fetch fewer pages or pass \"columns\"]")
         return result
+
+    async def read_quietly(self, client: httpx.AsyncClient, urls: list[str],
+                           parallel: int = 4) -> dict[str, str]:
+        """Read many pages or documents for code to use, not for the model to
+        see: their text is kept (so quotes can be checked against it), nothing
+        is returned to show. Free routes only -- the plain download, the site
+        adapters (PDFs among them), Crawl4AI, Wayback -- so reading 40 editions
+        of a report never spends Firecrawl credits. These pages do not count
+        against ``max_pages``; the caller caps how many it asks for.
+
+        Returns {url: error} for the pages that could not be read."""
+        import asyncio
+
+        gate = asyncio.Semaphore(max(1, parallel))
+        errors: dict[str, str] = {}
+
+        async def one(url: str) -> None:
+            if url in self.texts:
+                return
+            if not self.allowed(url):
+                errors[url] = "not an allowed site"
+                return
+            async with gate:
+                document = urlsplit(url).path.lower().endswith(DOCUMENT_SUFFIXES)
+                fetched, error = (None, "") if document else await self._plain(client, url)
+                if fetched is not None and fetched[1] and not fetched[1].startswith(_TEXT_TYPES):
+                    fetched, document = None, True
+                if fetched is None:
+                    text, fetcher_error = await self._fetcher_text(url, free_only=True)
+                    engine = self.served_by or self.engine
+                    if not text:
+                        errors[url] = fetcher_error or error or "no text"
+                        source_ledger.record_url_event(url, source_ledger.ROLE_SCRAPED, engine=engine,
+                                                       ok=False, error=errors[url])
+                        return
+                else:
+                    self.sources[url] = fetched[0]
+                    text, engine = visible_text(fetched[0], len(fetched[0])), self.engine
+                source_ledger.record_url_event(url, source_ledger.ROLE_SCRAPED, engine=engine,
+                                               ok=True, chars=len(text))
+                self.texts[url] = text
+                if separators_lost(text):
+                    self.flattened.add(url)
+
+        await asyncio.gather(*(one(u) for u in dict.fromkeys(urls)))
+        return errors
 
     async def text(self, client: httpx.AsyncClient, url: str, start: int, today: date,
                    source: bool = False) -> str:

@@ -30,19 +30,26 @@ logger = logging.getLogger(__name__)
 # per-model factor was 1.4-2.05. A fixed, published factor rather than one fitted
 # to 82 questions; sqrt(3) took the Brier score from 0.146 to 0.135. The raw
 # value is kept in ``extra`` so the factor can be re-fitted later.
-CALIBRATION_STRETCH = float(os.getenv("BINARY_CALIBRATION_STRETCH", "1.732"))
-# The stretch stops at 5% / 95%. Metaculus points are log scores, which punish a
-# confident miss hard: on the 82 questions, stopping at 1% / 99% gained +2.4 peer
-# points per question with a 20% chance the true effect is a loss (one question,
-# 9% -> 2%, lost 162 points); stopping at 5% / 95% gained +3.0 with 9%. A raw
-# forecast already beyond 5% / 95% is left as the models gave it: the cap limits
+#
+# Reduced 2026-11-17 from sqrt(3) stopping at 5% / 95%: live, raw 15-18% forecasts
+# were going out at 5-6%, far from the community. Re-scored on the same 82
+# questions (peer points per question / chance the true effect is a loss / worst
+# question): sqrt(3) to 5-95% +3.0 / 9% / -112; sqrt(3) to 10-90% +3.5 / 2% / -56;
+# 1.5 to 10-90% +2.9 / 1% / -44. Most of the risk was in pushing an already low
+# forecast down to 5%, so stopping at 10% / 90% is both safer and no worse; 1.5
+# keeps forecasts closer to what the models said. Also, after the WIDEN rule was
+# removed (2026-11-15) the raw forecasts themselves became a little more extreme
+# (mean distance from 50%: 0.232 before, 0.255 on the first 19 live runs).
+CALIBRATION_STRETCH = float(os.getenv("BINARY_CALIBRATION_STRETCH", "1.5"))
+# Metaculus points are log scores, which punish a confident miss hard. A raw
+# forecast already beyond 10% / 90% is left as the models gave it: the cap limits
 # the stretch, it never pulls a forecast back toward 50%.
-_STRETCH_FLOOR, _STRETCH_CEILING = 0.05, 0.95
+_STRETCH_FLOOR, _STRETCH_CEILING = 0.10, 0.90
 
 
 def stretch_probability(probability: float, factor: float = CALIBRATION_STRETCH) -> float:
     """``probability`` moved away from 0.5 by ``factor`` on the log-odds scale, stopping at
-    5% / 95%; a probability already beyond those bounds is returned unchanged."""
+    10% / 90%; a probability already beyond those bounds is returned unchanged."""
     p = float(probability)
     if factor == 1.0 or p == 0.5 or p <= _STRETCH_FLOOR or p >= _STRETCH_CEILING:
         return p

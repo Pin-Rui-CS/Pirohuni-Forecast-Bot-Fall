@@ -34,9 +34,12 @@ import httpx
 
 from bot.llm import provider as llm_provider
 from bot.research.agents import loop
-from bot.research.agents.page_tools import FIND_CONTEXT, MAX_URLS_PER_FETCH, TEXT_CHARS, USER_AGENT, PageReader
+from bot.research.agents.page_tools import (FIND_CONTEXT, MAX_URLS_PER_FETCH, TEXT_CHARS, USER_AGENT, PageReader,
+                                            host_of, page_links)
 from bot.research.evidence_plan import ARTIFACT_HEADING, MAIN_SIGNAL_HEADING, plan_sections
+from bot.research.history import same_field
 from bot.research.history.table_store import MAX_COLUMNS, MAX_COUNTS, MAX_NOTES, MAX_ROWS, MAX_TABLES, TableStore
+from bot.research.history.table_store import number as table_number
 from bot.research.search import search_service
 from bot.trace import source_ledger
 
@@ -52,6 +55,9 @@ MAX_SEARCHES = int(os.getenv("HISTORY_BUILDER_MAX_SEARCHES", "10"))
 # replay (2026-11-13, 13 runs) used 0-5 a question.
 MAX_PAID_FETCHES = int(os.getenv("HISTORY_BUILDER_MAX_PAID_FETCHES", "5"))
 MAX_QUERIES_PER_SEARCH = 3
+# Editions one "same_field" action may read (free routes only; they do not count
+# against MAX_PAGES). A table holds MAX_ROWS rows, so more would not fit.
+MAX_SAME_FIELD_DOCUMENTS = 40
 WALL_SECONDS = float(os.getenv("HISTORY_BUILDER_TIMEOUT_SECONDS", "1200"))
 MAX_START_HITS = 30
 _MAX_BACKGROUND_CHARS = 3_000
@@ -147,7 +153,18 @@ Reply with exactly ONE JSON object per turn, nothing else:
   {{"action": "rows", "table": "P1.T2", "contains": "optional word"}}
       Every row of one page table (of a very long one, its most recent rows), or only the rows
       holding a word.
-  {{"action": "add_rows", "table": "A", "rows": [{{"values": {{"date": "2021-09-26", "...": "..."}}, "url": "...", "quote": "..."}}, ...]}}
+  {{"action": "same_field", "table": "A", "columns": {{"date": "date", "value": "..."}},
+    "example": {{"url": "...", "value": "20,552", "date": "11 de noviembre de 2026", "date_iso": "2026-11-11"}},
+    "documents": {{"from_page": "...", "links_containing": "...", "max": {MAX_SAME_FIELD_DOCUMENTS}}}}}
+      For a table whose rows are editions of ONE recurring report (a daily bulletin, a weekly
+      situation report) listed on a page. Read one edition yourself first; in "example" give that
+      edition's address, the value exactly as it is written there, and the edition's own date as
+      written there plus in YYYY-MM-DD. Code learns the words just before the value and before the
+      date, reads up to {MAX_SAME_FIELD_DOCUMENTS} editions linked from "from_page" for free (when the editions are files,
+      every link to a file of the example's type, in the page's order; for web pages, the links
+      containing "links_containing"; or give "urls"), and adds a row per edition it can read. Editions
+      it cannot read are listed back; if the report's wording changed, send same_field again with
+      an example from one of those. One turn, and the editions do not use your page budget.
       Copies rows into your table. Each row needs the address of a page you fetched and a "quote":
       a short piece of text copied EXACTLY from a tool result for that page, holding the row's
       value. Code looks for the quote on the page and rejects the row if it is not there, so a row
@@ -208,6 +225,98 @@ class BuildResult:
     actions: list[str] = field(default_factory=list)
 
 
+async def _same_field(action: dict, *, store: TableStore, pages: PageReader, client: httpx.AsyncClient,
+                      today: date) -> str:
+    """The "same_field" action: one field read by code from many editions of
+    one report, learned from an edition the model has read (see same_field.py)."""
+    table = store.tables.get(str(action.get("table") or "").strip().upper())
+    if table is None:
+        return f"No table {action.get('table')!r}. Define it first with the plan action."
+    columns = action.get("columns") if isinstance(action.get("columns"), dict) else {}
+    date_column = str(columns.get("date") or table.key)
+    value_column = str(columns.get("value") or "")
+    if date_column not in table.columns or value_column not in table.columns:
+        return (f'Give "columns": {{"date": ..., "value": ...}} naming columns of table {table.id}: '
+                f"{', '.join(table.columns)}.")
+    example = action.get("example") if isinstance(action.get("example"), dict) else {}
+    example_url = str(example.get("url") or "")
+    if example_url not in pages.texts:
+        prelude = await pages.fetch(client, [example_url], [], today)
+        if example_url not in pages.texts:
+            return f"The example edition could not be read.\n{prelude}"
+    learned, why = same_field.learn(pages.texts[example_url], str(example.get("value") or ""),
+                                    str(example.get("date") or ""), str(example.get("date_iso") or ""))
+    if learned is None:
+        return f"Nothing read: {why}."
+
+    documents = action.get("documents") if isinstance(action.get("documents"), dict) else {}
+    room = MAX_ROWS - len(table.rows)
+    wanted = min(room, MAX_SAME_FIELD_DOCUMENTS, loop.int_arg(documents, "max") or MAX_SAME_FIELD_DOCUMENTS)
+    if wanted <= 0:
+        return f"Table {table.id} is full ({MAX_ROWS} rows)."
+    urls = [str(u) for u in documents.get("urls") or [] if str(u).startswith("http")]
+    outside: list[str] = []
+    listing = str(documents.get("from_page") or "")
+    if not urls and listing:
+        if listing not in pages.sources:
+            prelude = await pages.fetch(client, [listing], [], today)
+            if listing not in pages.sources:
+                return f"The page listing the editions could not be read.\n{prelude}"
+        contains = str(documents.get("links_containing") or "").lower()
+        suffix = "." + example_url.rsplit(".", 1)[-1].lower() if "." in example_url.rsplit("/", 1)[-1] else ""
+        links = page_links(listing, pages.sources[listing], {host_of(listing), host_of(example_url)})
+        if suffix:
+            # Editions are files of the example's type. Every such link is
+            # tried, in the page's order: a filter on the name would drop an
+            # edition whose file was named differently -- on 2026-11-16 the
+            # newest Mexico bulletin was "Informe_diario_12_11_2026.pdf" and
+            # every earlier one "INFORME_DIARIO_SARAMPION_<date>.pdf". A file
+            # that is not an edition is simply not read.
+            urls = [u for u in links if u.lower().split("?")[0].endswith(suffix)]
+            outside = [u for u in urls if contains and contains not in u.lower()]
+        else:
+            urls = [u for u in links if contains in u.lower()] if contains else []
+    urls = list(dict.fromkeys([example_url] + urls))[:wanted]
+    outside = [u for u in outside if u in urls]
+    if len(urls) <= 1:
+        return 'No other editions found: give "documents": {"from_page": "...", "links_containing": "..."} or "urls".'
+
+    errors = await pages.read_quietly(client, urls)
+    rows, skipped = [], []
+    for url in urls:
+        if url in errors:
+            skipped.append(f"{url}: could not be read ({errors[url][:80]})")
+            continue
+        reading = same_field.read(pages.texts.get(url, ""), learned)
+        if reading.value is None or not reading.date:
+            skipped.append(f"{url}: {reading.reason}")
+            continue
+        rows.append({"values": {date_column: reading.date, value_column: reading.value},
+                     "url": url, "quote": reading.quote, "_number": table_number(reading.value)})
+    added = store.add_rows(table.id, [{k: v for k, v in r.items() if k != "_number"} for r in rows])
+    falls = []
+    ordered = sorted(rows, key=lambda r: r["values"][date_column])
+    for before, after in zip(ordered, ordered[1:]):
+        if None not in (before["_number"], after["_number"]) and after["_number"] < before["_number"]:
+            falls.append(f"{before['values'][date_column]} {before['values'][value_column]} -> "
+                         f"{after['values'][date_column]} {after['values'][value_column]}")
+    lines = [f"same_field: {len(urls)} editions tried, {len(rows)} read by code, {len(skipped)} skipped.",
+             added]
+    if outside:
+        read_outside = [u for u in outside if any(r["url"] == u for r in rows)]
+        lines.append(f"{len(outside)} of the files tried do not contain {documents.get('links_containing')!r} "
+                     f"in their address (every file of the example's type on the page is tried); "
+                     f"{len(read_outside)} of them read as editions: " + " ".join(read_outside[:5]))
+    if skipped:
+        lines.append("Skipped (read these yourself, or send same_field again with an example from one of "
+                     "them if the wording changed):\n" + "\n".join(skipped[:15])
+                     + (f"\n... and {len(skipped) - 15} more" if len(skipped) > 15 else ""))
+    if falls:
+        lines.append("The value FELL between these consecutive editions; check them before trusting the "
+                     "table: " + "; ".join(falls[:10]))
+    return "\n".join(lines)
+
+
 def _as_list(value) -> list[dict]:
     """One {...} or a list of them, as a list of dicts."""
     items = value if isinstance(value, list) else [value]
@@ -215,19 +324,19 @@ def _as_list(value) -> list[dict]:
 
 
 async def build(*, title: str, resolution_criteria: str = "", fine_print: str = "", background: str = "",
-                evidence_plan: str = "", today: date | None = None) -> str:
+                evidence_plan: str = "", target_date: str = "", today: date | None = None) -> str:
     """The history tables as a research section, or "" when no row was kept."""
     result = await run(title=title, resolution_criteria=resolution_criteria, fine_print=fine_print,
-                       background=background, evidence_plan=evidence_plan, today=today)
+                       background=background, evidence_plan=evidence_plan, target_date=target_date, today=today)
     return result.section
 
 
 async def run(*, title: str, resolution_criteria: str = "", fine_print: str = "", background: str = "",
-              evidence_plan: str = "", today: date | None = None) -> BuildResult:
+              evidence_plan: str = "", target_date: str = "", today: date | None = None) -> BuildResult:
     today = today or date.today()
     source_ledger.set_source_context("History Builder", "main pass")
     pages = PageReader(None, engine=LABEL, max_pages=MAX_PAGES, max_paid_fetches=MAX_PAID_FETCHES)
-    store = TableStore(pages.has_text)
+    store = TableStore(pages.has_text, target_date)
     budget = search_service.SearchBudget(MAX_SEARCHES)
     system = _system_prompt(
         title=title, resolution_criteria=resolution_criteria, fine_print=fine_print, background=background,
@@ -272,6 +381,9 @@ async def run(*, title: str, resolution_criteria: str = "", fine_print: str = ""
         async def count(action: dict) -> str:
             return store.count(action.get("table"), action.get("where") or [])
 
+        async def same_field_action(action: dict) -> str:
+            return await _same_field(action, store=store, pages=pages, client=client, today=today)
+
         def carried(action: dict) -> str:
             """Rows and counts sent along with another action. Adding rows used
             to need a turn of its own (1-5 of 14 turns in the 2026-11-13
@@ -309,7 +421,7 @@ async def run(*, title: str, resolution_criteria: str = "", fine_print: str = ""
             system=system,
             handlers={**{name: with_carried(handler) for name, handler in (
                           ("plan", plan), ("search", search), ("fetch", fetch), ("text", text),
-                          ("find", find), ("rows", rows))},
+                          ("find", find), ("rows", rows), ("same_field", same_field_action))},
                       "add_rows": add_rows, "count": count},
             label=LABEL, trace_stage="history", trace_name="history builder",
             max_turns=MAX_TURNS, wall_seconds=WALL_SECONDS,

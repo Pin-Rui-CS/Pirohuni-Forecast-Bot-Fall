@@ -355,7 +355,8 @@ async def run_research(
     # and never repeats one of the main pass's searches.
     history_task = _start_history_builder(
         run_provider, search_ready, title=title, resolution_criteria=resolution_criteria,
-        fine_print=fine_print, background=background, evidence_plan=evidence_plan, feeds=plan_feeds)
+        fine_print=fine_print, background=background, evidence_plan=evidence_plan, feeds=plan_feeds,
+        target_date=target_date)
 
     try:
         chosen_search_result, search_provider_errors = await _run_web_search(
@@ -1232,7 +1233,8 @@ def _start_early_source_explorer(run_provider, summary_ready: asyncio.Future,
 
 def _start_history_builder(run_provider, search_ready: asyncio.Future, *, title: str,
                            resolution_criteria: str, fine_print: str, background: str,
-                           evidence_plan: str, feeds: list[str]) -> "asyncio.Task | None":
+                           evidence_plan: str, feeds: list[str],
+                           target_date: str = "") -> "asyncio.Task | None":
     """Start the history builder as a task, or None when it is switched off.
 
     It waits for web search to list its results (as the source explorer does)
@@ -1254,7 +1256,7 @@ def _start_history_builder(run_provider, search_ready: asyncio.Future, *, title:
             history_builder.SECTION_NAME,
             lambda: history_builder.build(
                 title=title, resolution_criteria=resolution_criteria, fine_print=fine_print,
-                background=background, evidence_plan=evidence_plan),
+                background=background, evidence_plan=evidence_plan, target_date=target_date),
             feeds=feeds,
             lane=history_builder.SECTION_NAME,
         )

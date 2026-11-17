@@ -13,6 +13,7 @@ Nothing here judges what the rows mean for the forecast.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 import re
 import statistics
 from typing import Callable
@@ -145,9 +146,14 @@ class HistoryTable:
 
 
 class TableStore:
-    def __init__(self, has_text: Callable[[str, str], bool]):
+    def __init__(self, has_text: Callable[[str, str], bool], target_date: str = ""):
         # has_text(url, quote): is the quote on that page, as fetched this run?
         self._has_text = has_text
+        # The question's resolution date, for the "change over the days left" line.
+        try:
+            self.target = date.fromisoformat(str(target_date or "")[:10])
+        except ValueError:
+            self.target = None
         self.tables: dict[str, HistoryTable] = {}
         self.notes: list[tuple[str, str]] = []      # (text, url)
         self.rejected = 0
@@ -339,7 +345,7 @@ class TableStore:
             caution = ("" if table.complete else
                        " (the table is not a complete list: these describe the rows found, and rows are "
                        "often missing for a reason, so do not read them as how often something happens)")
-            computed = _computed_lines(table)
+            computed = _computed_lines(table) + _change_lines(table, self.target)
             if computed:
                 lines.append(f"Computed by code from the rows above{caution}:")
                 lines.extend(f"- {line}" for line in computed)
@@ -394,6 +400,64 @@ def _missing_years(table: HistoryTable) -> str:
         return ""
     return (f"Years from {span[0]} to {span[-1]} with no row (found by code): "
             + ", ".join(str(y) for y in missing))
+
+
+MIN_CHANGE_ROWS = 10
+MIN_CHANGE_SPANS = 5
+
+
+def _change_lines(table: HistoryTable, target: date | None) -> list[str]:
+    """For a table of dated readings (first column YYYY-MM-DD): how much each
+    number column changed over spans as long as the time from the last row to
+    the question's resolution date. A level says where a quantity has been;
+    the forecast needs how far it moves in the time left. On 2026-11-16
+    (Q46837) the brief held a cumulative total's levels and the forecasters
+    guessed its two-week rise at about three times what the series showed.
+
+    Each span starts at a row and ends at the latest row on or before
+    start + horizon (the value a resolver would read then). Spans overlap, so
+    they are not independent observations; the line says so."""
+    if target is None:
+        return []
+    rows = [r for r in table.ordered() if not r.conflict]
+    try:
+        dated = [(date.fromisoformat(r.values.get(table.key, "")), r) for r in rows]
+    except ValueError:
+        return []    # not daily dates (years, months, case names)
+    if len(dated) < MIN_CHANGE_ROWS:
+        return []
+    last = dated[-1][0]
+    horizon = (target - last).days
+    if horizon <= 0:
+        return []
+    lines = []
+    for column in table.columns[1:]:
+        series = [(d, number(r.values.get(column, ""))) for d, r in dated]
+        series = [(d, n) for d, n in series if n is not None]
+        if len(series) < MIN_CHANGE_ROWS:
+            continue
+        changes = []
+        for start, value in series:
+            end = start + timedelta(days=horizon)
+            if end > last:
+                break
+            at_end = [n for d, n in series if d <= end][-1]
+            changes.append((start, at_end - value))
+        if len(changes) < MIN_CHANGE_SPANS:
+            continue
+        values = sorted(c for _, c in changes)
+        recent_start, recent = changes[-1]
+        lines.append(
+            f"{column}, change over {horizon} days (the time from the last row, {last.isoformat()}, to the "
+            f"question's resolution date, {target.isoformat()}): across {len(values)} overlapping {horizon}-day "
+            f"spans in the table, lowest {_signed(values[0])}, middle (median) {_signed(statistics.median(values))}, "
+            f"highest {_signed(values[-1])}; the most recent span (from {recent_start.isoformat()}) "
+            f"{_signed(recent)}")
+    return lines
+
+
+def _signed(x: float) -> str:
+    return ("+" if x > 0 else "") + _fmt(x)
 
 
 def _computed_lines(table: HistoryTable) -> list[str]:
