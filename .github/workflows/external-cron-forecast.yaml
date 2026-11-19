@@ -69,11 +69,6 @@ name: Forecast via external cron
         required: false
         default: false
         type: boolean
-      shadow_fable:
-        description: "Shadow trial: Claude Fable 5.2 also forecasts (about $0.39 a question) but is not counted in the submitted forecast. Ends by itself after 2026-11-17."
-        required: false
-        default: true
-        type: boolean
       raw_research_forecaster:
         description: "Raw-research forecaster: one extra run that reads the raw research instead of the brief (catches evidence the brief dropped). SoCLaaS models are free."
         required: false
@@ -250,16 +245,6 @@ jobs:
           # (forecasters.base.run_weights; chosen 2026-11-03 from 105 resolved questions).
           export FORECASTER_WEIGHTS="anthropic/claude-opus-5.5=0.5"
           export FORECASTER_BACKUP_MODEL="openai/gpt-6-astra"
-          # Shadow trial (bot.config SHADOW_FORECASTER_MODELS): Fable 5.2 forecasts every
-          # question from the brief but is NOT counted in the submitted forecast; its answer
-          # is saved in forecast.json (extra.shadow) and scored by model-scores once questions
-          # resolve. ~$0.39 per question on top; ends by itself after SHADOW_UNTIL (inclusive).
-          # Started 2026-11-12 after a 7-question backtest (Fable beat Opus on 6); the question
-          # is whether it should replace Opus. ~30 questions, about $12.
-          SHADOW_FABLE="${SHADOW_FABLE:-true}"; SHADOW_UNTIL="2026-11-17"
-          if [ "$SHADOW_FABLE" = "true" ]; then
-            export SHADOW_FORECASTER_MODELS="anthropic/claude-fable-5.2" SHADOW_FORECASTER_UNTIL="$SHADOW_UNTIL"
-          fi
           if [ -n "$RAW_MODEL" ]; then
             export HETEROGENEOUS_RUN_ENABLED=true HETEROGENEOUS_RUN_MODEL="$RAW_MODEL"
             NUM_RUNS=$(( ${#MODELS[@]} + 1 ))
@@ -346,7 +331,6 @@ jobs:
           FC_CLAUDE_OPUS: ${{ inputs.forecaster_claude_opus }}
           FC_GPT56_SOL: ${{ inputs.forecaster_gpt56_sol }}
           FC_CLAUDE_SONNET: ${{ inputs.forecaster_claude_sonnet }}
-          SHADOW_FABLE: ${{ inputs.shadow_fable }}
           FC_QWEN: ${{ inputs.forecaster_qwen }}
           RAW_FORECASTER: ${{ inputs.raw_research_forecaster || 'SoCLaaS DeepSeek->Qwen (free)' }}
           RESEARCH_MODELS: ${{ inputs.research_models || 'soclaas' }}
