@@ -39,7 +39,8 @@ from bot.research.agents.page_tools import (FIND_CONTEXT, MAX_URLS_PER_FETCH, TE
 from bot.research.evidence_plan import (ARTIFACT_HEADING, HISTORY_TABLES_HEADING, MAIN_SIGNAL_HEADING, plan_history,
                                         plan_sections)
 from bot.research.history import same_field
-from bot.research.history.table_store import MAX_COLUMNS, MAX_COUNTS, MAX_NOTES, MAX_ROWS, MAX_TABLES, TableStore
+from bot.research.history.table_store import (MAX_COLUMNS, MAX_COUNTS, MAX_NOTE_QUOTE_CHARS, MAX_NOTES, MAX_ROWS,
+                                              MAX_TABLES, MIN_NOTE_QUOTE_CHARS, TableStore)
 from bot.research.history.table_store import number as table_number
 from bot.research.search import search_service
 from bot.trace import source_ledger
@@ -184,14 +185,16 @@ Reply with exactly ONE JSON object per turn, nothing else:
       {{"action": "fetch", "urls": ["..."], "add_rows": [{{"table": "A", "rows": [...]}}], "count": [{{"table": "A", "where": [...]}}]}}
       The rows are added first, and the reply reports them together with the action's result. Use
       add_rows or count as an action by itself only when you have nothing else to do that turn.
-  {{"action": "final", "coverage": {{"A": {{"complete": false, "text": "..."}}}}, "also_noted": [{{"text": "...", "url": "...", "quote": "..."}}], "could_not_find": "..."}}
+  {{"action": "final", "coverage": {{"A": {{"complete": false, "text": "..."}}}}, "also_noted": [{{"url": "...", "quote": "..."}}], "could_not_find": "..."}}
       Ends the work. "coverage": for each table, "complete": true ONLY if the table holds every
       row of its kind for the period it covers (every year, every case, hits and misses alike);
       otherwise false, and the report warns readers not to read its counts as a rate. "text":
       the period covered, what is missing, and whether the missing rows are likely to differ
       from the ones found (a page about failures lists only the failures). "also_noted": up to {MAX_NOTES}
-      facts you came across that bear on the question and are not in a table, each with its page
-      and an exact quote (checked like a row). "could_not_find": what you looked for and did not get.
+      passages you came across that bear on the question and are not in a table: each the whole
+      sentence or two holding the fact ({MIN_NOTE_QUOTE_CHARS}-{MAX_NOTE_QUOTE_CHARS} characters), copied word for word from a
+      page you fetched. Readers see only the quote, never your words, and code checks it is on
+      the page. "could_not_find": what you looked for and did not get.
 
 You have {MAX_TURNS} turns, {MAX_SEARCHES} searches and {MAX_PAGES} pages; each reply tells you what is left. Rules:
 - Rows come only from pages you fetched in this run. If you remember a value, find a page that
@@ -348,12 +351,49 @@ async def run(*, title: str, resolution_criteria: str = "", fine_print: str = ""
         artifact=plan_sections(evidence_plan, (ARTIFACT_HEADING, MAIN_SIGNAL_HEADING, HISTORY_TABLES_HEADING)),
         found=start_hits(), today=today.isoformat())
     planned = plan_history(evidence_plan)
+    outcome = await drive(
+        system=system, store=store, pages=pages, budget=budget, today=today, label=LABEL,
+        trace_stage="history", trace_name="history builder", search_reason="history builder",
+        max_turns=MAX_TURNS, max_pages=MAX_PAGES, wall_seconds=WALL_SECONDS,
+        tables=planned["tables"], queries=planned["queries"], set_up_by="the evidence plan")
+    logger.info("[history-builder] %d turns, %d searches, %d pages, %d rows kept, %d rejected%s",
+                outcome.turns, budget.used, len(pages.fetched), store.row_count(), store.rejected,
+                f"; stopped: {outcome.stopped}" if outcome.stopped else "")
+    result = BuildResult(
+        turns=outcome.turns, searches=budget.used, pages=len(pages.fetched),
+        rows={t.id: len(t.rows) for t in store.tables.values()}, rejected=store.rejected,
+        notes=len(store.notes), stopped=outcome.stopped, actions=outcome.actions)
+    body = store.render()
+    if not body:
+        return result
+    stopped = (f" The run stopped before the model finished ({outcome.stopped}), so the tables may be "
+               f"less complete than it intended." if outcome.final is None else "")
+    result.section = (
+        f"_A SoCLaaS model searched for pages holding past values or past cases and copied rows into "
+        f"the tables below ({budget.used} searches, {len(pages.fetched)} pages read). Code checked "
+        f"every row: its source page was fetched in this run and the text the model quoted for the "
+        f"row is on that page. Code did NOT check that the model read the row correctly or that a "
+        f"table is complete. The counts are computed by code from the rows shown. Nothing here is a "
+        f"forecast.{stopped}_\n\n{body}"
+    )
+    return result
+
+
+async def drive(*, system: str, store: TableStore, pages: PageReader, budget: search_service.SearchBudget,
+                today: date, label: str, trace_stage: str, trace_name: str, search_reason: str,
+                max_turns: int, max_pages: int, wall_seconds: float, tables: list | None = None,
+                queries: list | None = None, set_up_by: str = "", opening_note: str = "") -> loop.Outcome:
+    """The turn loop of an agent that fills a TableStore: the history builder,
+    and the specialist agents the artifact check sends (bot.research.specialist).
+    ``tables`` set up before the first turn (by ``set_up_by``) and ``queries``
+    run then; ``opening_note`` comes first in the opening message. The final
+    action's coverage, quotes and gaps go into ``store``."""
 
     async def run_search(queries) -> str:
         queries = [str(q) for q in (queries if isinstance(queries, list) else [])][:MAX_QUERIES_PER_SEARCH]
         if not queries:
             return 'Give "queries": ["...", "..."].'
-        outcome = await search_service.search(queries, budget=budget, reason="history builder")
+        outcome = await search_service.search(queries, budget=budget, reason=search_reason)
         return search_service.format_outcome(outcome)
 
     async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT}, timeout=30,
@@ -387,6 +427,9 @@ async def run(*, title: str, resolution_criteria: str = "", fine_print: str = ""
         async def count(action: dict) -> str:
             return store.count(action.get("table"), action.get("where") or [])
 
+        async def add_quotes(action: dict) -> str:
+            return store.add_quotes(action.get("quotes") or [])
+
         async def same_field_action(action: dict) -> str:
             return await _same_field(action, store=store, pages=pages, client=client, today=today)
 
@@ -399,6 +442,8 @@ async def run(*, title: str, resolution_criteria: str = "", fine_print: str = ""
                 out.append(store.add_rows(item.get("table"), item.get("rows") or []))
             for item in _as_list(action.get("count")):
                 out.append(store.count(item.get("table"), item.get("where") or []))
+            if action.get("action") != "add_quotes" and action.get("quotes"):
+                out.append(store.add_quotes(action.get("quotes")))
             return "\n".join(out)
 
         def with_carried(handler):
@@ -413,59 +458,40 @@ async def run(*, title: str, resolution_criteria: str = "", fine_print: str = ""
         def status_line() -> str:
             nonlocal replies
             replies += 1
-            line = (f"Left: {MAX_TURNS - replies} turns, {budget.left} searches, "
-                    f"{max(0, MAX_PAGES - len(pages.fetched))} pages. So far: {store.status()}.")
+            line = (f"Left: {max_turns - replies} turns, {budget.left} searches, "
+                    f"{max(0, max_pages - len(pages.fetched))} pages. So far: {store.status()}.")
             # On 2026-11-12 (Q46584 replay) the model read pages for 13 turns
             # looking for one complete list and ended with an empty table,
             # though two pages it had read each stated a row.
-            if replies >= MAX_TURNS // 2 and store.row_count() == 0:
-                line += ("\nHalf your turns are used and no row has been added. If any page you have "
-                         "read states a row, send add_rows now.")
+            if replies >= max_turns // 2 and store.row_count() == 0 and not store.notes:
+                line += ("\nHalf your turns are used and nothing has been kept. If any page you have "
+                         "read states what you need, send it now (add_rows or quotes).")
             return line
 
-        # The evidence plan saw the whole question and set the tables up: code
-        # defines them and runs the plan's searches, so the model's first turn
-        # starts with a fetch or a search instead of planning. A plan without
-        # tables (or a failed plan) leaves the first turn to the model as before.
-        opening = ""
-        if planned["tables"]:
-            defined = store.define(planned["tables"], by="the evidence plan")
-            searched = await run_search(planned["queries"]) if planned["queries"] else ""
-            opening = ("The evidence plan has set up these tables for you (send \"plan\" to change one or add "
-                       f"one; say why):\n{defined}" + (f"\n\nIts searches, already run:\n{searched}" if searched else ""))
+        # Tables set up before the first turn (the evidence plan's, or the one
+        # the artifact check asked for): code defines them and runs their
+        # searches, so the model's first turn starts with a fetch or a search
+        # instead of planning. Without tables the first turn is the model's.
+        parts = [opening_note.strip()] if opening_note.strip() else []
+        if tables:
+            defined = store.define(tables, by=set_up_by)
+            parts.append(f"{set_up_by[:1].upper()}{set_up_by[1:]} has set up these tables for you (send \"plan\" "
+                         f"to change one or add one; say why):\n{defined}")
+        if queries and (tables or opening_note):
+            parts.append(f"Searches already run for you:\n{await run_search(queries)}")
         outcome = await loop.run(
             system=system,
-            opening=opening,
+            opening="\n\n".join(parts),
             handlers={**{name: with_carried(handler) for name, handler in (
                           ("plan", plan), ("search", search), ("fetch", fetch), ("text", text),
                           ("find", find), ("rows", rows), ("same_field", same_field_action))},
-                      "add_rows": add_rows, "count": count},
-            label=LABEL, trace_stage="history", trace_name="history builder",
-            max_turns=MAX_TURNS, wall_seconds=WALL_SECONDS,
+                      "add_rows": add_rows, "count": count, "add_quotes": add_quotes},
+            label=label, trace_stage=trace_stage, trace_name=trace_name,
+            max_turns=max_turns, wall_seconds=wall_seconds,
             meta=lambda: {"pages_fetched": len(pages.fetched), "searches": budget.used,
-                          "rows": store.row_count(), "rejected": store.rejected},
+                          "rows": store.row_count(), "quotes": len(store.notes), "rejected": store.rejected},
             status_line=status_line)
     if outcome.final is not None:
-        carried(outcome.final)   # rows and counts sent with the final action
+        carried(outcome.final)   # rows, counts and quotes sent with the final action
         store.finish(outcome.final)
-    logger.info("[history-builder] %d turns, %d searches, %d pages, %d rows kept, %d rejected%s",
-                outcome.turns, budget.used, len(pages.fetched), store.row_count(), store.rejected,
-                f"; stopped: {outcome.stopped}" if outcome.stopped else "")
-    result = BuildResult(
-        turns=outcome.turns, searches=budget.used, pages=len(pages.fetched),
-        rows={t.id: len(t.rows) for t in store.tables.values()}, rejected=store.rejected,
-        notes=len(store.notes), stopped=outcome.stopped, actions=outcome.actions)
-    body = store.render()
-    if not body:
-        return result
-    stopped = (f" The run stopped before the model finished ({outcome.stopped}), so the tables may be "
-               f"less complete than it intended." if outcome.final is None else "")
-    result.section = (
-        f"_A SoCLaaS model searched for pages holding past values or past cases and copied rows into "
-        f"the tables below ({budget.used} searches, {len(pages.fetched)} pages read). Code checked "
-        f"every row: its source page was fetched in this run and the text the model quoted for the "
-        f"row is on that page. Code did NOT check that the model read the row correctly or that a "
-        f"table is complete. The counts are computed by code from the rows shown. Nothing here is a "
-        f"forecast.{stopped}_\n\n{body}"
-    )
-    return result
+    return outcome

@@ -23,7 +23,12 @@ MAX_COLUMNS = 6
 MAX_ROWS = 40
 MAX_COUNTS = 6       # counts the model may ask for, per table
 MAX_NOTES = 8
-MAX_NOTE_CHARS = 300
+# A note or quote is text copied from a page, shown to readers exactly as
+# copied: never the model's own words (user rule, 2026-11-20: a weaker model
+# rewording a sentence can change its meaning). Long enough to carry a fact
+# with its context, short enough to stay one passage.
+MIN_NOTE_QUOTE_CHARS = 25
+MAX_NOTE_QUOTE_CHARS = 600
 MAX_CELL_CHARS = 120
 MIN_QUOTE_CHARS = 4
 _OPS = (">=", "<=", "!=", "==", ">", "<", "contains")
@@ -148,7 +153,8 @@ class HistoryTable:
 
 
 class TableStore:
-    def __init__(self, has_text: Callable[[str, str], bool], target_date: str = ""):
+    def __init__(self, has_text: Callable[[str, str], bool], target_date: str = "", *,
+                 max_notes: int = MAX_NOTES, notes_heading: str = "Also noted while reading"):
         # has_text(url, quote): is the quote on that page, as fetched this run?
         self._has_text = has_text
         # The question's resolution date, for the "change over the days left" line.
@@ -157,7 +163,9 @@ class TableStore:
         except ValueError:
             self.target = None
         self.tables: dict[str, HistoryTable] = {}
-        self.notes: list[tuple[str, str]] = []      # (text, url)
+        self.notes: list[tuple[str, str]] = []      # (quote copied from the page, url)
+        self.max_notes = max_notes
+        self.notes_heading = notes_heading
         self.rejected = 0
         self.could_not_find = ""
         # Every change to a table's definition during the run, in order.
@@ -316,16 +324,39 @@ class TableStore:
                 text = stated.get("text") if isinstance(stated, dict) else stated
                 table.complete = isinstance(stated, dict) and stated.get("complete") is True
                 table.coverage = " ".join(str(text or "").split())[:400]
-        for note in final.get("also_noted") or []:
-            if not isinstance(note, dict) or len(self.notes) >= MAX_NOTES:
-                continue
-            text = " ".join(str(note.get("text") or "").split())[:MAX_NOTE_CHARS]
-            url, quote = str(note.get("url") or "").strip(), " ".join(str(note.get("quote") or "").split())
-            if text and url and len(quote) >= MIN_QUOTE_CHARS and self._has_text(url, quote):
-                self.notes.append((text, url))
-            else:
-                self.rejected += 1
+        self.add_quotes(final.get("also_noted") or [])
         self.could_not_find = " ".join(str(final.get("could_not_find") or "").split())[:600]
+
+    def add_quotes(self, items: list) -> str:
+        """Keep passages copied from pages: {"url", "quote"}. A quote stays only
+        if code finds it on its page; the report shows the quote itself, never
+        a summary of it. Until 2026-11-20 a note was the model's own sentence
+        backed by a short quote, and the sentence was what readers saw (Q46726
+        replay: "Bank of America has been trimmed every quarter in the window")."""
+        kept, out = 0, []
+        for item in items if isinstance(items, list) else [items]:
+            if not isinstance(item, dict):
+                continue
+            url, quote = str(item.get("url") or "").strip(), " ".join(str(item.get("quote") or "").split())
+            if len(self.notes) >= self.max_notes:
+                out.append(f"- not kept, the list is full ({self.max_notes}): {quote[:60]!r}")
+                continue
+            if any(quote == q and url == u for q, u in self.notes):
+                continue
+            if len(quote) < MIN_NOTE_QUOTE_CHARS:
+                why = f"too short ({len(quote)} chars; copy at least {MIN_NOTE_QUOTE_CHARS}, the whole sentence)"
+            elif len(quote) > MAX_NOTE_QUOTE_CHARS:
+                why = f"too long ({len(quote)} chars; at most {MAX_NOTE_QUOTE_CHARS}: send the passage that holds the fact)"
+            elif not self._has_text(url, quote):
+                why = ("not found on that page as fetched this run (copy it exactly from a tool result for "
+                       "that page; do not reword, shorten inside, or join separate lines)")
+            else:
+                self.notes.append((quote, url))
+                kept += 1
+                continue
+            self.rejected += 1
+            out.append(f"- rejected: {why}: {quote[:80]!r}")
+        return "\n".join([f"Quotes kept: {kept} (now {len(self.notes)} of {self.max_notes})."] + out)
 
     # -- what the run reports -------------------------------------------------
 
@@ -333,7 +364,8 @@ class TableStore:
         return sum(len(t.rows) for t in self.tables.values())
 
     def status(self) -> str:
-        return "; ".join(f"table {t.id}: {len(t.rows)} rows" for t in self.tables.values()) or "no table defined yet"
+        tables = "; ".join(f"table {t.id}: {len(t.rows)} rows" for t in self.tables.values()) or "no table defined yet"
+        return tables + (f"; {len(self.notes)} quotes kept" if self.notes else "")
 
     def render(self) -> str:
         """The tables with rows, as markdown. "" when no row and no note was kept."""
@@ -385,7 +417,9 @@ class TableStore:
         if parts and self.changes:
             parts.append("### Tables changed during the run\n" + "\n".join(f"- {c}" for c in self.changes))
         if self.notes:
-            parts.append("### Also noted while reading\n" + "\n".join(f"- {text} ({url})" for text, url in self.notes))
+            parts.append(f"### {self.notes_heading}\nCopied word for word from the page named after each "
+                         "quote; code found each quote on its page.\n"
+                         + "\n".join(f"- \"{quote}\" ({url})" for quote, url in self.notes))
         if not parts:
             return ""
         if self.could_not_find:

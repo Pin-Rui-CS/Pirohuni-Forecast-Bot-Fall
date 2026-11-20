@@ -52,6 +52,8 @@ _ARTIFACT_CHECK_PRIORITY_WEIGHTS = (3.0, 2.0, 1.5, 1.0)
 # other caller of fit_artifact_check_sections still ranks it above bulk research.
 _PRIORITY_EVIDENCE_PLAN = 2
 _MAX_RETRY_QUERIES = 4  # per retry plan
+# Specialist agents the check may send (bot.research.specialist.MAX_AGENTS).
+_MAX_SPECIALIST_AGENTS = 2
 # Pooling retry plans across SoCLaaS models: every plan's 1st pick, then every
 # 2nd, and so on through each plan's whole list, near-duplicates merged, at most
 # eight searches. Measured 2026-11-04 on three saved questions: 7, 8 and 4
@@ -526,6 +528,11 @@ async def run_research(
         logger.info("[research] retry planners %s; pooled %d queries", list(retry_basis["retry_plans"]), len(pooled))
     retry_label = _select_retry_provider_label(chosen_search_result, ordered_search_engines)
     pre_retry_result_count = len(included_results)
+    # Specialist agents the check's own model sent (the extra planners only
+    # add queries). They run beside the web-search retry below.
+    specialist_tasks = _start_specialists(
+        run_provider, artifact_check, title=title, resolution_criteria=resolution_criteria,
+        fine_print=fine_print, already_tried=already_tried, target_date=target_date)
 
     # The retry planner decides: any queries mean a retry, whatever the artifact
     # verdict says (2026-11-04; it used to fire only on "missing"/"partial").
@@ -644,6 +651,17 @@ async def run_research(
             },
             reads=[research_trace.ref_doc("artifact_check:v1")], writes=[], kind="note", lane="*",
         )
+
+    for task in specialist_tasks:
+        name, content = await task
+        included = should_include_provider_result(name, content)
+        research_trace.emit(
+            "provider", name, content or "", status="included" if included else "excluded",
+            reads=research_trace.outputs_of(name), writes=[research_trace.ref_section(name)],
+            kind="code", lane=name,
+        )
+        if included:
+            included_results.append((name, content or ""))
 
     # Stage 5.5: if the focused retry actually added evidence, re-run the
     # verification gate on the augmented evidence. The Stage-4 check ran on
@@ -1030,6 +1048,15 @@ whose fetch failed, is worth a query naming it. Put no month or date into a quer
 source states that date. A forecast needs three inputs (Job 2 lists them); one that research
 lacks and a search can still find is often the most useful query. Return no queries when
 nothing searchable would change the forecast.
+Besides queries, you may send up to {max_agents} research agents ("agents"). A search returns snippets
+and a few pages; an agent reads pages and documents for several minutes and brings back only text
+copied from them, checked by code. Send one when a missing fact needs that work:
+  "table" -- rows that must be gathered from several pages or a long document (past values,
+      past cases, a holding's quarter-by-quarter changes): say what one row is and give 2-6 columns.
+  "quotes" -- one specific fact that is inside a page or document the searches cannot surface
+      (a figure deep in a report, a meeting's vote split, a stated date): say exactly what to find.
+Queries, agents, both or neither: choose what would change the forecast. Send no agent for what
+the research already holds, or for something that does not exist yet.
 
 JOB 2 -- FORECASTING INPUTS. The question's outcome normally has not happened yet, so its
 result is normally absent: that is expected and is NOT a research gap. Report instead whether
@@ -1051,7 +1078,8 @@ Return only valid JSON, retry_plan first:
 {{
   "retry_plan": {{
     "reasoning": "two to four sentences: what has been tried, what is still unresolved, and what would most change the forecast",
-    "queries": [{{"query": "a focused web search", "why": "one line: the fact it should find"}}]
+    "queries": [{{"query": "a focused web search", "why": "one line: the fact it should find"}}],
+    "agents": [{{"kind": "table" | "quotes", "task": "what to find, precisely", "why": "one line: how it would change the forecast", "row_is": "table only: one ...", "columns": ["table only"], "queries": ["optional: up to 3 searches to start from"]}}]
   }},
   "resolution_value": "found" | "not_yet",
   "resolution_value_quote": "only when found: the resolution value as the research states it, with its date and source; otherwise empty string",
@@ -1264,6 +1292,42 @@ def _start_history_builder(run_provider, search_ready: asyncio.Future, *, title:
     return asyncio.create_task(run())
 
 
+def _start_specialists(run_provider, artifact_check: dict | None, *, title: str, resolution_criteria: str,
+                       fine_print: str, already_tried: str, target_date: str = "") -> "list[asyncio.Task]":
+    """Start the specialist agents the check's retry plan asked for, as tasks
+    that each return ``(name, section)``. None when the check failed, sent no
+    agent, or the agents are switched off."""
+    from bot.research import specialist
+
+    tasks = specialist.parse_tasks((artifact_check or {}).get("retry_plan"))
+    research_trace.emit(
+        "specialist_decision", "specialist agents",
+        {"asked": ((artifact_check or {}).get("retry_plan") or {}).get("agents") or [],
+         "started": [vars(t) | {"columns": list(t.columns), "queries": list(t.queries)} for t in tasks]
+         if specialist.enabled() else [],
+         "enabled": specialist.enabled()},
+        reads=[research_trace.ref_doc("artifact_check:v1")], writes=[], kind="note", lane="*",
+    )
+    if not tasks or not specialist.enabled():
+        return []
+    started = []
+    for number, task in enumerate(tasks, 1):
+        # The task stays out of the name: code downstream reads section names
+        # (the compiler cleans a section named "...Kalshi..." as market text),
+        # and the task is in the section's first line anyway.
+        name = f"{specialist.SECTION_PREFIX} {number} ({task.kind})"
+        logger.info("[research] starting %s: %s", name, task.short())
+        started.append(asyncio.create_task(run_provider(
+            name,
+            lambda task=task: specialist.run(
+                task, title=title, resolution_criteria=resolution_criteria, fine_print=fine_print,
+                already_tried=already_tried, target_date=target_date),
+            feeds=[research_trace.ref_doc("artifact_check:v1")],
+            lane=name,
+        )))
+    return started
+
+
 def _artifact_check_section_priority(name: str) -> int:
     """Sort key: the sections most likely to carry the artifact go first.
 
@@ -1273,7 +1337,8 @@ def _artifact_check_section_priority(name: str) -> int:
     section was serialized last and lost.
     """
     lowered = name.lower()
-    if "retry" in lowered:
+    # The specialist agents, like the retry, were sent to close the gap.
+    if "retry" in lowered or "specialist agent" in lowered:
         return 0
     # The history tables are often the artifact itself (31 of 52 plans asked
     # for a history table or series, 3-12 Nov 2026).
@@ -1459,8 +1524,11 @@ def _parse_retry_plan(parsed: dict) -> tuple[list[str], dict]:
     if not queries and isinstance(parsed.get("retry_queries"), list):
         queries = [str(q).strip() for q in parsed["retry_queries"] if str(q).strip()]
         whys = [""] * len(queries)
+    agents = [entry for entry in plan.get("agents") or [] if isinstance(entry, dict)][:_MAX_SPECIALIST_AGENTS] \
+        if isinstance(plan.get("agents"), list) else []
     return queries, {"reasoning": str(plan.get("reasoning", "")).strip(),
-                     "queries": [{"query": q, "why": w} for q, w in zip(queries, whys)]}
+                     "queries": [{"query": q, "why": w} for q, w in zip(queries, whys)],
+                     "agents": agents}
 
 
 INPUT_NAMES = ("current_state", "rate", "signal")
@@ -1556,6 +1624,7 @@ async def verify_required_artifact(
         prior_check_section=prior_check_section,
         already_tried=already_tried if already_tried is not None else _already_tried_section(),
         max_retry_queries=_MAX_RETRY_QUERIES,
+        max_agents=_MAX_SPECIALIST_AGENTS,
     )
     try:
         response = await call_llm(
