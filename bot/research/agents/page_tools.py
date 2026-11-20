@@ -86,6 +86,36 @@ FLATTENED_WARNING = (
     "same file, or a site that tabulates it.")
 
 
+PLAIN_DOWNLOAD = "plain download"
+
+
+def read_by(engine: str) -> str:
+    """The fetch method that served a page, as the agent is shown it. Agents
+    were never told: a Wayback copy (an archived page, possibly months old) and
+    a site reader's output looked the same as the live page (user request,
+    2026-11-20)."""
+    thin = engine.endswith("+thin")
+    engine = engine.removesuffix("+thin")
+    from bot.scrapers.fetch import ENGINE_FIRECRAWL_RENDER, ENGINE_WAYBACK
+
+    names = {
+        PLAIN_DOWNLOAD: "plain download (the page as the site serves it)",
+        source_ledger.ENGINE_FIRECRAWL: "Firecrawl (paid; the page converted to text)",
+        ENGINE_FIRECRAWL_RENDER: "Firecrawl after running the page's scripts (paid)",
+        source_ledger.ENGINE_CRAWL4AI_BASIC: "Crawl4AI (free browser; the page converted to text)",
+        ENGINE_WAYBACK: "Wayback Machine snapshot (an archived copy, possibly older than the live page; "
+                        "its capture date is in the text)",
+        source_ledger.ENGINE_CACHE: "this run's cache (fetched earlier in the run by another step)",
+    }
+    if engine.startswith("adapter-raw:"):
+        label = f"the {engine.split(':', 1)[1]} site reader (the site's own copy of the page)"
+    elif engine.startswith("adapter:"):
+        label = f"the {engine.split(':', 1)[1]} site reader (its own extract of the page, not the page itself)"
+    else:
+        label = names.get(engine) or engine or "the fetcher"
+    return label + ("; only a thin copy came back, every method tried returned little text" if thin else "")
+
+
 def host_of(url: str) -> str:
     host = (urlsplit(url).hostname or "").lower()
     return host[4:] if host.startswith("www.") else host
@@ -154,6 +184,8 @@ class PageReader:
         self.max_paid_fetches = max_paid_fetches
         self.paid_fetches = 0
         self.served_by = ""
+        # url -> fetch method that served it (see read_by), shown with the page.
+        self.method: dict[str, str] = {}
         # Pages whose text arrived with its field separators stripped.
         self.flattened: set[str] = set()
         self.tables: dict[str, Table] = {}
@@ -190,7 +222,9 @@ class PageReader:
         except httpx.HTTPError as exc:
             fetched, error = None, f"{type(exc).__name__}: {exc}"
         if fetched is not None:
+            self.method[url] = PLAIN_DOWNLOAD
             return fetched, ""
+        adapter = None
         try:
             from bot.scrapers.adapters import find_adapter
 
@@ -200,6 +234,7 @@ class PageReader:
             logger.info("[page-tools] adapter raw page failed for %s: %s: %s", url, type(exc).__name__, exc)
             raw = None
         if raw:
+            self.method[url] = f"adapter-raw:{getattr(adapter, 'name', 'site')}"
             return (raw, "text/html", url), ""
         return None, error
 
@@ -223,6 +258,7 @@ class PageReader:
             policy = replace(policy, firecrawl_off=True)
         page = await fetch_page(url, policy)
         self.served_by = page.engine   # for the source ledger: which rung answered
+        self.method[url] = page.engine
         free = (page.engine in (source_ledger.ENGINE_CACHE, source_ledger.ENGINE_SKIPPED_DUPLICATE)
                 or page.engine.startswith("adapter:"))
         if not capped and not free:
@@ -254,6 +290,7 @@ class PageReader:
                 # Q46722 pnc.com refused every plain request): the Fetcher.
                 kind = "document" if document else "page, read through the fetcher after the plain download failed"
                 self.served_by = ""
+                self.method.pop(url, None)   # a plain download that got a document does not count
                 text, fetcher_error = await self._fetcher_text(url)
                 # The rung that answered (firecrawl-scrape, crawl4ai-basic, an
                 # adapter...), so the audit shows what each agent page cost.
@@ -261,16 +298,22 @@ class PageReader:
                                                engine=self.served_by or self.engine,
                                                ok=bool(text), chars=len(text), error=fetcher_error or error)
                 if not text:
-                    what = "document could not be read" if document else "fetch failed"
-                    out.append(f"## {prefix} {url}\n{what}: {fetcher_error or error}")
+                    if document:
+                        out.append(f"## {prefix} {url}\ndocument could not be read: the fetcher: "
+                                   f"{fetcher_error or error}")
+                    else:
+                        out.append(f"## {prefix} {url}\nfetch failed: plain download: {error}; "
+                                   f"then the fetcher: {fetcher_error or 'no text'}")
                     continue
+                self.method.setdefault(url, self.served_by)
                 self.texts[url] = text
                 warning = ""
                 if separators_lost(text):
                     self.flattened.add(url)
                     warning = "\n" + FLATTENED_WARNING
                 out.append(f"## {prefix} {url} ({kind}, {len(text):,} chars of text; "
-                           f"\"text\" action for all of it){warning}\ntext: {text[:700]}")
+                           f"\"text\" action for all of it)\nread by: {read_by(self.method[url])}"
+                           f"{warning}\ntext: {text[:700]}")
                 continue
             page = fetched[0]
             source_ledger.record_url_event(url, source_ledger.ROLE_SCRAPED, engine=self.engine,
@@ -283,6 +326,7 @@ class PageReader:
             lines = [f"## {prefix} {url} ({len(page):,} bytes, "
                      f"{len(self.texts[url]):,} chars of visible text, {len(tables)} embedded tables"
                      + (f", {len(shown)} with columns {columns}" if columns else "") + ")",
+                     f"read by: {read_by(self.method.get(url, PLAIN_DOWNLOAD))}",
                      "visible text: " + self.texts[url][:300 if columns else 700]]
             # A site-wide table is summarised once: on 2026-10-30 (Q46516) the
             # same cookie-settings table filled every one of 30 pages.
@@ -355,8 +399,10 @@ class PageReader:
                 if fetched is not None and fetched[1] and not fetched[1].startswith(_TEXT_TYPES):
                     fetched, document = None, True
                 if fetched is None:
+                    self.method.pop(url, None)
                     text, fetcher_error = await self._fetcher_text(url, free_only=True)
                     engine = self.served_by or self.engine
+                    self.method.setdefault(url, self.served_by)
                     if not text:
                         errors[url] = fetcher_error or error or "no text"
                         source_ledger.record_url_event(url, source_ledger.ROLE_SCRAPED, engine=engine,
@@ -395,7 +441,8 @@ class PageReader:
         tail = (f"\n[continues: {len(body) - end:,} more chars; ask again with \"from\": {end}]"
                 if end < len(body) else f"\n[end of {what}]")
         result = (f"{prelude}\n\n" if prelude else "") + (
-            f"## {url} -- {what}, chars {start:,}-{end:,} of {len(body):,}\n{body[start:end]}{tail}")
+            f"## {url} -- {what}, chars {start:,}-{end:,} of {len(body):,}; read by: {self.read_by(url)}\n"
+            f"{body[start:end]}{tail}")
         if url in self.flattened:
             result = f"{FLATTENED_WARNING}\n\n{result}"
         return result[:MAX_RESULT_CHARS]
@@ -420,11 +467,22 @@ class PageReader:
             at = lowered.find(needle, at + len(needle))
         total = lowered.count(needle)
         head = f"## {url} -- {total} occurrence(s) of {word!r}" + (
-            f", first {MAX_FIND_HITS} shown" if total > len(hits) else "")
+            f", first {MAX_FIND_HITS} shown" if total > len(hits) else "") + f"; read by: {self.read_by(url)}"
         result = (f"{prelude}\n\n" if prelude else "") + head + "\n" + "\n".join(hits)
         if url in self.flattened:
             result = f"{FLATTENED_WARNING}\n\n{result}"
         return result[:MAX_RESULT_CHARS]
+
+    def read_by(self, url: str) -> str:
+        """How a page this run read was fetched, in words (see read_by)."""
+        return read_by(self.method.get(url, PLAIN_DOWNLOAD if url in self.sources else ""))
+
+    def methods_summary(self, urls: list[str]) -> str:
+        """'plain download x30, Wayback ... x2' over pages this run read."""
+        from collections import Counter
+
+        counts = Counter(self.read_by(u) for u in urls if u in self.texts)
+        return ", ".join(f"{label} x{n}" for label, n in counts.most_common())
 
     def rows(self, table_id: str, contains: str = "") -> str:
         table = self.tables.get(table_id)

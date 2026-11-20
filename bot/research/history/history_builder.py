@@ -306,7 +306,7 @@ async def _same_field(action: dict, *, store: TableStore, pages: PageReader, cli
             falls.append(f"{before['values'][date_column]} {before['values'][value_column]} -> "
                          f"{after['values'][date_column]} {after['values'][value_column]}")
     lines = [f"same_field: {len(urls)} editions tried, {len(rows)} read by code, {len(skipped)} skipped.",
-             added]
+             f"Fetched by: {pages.methods_summary(urls) or 'none could be read'}.", added]
     if outside:
         read_outside = [u for u in outside if any(r["url"] == u for r in rows)]
         lines.append(f"{len(outside)} of the files tried do not contain {documents.get('links_containing')!r} "
