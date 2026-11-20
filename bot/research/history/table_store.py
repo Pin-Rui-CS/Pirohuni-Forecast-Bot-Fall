@@ -124,6 +124,8 @@ class HistoryTable:
     coverage: str = ""
     # The model's own statement that the table lists every row of its kind.
     complete: bool = False
+    # Who set the table up: "the evidence plan" or "the research model".
+    defined_by: str = "the research model"
 
     def count_line(self, conditions: list[tuple[str, str, str]]) -> str:
         rows = self.clean_rows()
@@ -158,10 +160,17 @@ class TableStore:
         self.notes: list[tuple[str, str]] = []      # (text, url)
         self.rejected = 0
         self.could_not_find = ""
+        # Every change to a table's definition during the run, in order.
+        self.changes: list[str] = []
 
     # -- the model's actions ------------------------------------------------
 
-    def define(self, specs: list) -> str:
+    def define(self, specs: list, *, by: str = "the research model") -> str:
+        """Create tables, or change one already defined (by the evidence plan or
+        earlier in the run). A change is logged in ``self.changes`` and shown in
+        the report. Rows already in a changed table are kept when its first
+        column stays the same, with the cells of removed columns dropped;
+        otherwise they no longer fit and are removed, and the reply lists them."""
         out = []
         for spec in specs if isinstance(specs, list) else []:
             if not isinstance(spec, dict):
@@ -169,22 +178,37 @@ class TableStore:
             table_id = _clean(spec.get("id")).upper()[:4] or "ABCD"[len(self.tables) % 4]
             columns = list(dict.fromkeys(_clean(c) for c in spec.get("columns") or [] if _clean(c)))[:MAX_COLUMNS]
             existing = self.tables.get(table_id)
-            if existing is not None and existing.rows:
-                out.append(f"Table {table_id} already has rows; its definition stays as it is.")
-                continue
             if existing is None and len(self.tables) >= MAX_TABLES:
                 out.append(f"Table {table_id} not created: at most {MAX_TABLES} tables.")
                 continue
             if len(columns) < 2:
-                out.append(f"Table {table_id} not created: give at least two columns, the first one "
-                           f"naming what identifies a row (usually its date).")
+                out.append(f"Table {table_id} not {'changed' if existing else 'created'}: give at least two "
+                           f"columns, the first one naming what identifies a row (usually its date).")
                 continue
-            self.tables[table_id] = HistoryTable(
-                id=table_id, title=_clean(spec.get("title")) or f"Table {table_id}",
+            table = HistoryTable(
+                id=table_id, title=_clean(spec.get("title")) or (existing.title if existing else f"Table {table_id}"),
                 row_is=_clean(spec.get("row_is")), columns=columns, why=_clean(spec.get("why")),
-                worked_out=spec.get("worked_out") is True)
-            out.append(f"Table {table_id} defined: one row = {self.tables[table_id].row_is or '(not stated)'}; "
-                       f"columns: {', '.join(columns)}.")
+                worked_out=spec.get("worked_out") is True, defined_by=by)
+            note = ""
+            if existing is not None:
+                if existing.columns[0] == columns[0]:
+                    for row in existing.rows:
+                        row.values = {c: row.values.get(c, "") for c in columns}
+                    table.rows = existing.rows
+                    table.counts = [cond for cond in existing.counts if all(c in columns for c, _, _ in cond)]
+                    kept = f"; its {len(existing.rows)} row(s) kept" if existing.rows else ""
+                else:
+                    kept = (f"; its {len(existing.rows)} row(s) no longer fit (the first column changed) and "
+                            f"were removed: " + ", ".join(r.values.get(existing.key, "?") for r in existing.rows[:10])
+                            ) if existing.rows else ""
+                reason = _clean(spec.get("reason")) or "no reason given"
+                note = (f"Table {table_id} changed by {by} (defined by {existing.defined_by}): one row was "
+                        f"'{existing.row_is or '-'}', columns {', '.join(existing.columns)}; now one row is "
+                        f"'{table.row_is or '-'}', columns {', '.join(columns)}. Reason: {reason}{kept}.")
+                self.changes.append(note)
+            self.tables[table_id] = table
+            out.append(note or f"Table {table_id} defined: one row = {table.row_is or '(not stated)'}; "
+                               f"columns: {', '.join(columns)}.")
         return "\n".join(out) or 'No table given. Send "tables": [{"id", "title", "row_is", "columns", "why"}].'
 
     def add_rows(self, table_id: str, rows: list) -> str:
@@ -321,6 +345,7 @@ class TableStore:
             lines = [f"### Table {table.id}: {table.title}"]
             if table.row_is:
                 lines.append(f"One row = {table.row_is}.")
+            lines.append(f"Defined by: {table.defined_by}.")
             if table.why:
                 lines.append(f"Why it was built: {table.why}")
             if table.worked_out:
@@ -357,6 +382,8 @@ class TableStore:
                 lines.append(gaps)
             lines.append("Sources: " + "; ".join(f"[{n}] {url}" for url, n in sources.items()))
             parts.append("\n".join(lines))
+        if parts and self.changes:
+            parts.append("### Tables changed during the run\n" + "\n".join(f"- {c}" for c in self.changes))
         if self.notes:
             parts.append("### Also noted while reading\n" + "\n".join(f"- {text} ({url})" for text, url in self.notes))
         if not parts:

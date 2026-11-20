@@ -25,11 +25,53 @@ ARTIFACT_HEADING = "Required Evidence Artifact"
 # questions the missing piece was often that record (Q46724's poll vs past
 # results, NYT's guidance vs actuals), which no step asked for.
 MAIN_SIGNAL_HEADING = "Main Signal And Its Track Record"
+# The tables the history builder starts from (added 2026-11-19): the plan sees
+# the whole question, so it chooses them; the builder may change them.
+HISTORY_TABLES_HEADING = "History Tables To Build"
 DIRECT_EVIDENCE_HEADING = "Direct Evidence To Find"
 NEAR_PROXY_HEADING = "Near Proxy Evidence To Find"
 # What the prediction-market searches read: enough to recognise a market that
 # measures the question or a close proxy of it, without the rest of the plan.
 MARKET_SEARCH_SECTIONS = (ARTIFACT_HEADING, DIRECT_EVIDENCE_HEADING, NEAR_PROXY_HEADING)
+
+
+class EvidencePlan(str):
+    """The plan's Markdown text, as every step reads it, carrying the history
+    tables it set up as data (``history`` = {"tables": [...], "queries": [...]},
+    empty when the plan gave none). Only the history builder reads the data; to
+    everything else this is the same string as before."""
+
+    history: dict
+
+    @classmethod
+    def of(cls, text: str, history: dict | None = None) -> "EvidencePlan":
+        plan = cls(text)
+        plan.history = history or {"tables": [], "queries": []}
+        return plan
+
+
+def plan_history(plan) -> dict:
+    """The history tables and queries an evidence plan set up, or empty ones."""
+    return getattr(plan, "history", None) or {"tables": [], "queries": []}
+
+
+def _parse_history(parsed: dict) -> dict:
+    """The plan's history_tables / history_queries, kept within the history
+    builder's limits (2 tables, 6 columns, 3 queries); malformed tables dropped."""
+    tables = []
+    for spec in parsed.get("history_tables") if isinstance(parsed.get("history_tables"), list) else []:
+        if not isinstance(spec, dict):
+            continue
+        columns = [str(c).strip() for c in spec.get("columns") or [] if str(c).strip()][:6]
+        if len(columns) < 2:
+            continue
+        tables.append({"id": str(spec.get("id") or "AB"[len(tables)]).strip().upper()[:1] or "AB"[len(tables)],
+                       "title": str(spec.get("title") or "").strip(), "row_is": str(spec.get("row_is") or "").strip(),
+                       "columns": columns, "why": str(spec.get("why") or "").strip()})
+        if len(tables) == 2:
+            break
+    queries = [str(q).strip() for q in parsed.get("history_queries") or [] if str(q).strip()][:3]
+    return {"tables": tables, "queries": queries if tables else []}
 
 
 async def build_evidence_plan(
@@ -39,12 +81,13 @@ async def build_evidence_plan(
     fine_print: str = "",
     asknews_research: str = "",
     model: str = DEFAULT_EVIDENCE_PLAN_MODEL,
-) -> str:
+) -> EvidencePlan:
     """Decide what evidence the rest of research should look for.
 
     This intentionally returns plain Markdown. The later search and compiler
     stages already consume text well, and keeping this human-readable makes the
-    run logs easier to audit.
+    run logs easier to audit. The history tables it sets up also ride along as
+    data (``EvidencePlan.history``) for the history builder's first move.
     """
     prompt = _build_prompt(
         title=title,
@@ -61,14 +104,14 @@ async def build_evidence_plan(
             _label="evidence-plan",
         )
         parsed = _extract_json_object(response)
-        plan = _format_plan(parsed)
+        plan = EvidencePlan.of(_format_plan(parsed), _parse_history(parsed))
         research_trace.emit("evidence_plan", "evidence plan", plan, meta={"model": model},
                             **_plan_lineage(asknews_research))
         return plan
     except HardLimitExceededError:
         raise
     except Exception as exc:
-        plan = _fallback_plan(title, exc)
+        plan = EvidencePlan.of(_fallback_plan(title, exc))
         research_trace.emit(
             "evidence_plan",
             "evidence plan",
@@ -135,6 +178,11 @@ Return only valid JSON in this shape:
     "update_content_limits": "What new information CAN appear in the source before the deadline, and what CANNOT arrive in time (reporting calendars, disclosure deadlines, data-pipeline or publication lags); and whether the same measurement can already be read earlier elsewhere (a daily or preliminary series, or a tracker from the same publisher or its data provider): name it and the period it covers by now",
     "mechanics_queries": ["search query targeting the source's update schedule or the underlying reporting calendar"]
   }},
+  "history_tables": [
+    {{"id": "A", "title": "...", "row_is": "one ... (what one row is)", "columns": ["date or case name", "..."], "why": "what a forecaster can count from it"}},
+    {{"id": "B", "title": "...", "row_is": "...", "columns": ["..."], "why": "..."}}
+  ],
+  "history_queries": ["search query for a page that HOLDS such a table"],
   "direct_evidence": ["Evidence that directly resolves or measures the question"],
   "near_proxy_evidence": ["Evidence that is close but not exact"],
   "weak_proxy_evidence": ["Evidence that is only indirectly related"],
@@ -145,6 +193,7 @@ Return only valid JSON in this shape:
 
 Rules:
 - The required artifact is something a forecaster can use BEFORE the outcome is known: how often or how fast this kind of thing has happened (past values of the quantity, past cases of the event). Never name the resolution result itself (the election's official results, the filing the question waits for): it cannot exist yet. The resolution source belongs under resolution_mechanics.
+- history_tables are the tables a later research step will fill with PAST values or PAST cases copied from pages, for forecasters to count from (at most 2 tables, at most 6 columns each; the first column identifies the row: a date YYYY, YYYY-MM or YYYY-MM-DD, or the case's name). Table A is the history the question is about (past values of its quantity, or past cases of its event). Table B is whichever helps a forecaster more: a wider comparison group that says how often this kind of thing happens across similar cases (e.g. for one company's next move, how often the same company made that move across all its holdings or past years), or the track record of the main signal (its past values next to what happened). Give at most 3 history_queries, for pages that hold such tables.
 - Prefer official, source-of-truth artifacts over broad news.
 - For count questions, the required artifact is usually a historical count table.
 - For direct prediction markets, distinguish exact-human/outcome markets from adjacent proxy markets.
@@ -201,6 +250,9 @@ def _format_plan(plan: dict) -> str:
         f"- Signal: {'None identified.' if no_signal else signal_name}",
         f"- Track record to find: {'Not applicable.' if no_signal else (str(signal.get('track_record_needed') or '').strip() or 'Not stated.')}",
         "",
+        f"## {HISTORY_TABLES_HEADING}",
+        *_history_lines(_parse_history(plan)),
+        "",
         "## Resolution Mechanics",
         f"- Source update behavior: {mechanics.get('source_update_behavior') or 'Not assessed.'}",
         f"- What an update can contain before the deadline: {mechanics.get('update_content_limits') or 'Not assessed.'}",
@@ -242,6 +294,9 @@ Evidence planning failed: {type(exc).__name__}: {exc}
 - Signal: Not assessed (evidence planning failed).
 - Track record to find: Not assessed (evidence planning failed).
 
+## {HISTORY_TABLES_HEADING}
+- None set up (evidence planning failed).
+
 ## Resolution Mechanics
 - Source update behavior: Not assessed (evidence planning failed).
 - What an update can contain before the deadline: Not assessed (evidence planning failed).
@@ -261,6 +316,18 @@ Evidence planning failed: {type(exc).__name__}: {exc}
 ## Contradictions And Gaps To Check
 - Missing historical rows, stale data, and conflicting claims.
 """.strip()
+
+
+def _history_lines(history: dict) -> list[str]:
+    if not history["tables"]:
+        return ["- None set up."]
+    lines = []
+    for t in history["tables"]:
+        lines.append(f"- Table {t['id']}: {t['title'] or '(untitled)'} -- one row = {t['row_is'] or '(not stated)'}; "
+                     f"columns: {', '.join(t['columns'])}" + (f". Why: {t['why']}" if t["why"] else ""))
+    if history["queries"]:
+        lines.append("- Searches: " + "; ".join(history["queries"]))
+    return lines
 
 
 def _format_list(value) -> str:

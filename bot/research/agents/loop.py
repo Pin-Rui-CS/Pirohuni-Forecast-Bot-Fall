@@ -92,10 +92,13 @@ async def ask(route: llm_provider.Route, messages: list[dict], label: str) -> An
 async def run(*, system: str, handlers: dict[str, Handler], label: str, trace_stage: str,
               trace_name: str, max_turns: int, wall_seconds: float,
               meta: Callable[[], dict] | None = None,
-              status_line: Callable[[], str] | None = None) -> Outcome:
+              status_line: Callable[[], str] | None = None,
+              opening: str = "") -> Outcome:
     """Run the loop. ``handlers`` maps an action name to its coroutine; "final"
     needs none. ``meta()`` adds fields to each turn's trace record, and
     ``status_line()`` a line appended to every tool result (budgets left).
+    ``opening`` is what the first message tells the model before it acts (work
+    already done for it, e.g. tables set up and searches run); default: nothing.
 
     A turn limit, the wall clock or a SoCLaaS failure ends the run with
     ``final`` None; the caller decides what it can still report. A hard cost
@@ -103,7 +106,8 @@ async def run(*, system: str, handlers: dict[str, Handler], label: str, trace_st
     """
     route = soclaas_route()
     messages = [{"role": "system", "content": system},
-                {"role": "user", "content": "Begin. Reply with your first JSON action."}]
+                {"role": "user", "content": (f"{opening.strip()}\n\n" if opening.strip() else "")
+                 + "Begin. Reply with your first JSON action."}]
     names = ", ".join([*handlers, "final"])
     outcome = Outcome()
     started = time.monotonic()

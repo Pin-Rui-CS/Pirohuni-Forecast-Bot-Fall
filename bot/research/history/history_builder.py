@@ -36,7 +36,8 @@ from bot.llm import provider as llm_provider
 from bot.research.agents import loop
 from bot.research.agents.page_tools import (FIND_CONTEXT, MAX_URLS_PER_FETCH, TEXT_CHARS, USER_AGENT, PageReader,
                                             host_of, page_links)
-from bot.research.evidence_plan import ARTIFACT_HEADING, MAIN_SIGNAL_HEADING, plan_sections
+from bot.research.evidence_plan import (ARTIFACT_HEADING, HISTORY_TABLES_HEADING, MAIN_SIGNAL_HEADING, plan_history,
+                                        plan_sections)
 from bot.research.history import same_field
 from bot.research.history.table_store import MAX_COLUMNS, MAX_COUNTS, MAX_NOTES, MAX_ROWS, MAX_TABLES, TableStore
 from bot.research.history.table_store import number as table_number
@@ -107,7 +108,7 @@ it. Build at most {MAX_TABLES} small tables of PAST values or PAST cases, copied
 
   Table A -- the history the question is about: past values of the quantity it asks about, or past
       cases of the kind of event it asks about. The plan above usually names it.
-  Table B (optional) -- ONE of these, only after Table A has rows:
+  Table B (optional; the evidence plan may already have set it up) -- ONE of these:
       (1) the track record of the main signal the plan names (a poll, guidance, a consensus, a stated
           plan or date): one row per past case, with the signal's value and what actually happened
           (past polls next to the results, past guidance next to the reported figures, past announced
@@ -124,8 +125,12 @@ Pages the bot's web search already found for this question (it will read some of
 
 Reply with exactly ONE JSON object per turn, nothing else:
 
-  {{"action": "plan", "tables": [{{"id": "A", "title": "...", "row_is": "one ...", "columns": ["date", "..."], "why": "..."}}], "queries": ["...", "..."]}}
-      Your FIRST action. Say what one row of each table is before you look for rows: "row_is" (one
+  {{"action": "plan", "tables": [{{"id": "A", "title": "...", "row_is": "one ...", "columns": ["date", "..."], "why": "...", "reason": "..."}}], "queries": ["...", "..."]}}
+      Defines a table, or changes one already set up (same "id"; say why in "reason" -- the change
+      is recorded in the report). When the opening message says the evidence plan has set tables
+      up, you start from those and send "plan" only to add or change one; otherwise it is your
+      FIRST action. Rows already in a changed table are kept if its first column stays the same.
+      Say what one row of each table is before you look for rows: "row_is" (one
       federal election; one month's reading; one earlier case of X), up to {MAX_COLUMNS} columns, and why
       the table helps. The first column identifies the row: a date written YYYY, YYYY-MM or
       YYYY-MM-DD when rows are dated, otherwise the case's name, and it must differ for every
@@ -134,7 +139,7 @@ Reply with exactly ONE JSON object per turn, nothing else:
       a page as such and you will work each one out from several lines (the highest value in a
       window, a change between two dates), add "worked_out": true to that table; the report
       then says so. Prefer tables you can copy. "queries" (optional, up to
-      {MAX_QUERIES_PER_SEARCH}) are searched in the same turn. You may send "plan" again later to add Table B.
+      {MAX_QUERIES_PER_SEARCH}) are searched in the same turn.
   {{"action": "search", "queries": ["...", "..."]}}
       Web search, up to {MAX_QUERIES_PER_SEARCH} queries per turn and {MAX_SEARCHES} in total. A query close to one this
       question already ran is not run again: you get that search's results, free. Search for the
@@ -340,8 +345,9 @@ async def run(*, title: str, resolution_criteria: str = "", fine_print: str = ""
     budget = search_service.SearchBudget(MAX_SEARCHES)
     system = _system_prompt(
         title=title, resolution_criteria=resolution_criteria, fine_print=fine_print, background=background,
-        artifact=plan_sections(evidence_plan, (ARTIFACT_HEADING, MAIN_SIGNAL_HEADING)), found=start_hits(),
-        today=today.isoformat())
+        artifact=plan_sections(evidence_plan, (ARTIFACT_HEADING, MAIN_SIGNAL_HEADING, HISTORY_TABLES_HEADING)),
+        found=start_hits(), today=today.isoformat())
+    planned = plan_history(evidence_plan)
 
     async def run_search(queries) -> str:
         queries = [str(q) for q in (queries if isinstance(queries, list) else [])][:MAX_QUERIES_PER_SEARCH]
@@ -417,8 +423,19 @@ async def run(*, title: str, resolution_criteria: str = "", fine_print: str = ""
                          "read states a row, send add_rows now.")
             return line
 
+        # The evidence plan saw the whole question and set the tables up: code
+        # defines them and runs the plan's searches, so the model's first turn
+        # starts with a fetch or a search instead of planning. A plan without
+        # tables (or a failed plan) leaves the first turn to the model as before.
+        opening = ""
+        if planned["tables"]:
+            defined = store.define(planned["tables"], by="the evidence plan")
+            searched = await run_search(planned["queries"]) if planned["queries"] else ""
+            opening = ("The evidence plan has set up these tables for you (send \"plan\" to change one or add "
+                       f"one; say why):\n{defined}" + (f"\n\nIts searches, already run:\n{searched}" if searched else ""))
         outcome = await loop.run(
             system=system,
+            opening=opening,
             handlers={**{name: with_carried(handler) for name, handler in (
                           ("plan", plan), ("search", search), ("fetch", fetch), ("text", text),
                           ("find", find), ("rows", rows), ("same_field", same_field_action))},
