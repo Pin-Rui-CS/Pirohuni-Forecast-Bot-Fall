@@ -916,17 +916,41 @@ async def _try_llm_compile(
         )
         return None
     brief = _normalise_compiled_report(content)
+    # What the writer was given: every quote it makes must come from here.
+    corpus = "\n".join([title, resolution_criteria, background, fine_print,
+                        _format_artifact_check(artifact_check)]
+                       + [content or "" for _, content in cleaned_sections])
     if not qwen:
-        return brief, "compiler_input"
+        return _quote_checked(brief, corpus, "compiler_input")
     research_trace.emit(
         "brief", "compiler draft (before audit)", brief, meta={"chain": "brief", "model": model},
         reads=[research_trace.ref_doc("compiler_input")], writes=[research_trace.ref_doc("brief:pre-audit")],
         kind="model", lane="*",
     )
-    return await _audit_brief(
+    brief, source = await _audit_brief(
         route, brief, cleaned_sections,
         title=title, resolution_criteria=resolution_criteria, fine_print=fine_print,
     )
+    return _quote_checked(brief, corpus, source)
+
+
+def _quote_checked(brief: str, corpus: str, source: str) -> tuple[str, str]:
+    """(brief, trace doc): Key Evidence rebuilt from quotes code found in the
+    research, interpretation-only sections removed (bot.brief.quotes)."""
+    from bot.brief import quotes
+
+    checked, check = quotes.enforce(brief, corpus)
+    research_trace.emit(
+        "brief", "quote check (Key Evidence kept only as quotes found in the research)", checked,
+        meta={"chain": "brief", "items_kept": check.kept, "items_removed": len(check.removed),
+              "quotes_not_found": len(check.quotes_dropped), "items_with_own_wording_cut": check.wording_dropped,
+              "removed": check.removed[:15], "quotes_not_found_list": check.quotes_dropped[:15]},
+        reads=[research_trace.ref_doc(source), research_trace.ref_doc("compiler_input")],
+        writes=[research_trace.ref_doc("brief:quote-checked")], kind="code", lane="*",
+    )
+    logger.info("research-compiler | quote check: %d items kept, %d removed, %d quotes not found",
+                check.kept, len(check.removed), len(check.quotes_dropped))
+    return checked, "brief:quote-checked"
 
 
 _COMPILER_SYSTEM = (
@@ -999,12 +1023,12 @@ Additional selection rules (these refine the rules above; where they conflict, t
    rules, schedules and mechanisms; projections or expectations by named institutions or
    experts for dates at or near the resolution date; market prices; precedents from prior
    comparable cycles; base rates. Every candidate must end up either as an [E#] item or
-   named, with its URL and a reason, under "Decision-relevant items EXCLUDED" in the
-   Balance Check. Nothing decision-relevant may disappear silently.
+   named, with its URL and a reason, under "Decision-relevant items EXCLUDED" in
+   Excluded From Key Evidence. Nothing decision-relevant may disappear silently.
 2. A CONFLICT IS NOT A REASON TO EXCLUDE. When sources disagree about the same fact —
    different figures, dates, statuses or outcomes for the same thing — keep each as a
-   separate item with its own date and source and state the discrepancy; how the sources
-   disagree is itself evidence. Exclude an item only when its source is unreliable
+   separate item with its own date and source, and name the discrepancy in Gaps And
+   Cautions; how the sources disagree is itself evidence. Exclude an item only when its source is unreliable
    (unsourced, mislabeled, or contradicted by the authoritative source for the SAME date),
    and say which.
 3. FORWARD-LOOKING ANCHORS. If the input contains dated projections, forecasts, schedules,
@@ -1024,10 +1048,7 @@ Additional selection rules (these refine the rules above; where they conflict, t
    if the market's event implies the outcome, it is a FLOOR. Example: question "Will team T
    win the final?", market "Will team T reach the final?" — winning requires reaching, so
    the market price is a ceiling on P(T wins). Write "no bound" only after checking both
-   directions and finding neither holds.
-6. BALANCE CHECK WITH REASONS. After each [E#] in the Balance Check, add a short clause
-   saying why it points that way. An item may appear on only one side; if it cuts both
-   ways, place it where it weighs most and say so.""".rstrip()
+   directions and finding neither holds.""".rstrip()
 
 # --- Audit pass ----------------------------------------------------------------
 # A rule telling the writer to inventory everything did not stop it dropping
@@ -1037,7 +1058,7 @@ Additional selection rules (these refine the rules above; where they conflict, t
 # decides what is MISSING; the model only judges what MATTERS.
 _AUDIT_MAX_LINES = 80
 _AUDIT_MAX_VALUES = 20  # more values than this on one line is a squashed table, not a claim
-_AUDIT_REQUIRED = ("## Key Evidence", "## Balance Check", "## Gaps And Cautions")
+_AUDIT_REQUIRED = ("## Key Evidence", "## Excluded From Key Evidence", "## Gaps And Cautions")
 _AUDIT_MIN_KEPT = 0.8   # a revision shorter than this share of the draft has lost content
 
 _AUDIT_PROMPT = """Today's date is {today}.
@@ -1068,7 +1089,7 @@ RESEARCH LINES MISSING FROM THE DRAFT ({n}):
 
 Revise the draft. For each missing line that bears on the resolution (a value of the
 target now or earlier, a rule or schedule, a named projection, a market price, the state of
-a driver, a precedent), add it where it belongs: an [E#] item (at most 15 in all), a row
+a driver, a precedent), add it where it belongs: an [E#] item quoting it word for word (at most 15 in all), a row
 of Extracted Artifact Rows, another section it fits, or the "Decision-relevant items
 EXCLUDED" line with a reason.
 Ignore the lines that do not bear on the resolution; do not add noise. Keep everything in
@@ -1304,14 +1325,15 @@ Only when the question resolves off a published source (a curated page, tracker,
 - If the research contains nothing on these mechanics, write one bullet saying exactly that — do not invent a cadence or calendar.
 
 ## Key Evidence
-A list of at most 15 items. Do NOT sort by relevance — order does not matter, and the [E#] labels are just citation handles, not a priority ranking. Format each item as:
-[E1] (tier) Claim with exact numbers and dates. — Source name, publish date, URL
+A list of at most 15 items. Do NOT sort by relevance — order does not matter, and the [E#] labels are just citation handles, not a priority ranking. Format each item as ONE line:
+[E1] (tier) "passage copied word for word from the research" — Source name, publish date, URL [D1]
+- QUOTES ONLY. The item's content is one or more passages copied EXACTLY from the research above, each inside double quotes (join two passages from the same source with …). Copy the whole sentence that holds the value, so its date and context come with it. Do not reword, summarise, shorten inside a quote, or add your own words, labels or explanations: code checks every quote against the research and keeps nothing else, and an item none of whose quotes is found word for word is removed. Outside the quotes an item may carry only the tier, these fixed notes when they apply — (date unverified), (year not stated in source), (position vs. baseline unverified) — and the source.
 - SELECT BY DECISION-RELEVANCE (this governs which items make the list, not their order). The items that must appear whenever the research supports them are: (1) the RULE or MECHANISM that governs how the resolution value changes over time — eligibility criteria, recovery/transition conditions, the clock or event that triggers a change, a reaction function, a scheduled decision; and (2) the CURRENT VALUE of each input that rule depends on (including the date that starts the clock, not just the date a change was announced). A precise figure that does not feed this mechanism is background color, however exact. When a number's relevance hinges on a condition (a confounder that speeds or slows the mechanism), keep the condition with the number.
-- FORMULA INPUTS: when the question resolves on a value COMPUTED from several inputs (a difference, ratio, share, index, or sum), every input of that formula is a resolution input. Keep the best evidence the research has for EACH input, even when it is indirect or broader in scope than the input (a national figure for a state's share, a parent series for a sub-series): label it near-proxy and state the conversion or typical gap toward the input. Never exclude an input's only or strongest evidence as "not the same quantity" or "national, not local"; an input with no evidence must be named as such in the Balance Check.
+- FORMULA INPUTS: when the question resolves on a value COMPUTED from several inputs (a difference, ratio, share, index, or sum), every input of that formula is a resolution input. Keep the best evidence the research has for EACH input, even when it is indirect or broader in scope than the input (a national figure for a state's share, a parent series for a sub-series): label it near-proxy. Never exclude an input's only or strongest evidence as "not the same quantity" or "national, not local"; an input with no evidence must be named as such in Gaps And Cautions.
 - OBSERVED BEHAVIOR OUTRANKS FORMAL PROCESS: when the question resolves on an observed event or action, a reported instance of that same behavior actually happening (a precedent, a completed prior step, a dry run) is top-tier evidence even if it carries no number and sits outside the formal process the documents describe. Do not drop a behavioral precedent in favor of one more restatement of the process rules.
-- DIRECTIONAL BALANCE (required): after drafting the list, check it as a whole. Include the strongest items pointing EACH way that the research supports — toward YES and toward NO for a binary question; toward higher and lower values otherwise. If the raw research contains a plausibly decision-relevant item pointing against the majority of your list and you have excluded it, that is a selection error: include it. A lopsided list is acceptable ONLY when the research itself contains no credible opposing items — in that case say so explicitly in the Balance Check section below. Do not manufacture balance that the research does not contain; the requirement is that no side's strongest evidence is silently dropped.
-- OBSERVATIONS ONLY: every item must be something a source actually states, shows, or prices — a fact, quote, measurement, market price, or the documented rule/mechanism itself. Never emit YOUR OWN inference, extrapolation, or timeline arithmetic (e.g. "the October target implies a September filing") as an [E#] item, even attributed to an evidence plan or labelled "synthesis" — an inference wearing an [E#] label acquires the authority of evidence and every downstream forecaster will cite it as fact. Put such reasoning in ## Derived Implications instead.
-- tier is one of: direct (measures the resolution target itself, from the resolution source or confirmed equal to it), adjacent-metric (same family but a different basis/series; state the relationship and any conversion toward the target), near-proxy (close but not identical; say in a few words why not identical), market (prediction-market signal).
+- DIRECTIONAL BALANCE (required): after drafting the list, check it as a whole. Include the strongest items pointing EACH way that the research supports — toward YES and toward NO for a binary question; toward higher and lower values otherwise. If the raw research contains a plausibly decision-relevant item pointing against the majority of your list and you have excluded it, that is a selection error: include it. A lopsided list is acceptable ONLY when the research itself contains no credible opposing items. Do not manufacture balance that the research does not contain; the requirement is that no side's strongest evidence is silently dropped. Do not say which way an item points: the forecaster judges that.
+- NO INTERPRETATION: never write what an item means, which way it points, what it implies, or a scenario built from it. Inference, extrapolation and timeline arithmetic are the forecaster's job, and a wrong reading written into the brief is taken by every forecaster as evidence.
+- tier is exactly one word from: direct (measures the resolution target itself, from the resolution source or confirmed equal to it), adjacent-metric (same family but a different basis/series), near-proxy (close but not identical), market (prediction-market signal). Nothing else goes in the parentheses.
 - Every item must carry the observation date/period of its value. If a value's date cannot be tied to the period the question asks about, append "(date unverified)" and do NOT label it `direct` — a value reported by a single article without a confirmable current date is not direct evidence.
 - Keep exact values, dates, counts, and odds. Never round away precision present in the source.
 - When several articles report the same fact (syndicated or near-identical coverage), output ONE item and list every source/URL on that item. Do not repeat the fact.
@@ -1319,14 +1341,9 @@ A list of at most 15 items. Do NOT sort by relevance — order does not matter, 
 - Exclude weak proxies and background color entirely unless fewer than 5 stronger items exist. A statement of the governing rule/mechanism (or a condition that materially speeds or slows it) is never background color — keep it even if it carries no number of its own.
 - Do not place the same fact in more than one item.
 
-## Balance Check
-Exactly these three lines, filled in (required — the forecaster reads them; this is the audit trail proving no direction's evidence was dropped):
-- Strongest evidence FOR the event / higher values: [E#, E#, ...] — or "none found in the research"
-- Strongest evidence AGAINST the event / lower values: [E#, E#, ...] — or "none found in the research"
+## Excluded From Key Evidence
+Exactly this one line, filled in (the audit trail proving nothing decision-relevant was dropped silently):
 - Decision-relevant items EXCLUDED from Key Evidence: one short clause each with source and URL (e.g. "LAF entered vacated positions at X — site.com/url — excluded as single-sourced"); write "none" only if nothing plausibly decision-relevant was left out.
-
-## Derived Implications
-Omit this section entirely if you have none. Otherwise at most 3 bullets, labelled [I1], [I2], ... — NEVER [E#]. Each is an inference you draw by chaining evidence items (e.g. working a deadline backwards through an interval rule), and must (a) cite the [E#] items it chains and (b) name every load-bearing assumption inline — especially any assumption that a stated minimum, earliest, or latest bound is also the TYPICAL case (e.g. "[I1] From [E3]+[E5], assuming the statutory MINIMUM 15-day gap is also the typical gap — not established by the evidence — an October listing implies a September public filing"). The forecaster re-derives these from the underlying [E#] items; an [I#] is a hypothesis to check, not evidence to cite.
 
 ## Market Signals
 - One bullet per relevant market: question, current odds, volume/liquidity/open interest when present, URL. Real-money markets (Polymarket, Kalshi) before play-money (Manifold).
@@ -1341,7 +1358,7 @@ Rules:
 - Do not make a probability estimate.
 - Do not invent facts absent from the raw research.
 - The RESOLUTION SOURCE material is authoritative. When it reports a value for the resolution target, it overrides any secondary source that disagrees. When it shows the target as blank, unpublished, or not-yet-released, say so explicitly and NEVER substitute a secondary or year-ago figure as the resolved value — secondary figures may inform the forecast but are not the resolution value.
-- Do not delete a value that was actually retrieved. If it is the wrong exact metric but a related one, keep it as an `adjacent-metric` item with its caveat and conversion path; "not extracted" is only for values that were never found.
+- Do not delete a value that was actually retrieved. If it is the wrong exact metric but a related one, keep it as an `adjacent-metric` item; "not extracted" is only for values that were never found.
 - Total output should be materially shorter than the input. Selectivity is the job.
 """.strip()
 
