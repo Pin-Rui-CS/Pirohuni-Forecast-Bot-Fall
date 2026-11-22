@@ -26,9 +26,9 @@ name: Forecast via external cron
       # The external cron sends only the four inputs above, so the defaults below
       # are what scheduled runs use. Same settings as test-one-metaculus-cup-question.
       include_minibench:
-        description: "Also forecast the active MiniBench (project id: minibench), whatever the tournament input says"
+        description: "Forecast the active MiniBench (project id: minibench). Off by default since 2026-11-22: when off, minibench is removed even if the tournament input names it"
         required: false
-        default: true
+        default: false
         type: boolean
       research_models:
         description: "SETTING 1 - research. soclaas = free SoCLaaS models, DeepSeek first, then MiniMax, GLM and Qwen if each fails (evidence plan stays on Sonnet). soclaas-qwen-only = the previous Qwen-only setup. original = paid Sonnet/Opus. qwen = old name for soclaas."
@@ -197,11 +197,20 @@ jobs:
           run_args=(--mode tournament)
 
           read -r -a tournaments <<< "$DISPATCH_TOURNAMENT"
-          # MiniBench rides along on every scheduled run. Appended here rather
-          # than put in the tournament default, because the external cron sends
-          # the tournament input explicitly. "minibench" always names the active one.
-          if [ "$DISPATCH_INCLUDE_MINIBENCH" = "true" ] && [[ " ${tournaments[*]} " != *" minibench "* ]]; then
-            tournaments+=(minibench)
+          # MiniBench is off by default (2026-11-22). The external cron sends the
+          # tournament input itself, so when the box is unticked "minibench" is
+          # also removed from that list; ticked, it is appended as before.
+          # "minibench" always names the active one.
+          if [ "$DISPATCH_INCLUDE_MINIBENCH" = "true" ]; then
+            if [[ " ${tournaments[*]} " != *" minibench "* ]]; then
+              tournaments+=(minibench)
+            fi
+          else
+            kept=()
+            for t in "${tournaments[@]}"; do
+              [ "$t" = "minibench" ] || kept+=("$t")
+            done
+            tournaments=("${kept[@]}")
           fi
           if [ ${#tournaments[@]} -gt 0 ]; then
             run_args+=(--tournament "${tournaments[@]}")
