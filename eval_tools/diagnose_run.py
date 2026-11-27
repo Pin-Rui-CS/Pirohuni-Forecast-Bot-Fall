@@ -46,7 +46,7 @@ from diagnostics import checks_lineage, lineage  # noqa: E402
 from diagnostics.loader import load, long_path  # noqa: E402
 from diagnostics.result import sort_key  # noqa: E402
 from diagnostics.runner import render_markdown, run_all  # noqa: E402
-from eval_tools.publish_runs import BUCKET, _gzip, _sanitize  # noqa: E402
+from eval_tools.publish_runs import BUCKET, _gzip, _sanitize, download_trace  # noqa: E402
 from eval_tools.supabase_rest import SupabaseError, SupabaseREST  # noqa: E402
 
 TABLE = "run_diagnostics"
@@ -82,12 +82,12 @@ def fetch(client: SupabaseREST, question_id: int, run_id: str | None, out_root: 
         if name.endswith(".gz"):
             data, name = gzip.decompress(data), name[:-3]
         _write(os.path.join(qdir, name), data)
-    try:
-        trace = client.download(BUCKET, f"{prefix}/trace.tar.gz")
-        with tarfile.open(fileobj=io.BytesIO(trace), mode="r:gz") as tar:
+    trace = download_trace(client, prefix)
+    if trace is None:
+        print("  (missing trace)")
+    else:
+        with tarfile.open(fileobj=io.BytesIO(trace), mode="r:*") as tar:   # .tar.xz or .tar.gz
             tar.extractall(long_path(os.path.join(qdir, "trace")), filter="data")
-    except SupabaseError as exc:
-        print(f"  (missing trace: {str(exc)[:120]})")
     try:
         _write(os.path.join(run_dir, "run.log"),
                gzip.decompress(client.download(BUCKET, f"runs/{run_id}/run.log.gz")))
@@ -103,7 +103,7 @@ def publish(client: SupabaseREST, art, results, markdown: str, lin: dict, run_id
     prefix = prefix or f"runs/{run_id}/{question_id}"
     client.upload(BUCKET, f"{prefix}/diagnostics.md.gz", _gzip(markdown.encode("utf-8")), "application/gzip")
     # Step files one by one: the step page opens a single input/output, and the
-    # run's trace.tar.gz cannot be read file by file from a browser.
+    # run's trace tarball cannot be read file by file from a browser.
     files = lineage.payload_files(lin)
     for name in files:
         path = long_path(os.path.join(art.question_dir, "trace", name))

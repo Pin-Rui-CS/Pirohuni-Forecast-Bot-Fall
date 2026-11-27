@@ -57,6 +57,8 @@ from eval_tools.supabase_rest import SupabaseREST  # noqa: E402
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_RUNS_ROOT = os.path.join(_REPO_ROOT, "docs", "runs")
 BUCKET = "forecast-runs"
+TRACE_FILE = "trace.tar.xz"
+LEGACY_TRACE_FILE = "trace.tar.gz"     # runs published before 2026-11-27
 
 # Per-question files stored gzipped. Missing ones are skipped, not errors:
 # an abstained or failed question may not have written all of them.
@@ -221,11 +223,91 @@ def _gzip(data: bytes) -> bytes:
 
 
 def _tarball(directory: str) -> bytes:
+    """The trace folder as an xz tarball. xz, not gzip (2026-11-27): gzip only
+    sees repeats within 32 KB, and a trace repeats whole sections further apart
+    (the brief writer's input is saved again for the raw-view forecaster).
+    On Q46883 the trace was 0.54 MB as .tar.gz and 0.20 MB as .tar.xz."""
     buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+    with tarfile.open(fileobj=buffer, mode="w:xz", preset=9) as tar:
         for name in sorted(os.listdir(directory)):
             tar.add(os.path.join(directory, name), arcname=name)
     return buffer.getvalue()
+
+
+def download_trace(client: SupabaseREST, blob_prefix: str) -> bytes | None:
+    """A stored run's trace tarball: the xz one, else the gzip one runs published
+    before 2026-11-27 have, else None. Open it with ``tarfile.open(mode="r:*")``,
+    which reads either."""
+    for name in (TRACE_FILE, LEGACY_TRACE_FILE):
+        try:
+            return client.download(BUCKET, f"{blob_prefix}/{name}")
+        except Exception:  # noqa: BLE001 - absent: try the other name
+            continue
+    return None
+
+
+# ---------------------------------------------------------------------------
+# The run log, without what the run saves anyway
+# ---------------------------------------------------------------------------
+# A log record's first line carries its timestamp; the lines after it until the
+# next record are its body (a prompt, a response, a research section). On
+# gh-44664736456-1, 87% of the log's text was such bodies already saved in the
+# run's research, runs and trace files: 445 KB gzipped, 58 KB trimmed.
+_LOG_RECORD = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
+_MIN_SAVED_SHARE = 0.8      # a body this much found elsewhere is collapsed
+_SAVED_FILES = ("research.md", "runs.md", "audit.md", "evolution.md", "forecast.json")
+
+
+def saved_lines(run_root: str) -> set[str]:
+    """Every non-blank line (stripped) of the files a run saves for its
+    questions: the markdown files, forecast.json and the trace."""
+    lines: set[str] = set()
+    for question_dir in glob.glob(os.path.join(run_root, "*")):
+        if not os.path.isdir(question_dir):
+            continue
+        paths = [os.path.join(question_dir, name) for name in _SAVED_FILES]
+        trace_dir = os.path.join(question_dir, "trace")
+        if os.path.isdir(trace_dir):
+            paths += [os.path.join(trace_dir, name) for name in os.listdir(trace_dir)]
+        for path in paths:
+            if os.path.isfile(path):
+                with open(path, encoding="utf-8", errors="replace") as handle:
+                    lines.update(line.strip() for line in handle if line.strip())
+    return lines
+
+
+def trim_run_log(text: str, saved: set[str]) -> str:
+    """The run log with the bodies the run saves anyway collapsed to a note.
+
+    Every record's first line is kept. A body is collapsed only when at least
+    80% of its text is found, line for line, in ``saved``; even then, every
+    line of it that is NOT found is kept in place, so nothing unique is lost."""
+    records: list[list[str]] = []
+    for line in text.splitlines():
+        if _LOG_RECORD.match(line) or not records:
+            records.append([line])
+        else:
+            records[-1].append(line)
+    out: list[str] = []
+    for head, *body in records:
+        out.append(head)
+        chars = sum(len(line) for line in body if line.strip())
+        found = sum(len(line) for line in body if line.strip() and line.strip() in saved)
+        if not body or not chars or found / chars < _MIN_SAVED_SHARE:
+            out.extend(body)
+            continue
+        omitted = 0
+        for line in body:
+            if not line.strip() or line.strip() in saved:
+                omitted += 1
+                continue
+            if omitted:
+                out.append(f"    [{omitted} lines omitted: saved in this run's research, runs or trace files]")
+                omitted = 0
+            out.append(line)
+        if omitted:
+            out.append(f"    [{omitted} lines omitted: saved in this run's research, runs or trace files]")
+    return "\n".join(out) + ("\n" if text.endswith("\n") else "")
 
 
 def prepare(path: str, overrides: Overrides) -> Prepared:
@@ -295,7 +377,7 @@ def prepare(path: str, overrides: Overrides) -> Prepared:
                 blobs.append((f"{blob_prefix}/{name}.gz", _gzip(handle.read()), "application/gzip"))
     trace_dir = os.path.join(question_dir, "trace")
     if os.path.isdir(trace_dir) and os.listdir(trace_dir):
-        blobs.append((f"{blob_prefix}/trace.tar.gz", _tarball(trace_dir), "application/gzip"))
+        blobs.append((f"{blob_prefix}/{TRACE_FILE}", _tarball(trace_dir), "application/x-xz"))
 
     return Prepared(run_id, question_id, blob_prefix, run_row, forecast_row, llm_call_rows, blobs)
 
@@ -367,9 +449,10 @@ def publish_files(
             for blob_path, data, content_type in item.blobs:
                 client.upload(BUCKET, blob_path, data, content_type)
             if include_run_log:
-                with open(run_log, "rb") as handle:
-                    client.upload(BUCKET, f"runs/{item.run_id}/run.log.gz",
-                                  _gzip(handle.read()), "application/gzip")
+                with open(run_log, encoding="utf-8", errors="replace") as handle:
+                    trimmed = trim_run_log(handle.read(), saved_lines(os.path.dirname(run_log)))
+                client.upload(BUCKET, f"runs/{item.run_id}/run.log.gz",
+                              _gzip(trimmed.encode("utf-8")), "application/gzip")
             if item.run_id not in runs_done:
                 client.upsert("runs", [item.run_row], on_conflict="run_id")
             client.upsert("forecasts", [item.forecast_row], on_conflict="run_id,question_id")

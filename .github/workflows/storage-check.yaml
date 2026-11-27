@@ -1,0 +1,52 @@
+name: Check Supabase storage
+
+# Weekly: how full the Supabase project is (file storage exactly, the database
+# estimated). The job fails at 80% of either limit, so the failure email is the
+# warning. Limits default to the free plan; set the DATABASE_LIMIT_MB and
+# STORAGE_LIMIT_MB repository variables for another plan.
+
+"on":
+  workflow_dispatch:
+  schedule:
+    - cron: "41 4 * * 1" # Mondays, 04:41 UTC
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  storage_check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+          installer-parallel: true
+
+      - name: Load cached venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('**/poetry.lock') }}
+
+      - name: Install Python dependencies (Poetry)
+        run: poetry install --no-interaction --no-root
+
+      - name: Measure storage
+        run: poetry run python eval_tools/storage_check.py
+        env:
+          PYTHONUNBUFFERED: "1"
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          DATABASE_LIMIT_MB: ${{ vars.DATABASE_LIMIT_MB || '500' }}
+          STORAGE_LIMIT_MB: ${{ vars.STORAGE_LIMIT_MB || '1000' }}

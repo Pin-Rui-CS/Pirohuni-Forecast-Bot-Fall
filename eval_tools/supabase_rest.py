@@ -19,6 +19,8 @@ from typing import Any, Callable, Iterable
 import httpx
 
 _UPSERT_BATCH = 500
+_LIST_PAGE = 1000
+_DELETE_BATCH = 100
 # Every operation here is idempotent (uploads overwrite with x-upsert, upserts
 # merge on their conflict key, reads are reads), so a failed request can simply
 # be sent again. A single dropped connection used to fail the whole question
@@ -146,3 +148,32 @@ class SupabaseREST:
             content=data,
             headers={"Content-Type": content_type, "x-upsert": "true"},
         )
+
+    def list_objects(self, bucket: str, prefix: str = "") -> list[dict]:
+        """Every entry directly under ``prefix`` (files and folders), all pages.
+        A folder has no ``id``; a file's size is ``metadata.size``."""
+        entries: list[dict] = []
+        while True:
+            page = self._request(
+                "POST", f"/storage/v1/object/list/{bucket}", f"list {bucket}/{prefix}",
+                json={"prefix": prefix, "limit": _LIST_PAGE, "offset": len(entries)},
+            ).json()
+            entries.extend(page)
+            if len(page) < _LIST_PAGE:
+                return entries
+
+    def walk_files(self, bucket: str, prefix: str = "") -> Iterable[tuple[str, int]]:
+        """(path, size in bytes) of every file at or below ``prefix``."""
+        for entry in self.list_objects(bucket, prefix):
+            path = f"{prefix.rstrip('/')}/{entry['name']}" if prefix else entry["name"]
+            if entry.get("id") is None:
+                yield from self.walk_files(bucket, path + "/")
+            else:
+                yield path, int((entry.get("metadata") or {}).get("size") or 0)
+
+    def delete(self, bucket: str, paths: list[str]) -> None:
+        """Remove stored files. Used only by the storage-shrink finalize step."""
+        for start in range(0, len(paths), _DELETE_BATCH):
+            batch = paths[start:start + _DELETE_BATCH]
+            self._request("DELETE", f"/storage/v1/object/{bucket}",
+                          f"delete {len(batch)} files from {bucket}", json={"prefixes": batch})
